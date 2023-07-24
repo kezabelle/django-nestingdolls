@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import functools
 import inspect
 import logging
 from types import MappingProxyType
 from typing import Protocol, Mapping, Any, Iterable, Sequence
 
+from django.forms.fields import MultiValueField
 from django.utils.translation import gettext_lazy as _
 from django.core.exceptions import ValidationError
 from django.forms import BaseForm, Field
 from django.forms.boundfield import BoundField
 from django.forms.renderers import BaseRenderer
 from django.forms.utils import ErrorList
-from django.forms.widgets import Widget
+from django.forms.widgets import Widget, MultiWidget
 from django.http.request import QueryDict
 from django.utils.datastructures import MultiValueDict
 from django.utils.functional import Promise
@@ -35,35 +37,79 @@ class DictBoundField(BoundField):
     #     breakpoint()
     ...
 
+    @property
+    def data(self):
+        """
+        Return the data for this BoundField, or None if it wasn't given.
+        """
+        breakpoint()
+        return self.form._widget_data_value(self.field.widget, self.html_name)
 
-class DictWidget(Widget):
+
+class DictWidget(MultiWidget):
     """
     A widget is necessary because the BoundField is where data is fetched
     from during cleaning, and that ends up asking the Form for the data.
     🙄
     """
 
-    def value_from_datadict(
-        self,
-        data: QueryDict | MultiValueDict | Mapping[str, Any],
-        files,
-        name: str,
-    ):
-        # Normal Django POST data
-        if isinstance(data, MultiValueDict):
-            subdata = QueryDict(mutable=True)
-            # TODO: Is there a better way to do this?
-            for k in data:
-                if k.startswith(f"{name}[") and k[-1] == "]":
-                    newk = k.removeprefix(f"{name}[").rstrip("]")
-                    subdata[newk] = data[k]
-            return subdata
-        # Actual proper nested dictionary
-        elif isinstance(data, Mapping):
-            return super().value_from_datadict(data, files, name)
+    fields: tuple[tuple[str, Field], ...]
+    widgets_names: tuple[str, ...]
+    widgets: tuple[Widget, ...]
+
+    def __init__(self, subform: BaseForm, attrs=None):
+        """
+        The subform is will have been instantiated without access to any `data` or `files` etc.
+        """
+        self.fields = tuple(subform.fields.items())
+        self.widgets_names = tuple(f".{name}" for name, f in self.fields)
+        self.widgets = tuple(f.widget for name, f in self.fields)
+        super(MultiWidget, self).__init__(attrs)
+
+    def value_from_datadict(self, data, files, name):
+        breakpoint()
+        # TODO: less hacky pls?
+        return {
+            widget_name.removeprefix("."): widget.value_from_datadict(
+                data, files, name + widget_name
+            )
+            for widget_name, widget in zip(self.widgets_names, self.widgets)
+        }
+
+    # def __init__(self, **kwargs):
+    #     breakpoint()
+    #     super().__init__(**kwargs)
+
+    def decompress(self, value):
+        breakpoint()
+        return [None] * len(self.widgets_names)
+        # if value:
+        #     value = to_current_timezone(value)
+        #     return [value.date(), value.time()]
+        # return [None, None]
+
+    # def value_from_datadict(
+    #     self,
+    #     data: QueryDict | MultiValueDict | Mapping[str, Any],
+    #     files,
+    #     name: str,
+    # ):
+    #     # Normal Django POST data
+    #     if isinstance(data, MultiValueDict):
+    #         subdata = QueryDict(mutable=True)
+    #         # TODO: Is there a better way to do this?
+    #         for k in data:
+    #             if k.startswith(f"{name}[") and k[-1] == "]":
+    #                 newk = k.removeprefix(f"{name}[").rstrip("]")
+    #                 subdata[newk] = data[k]
+    #         return subdata
+    #     # Actual proper nested dictionary
+    #     elif isinstance(data, Mapping):
+    #         return super().value_from_datadict(data, files, name)
 
 
-class DictField(Field):
+class DictField(MultiValueField):
+    widget = DictWidget
     default_error_messages = MappingProxyType(
         {
             "invalid": _("Sub-form data is invalid"),
@@ -99,7 +145,15 @@ class DictField(Field):
         # use_required_attribute: bool | None = None,
         # renderer: BaseRenderer | None = None,
     ):
+        self.subform = subform
+        if bound_field_class is not None:
+            self.bound_field_class = bound_field_class
+        form = self._get_form_class()(**self._get_form_default_kwargs())
+        fields = tuple(form.fields.values())
+        widget = widget(subform=form)
         super().__init__(
+            fields,
+            require_all_fields=False,
             required=required,
             widget=widget,
             label=label,
@@ -113,9 +167,6 @@ class DictField(Field):
             label_suffix=label_suffix,
             template_name=template_name,
         )
-        self.subform = subform
-        if bound_field_class is not None:
-            self.bound_field_class = bound_field_class
 
     def _get_form_class(self):
         """
@@ -155,9 +206,9 @@ class DictField(Field):
         form_kwargs = {**form_default_kwargs, **{"data": data}}
         return form_class(**form_kwargs)
 
-    def get_bound_field(self, form: BaseForm, field_name: str):
-        """We need a custom bound field instance?"""
-        return self.bound_field_class(form, self, field_name)
+    # def get_bound_field(self, form: BaseForm, field_name: str):
+    #     """We need a custom bound field instance?"""
+    #     return self.bound_field_class(form, self, field_name)
 
     # To get data out of this field requires going through the following call chain,
     # which is ... kind of confusing 😮‍💨 but here we are:
@@ -174,26 +225,33 @@ class DictField(Field):
     #    -> DictField.validate
     #    -> DictField.run_validators
 
-    def to_python(self, value: MultiValueDict | Mapping[str, Any]) -> Mapping[str, Any]:
-        subform = self._get_form_instance(data=value)
-        valid = subform.is_valid()
-        value = subform.cleaned_data
-        # Force checking empty values + required manually because we have
-        # to return a dict here, but if we raise a validation error at this
-        # point the subsequent validate call won't run.
-        # TODO: Is this granular enough?
-        if not valid and self.required:
-            if self.required:
-                raise ValidationError(
-                    message=self.error_messages["required"], code="required"
-                )
-            raise ValidationError(
-                message=self.error_messages["invalid"], code="invalid"
-            )
-        return value
-        # if isinstance(value, MultiValueDict):
-        #     return value.dict()
-        # return value
+    def clean(self, value):
+        breakpoint()
+
+    def compress(self, data_list: Any) -> Any:
+        breakpoint()
+        return data_list
+
+    # def to_python(self, value: MultiValueDict | Mapping[str, Any]) -> Mapping[str, Any]:
+    #     subform = self._get_form_instance(data=value)
+    #     valid = subform.is_valid()
+    #     value = subform.cleaned_data
+    #     # Force checking empty values + required manually because we have
+    #     # to return a dict here, but if we raise a validation error at this
+    #     # point the subsequent validate call won't run.
+    #     # TODO: Is this granular enough?
+    #     if not valid and self.required:
+    #         if self.required:
+    #             raise ValidationError(
+    #                 message=self.error_messages["required"], code="required"
+    #             )
+    #         raise ValidationError(
+    #             message=self.error_messages["invalid"], code="invalid"
+    #         )
+    #     return value
+    # if isinstance(value, MultiValueDict):
+    #     return value.dict()
+    # return value
 
     # def validate(self, value: Mapping[str, Any]) -> None:
     #     pass
