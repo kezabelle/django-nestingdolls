@@ -53,6 +53,8 @@ class DictWidget(MultiWidget):
     🙄
     """
 
+    template_name = "django/forms/widgets/dictwidget.html"
+
     fields: tuple[tuple[str, Field], ...]
     widgets_names: tuple[str, ...]
     widgets: tuple[Widget, ...]
