@@ -15,6 +15,7 @@ from django.template import Context, Template
 from django.urls import path
 
 import nestingdolls
+from nestingdolls import ListField
 
 HERE = os.path.abspath(os.path.dirname(__file__))
 
@@ -22,12 +23,17 @@ if not settings.configured:
     settings.configure(
         SECRET_KEY="??????????????????????????????????????????????????????????",
         DEBUG=True,
-        INSTALLED_APPS=("django.contrib.staticfiles", "nestingdolls"),
+        INSTALLED_APPS=(
+            "django.contrib.staticfiles",
+            "nestingdolls",
+            "debug_toolbar",
+        ),
         ALLOWED_HOSTS=("*",),
         ROOT_URLCONF=__name__,
         MIDDLEWARE=(
             "django.middleware.gzip.GZipMiddleware",
             "django.middleware.http.ConditionalGetMiddleware",
+            "debug_toolbar.middleware.DebugToolbarMiddleware",
         ),
         USE_I18N=True,
         USE_TZ=True,
@@ -40,6 +46,9 @@ if not settings.configured:
                 "APP_DIRS": True,
                 "OPTIONS": {},
             },
+        ],
+        INTERNAL_IPS=[
+            "127.0.0.1",
         ],
     )
     django.setup()
@@ -56,38 +65,47 @@ def favicon_serve(request):
 
 
 def index(request: WSGIRequest) -> HttpResponse:
-    class GrandChildForm(forms.Form):
-        grandchild_name = forms.CharField()
-
-    class ChildForm(forms.Form):
-        child_name = forms.CharField()
-        born = forms.IntegerField()
-        grandchild = nestingdolls.DictField(
-            GrandChildForm,
-            required=False,
-            # label="Grandchild!",
-        )
+    # class GrandChildForm(forms.Form):
+    #     grandchild_name = forms.CharField()
+    #
+    # class ChildForm(forms.Form):
+    #     child_name = forms.CharField()
+    #     born = forms.IntegerField()
+    #     grandchild = nestingdolls.DictField(
+    #         GrandChildForm,
+    #         required=False,
+    #         # label="Grandchild!",
+    #     )
+    #
+    # class ParentForm(forms.Form):
+    #     parent_name = forms.CharField(required=True)
+    #     year_of_birth = forms.IntegerField(required=True)
+    #     parent = forms.BooleanField(required=False)
+    #     child1 = nestingdolls.DictField(
+    #         ChildForm,
+    #         label="Child Number 1",
+    #         label_suffix="!",
+    #     )
+    #     child2 = nestingdolls.DictField(
+    #         subform=ChildForm(
+    #             label_suffix="::",
+    #             use_required_attribute=False,
+    #         ),
+    #         required=False,
+    #     )
+    #
+    # form = ParentForm(
+    #     data=request.GET or None, files=None, initial={}, use_required_attribute=False
+    # )
 
     class ParentForm(forms.Form):
-        parent_name = forms.CharField(required=True)
-        year_of_birth = forms.IntegerField(required=True)
-        parent = forms.BooleanField(required=False)
-        child1 = nestingdolls.DictField(
-            ChildForm,
-            label="Child Number 1",
-            label_suffix="!",
-        )
-        child2 = nestingdolls.DictField(
-            subform=ChildForm(
-                label_suffix="::",
-                use_required_attribute=False,
-            ),
-            required=False,
-        )
+        values = ListField(forms.IntegerField(min_value=3), max_num=2)
+        emails = ListField(forms.EmailField())
 
     form = ParentForm(
-        data=request.GET or None, files=None, initial={}, use_required_attribute=False
+        data=request.GET or None, files=None, initial={"values": [1, 2, 3]}
     )
+
     output = MappingProxyType({})
     if form.is_valid():
         output = pprint.pformat(
@@ -172,10 +190,12 @@ def index(request: WSGIRequest) -> HttpResponse:
     )
 
 
+from debug_toolbar.toolbar import debug_toolbar_urls
+
 urlpatterns = [
     path("favicon.ico", favicon_serve, name="favicon"),
     path("", index, name="index"),
-]
+] + debug_toolbar_urls()
 
 if __name__ == "__main__":
     from django.core import management
