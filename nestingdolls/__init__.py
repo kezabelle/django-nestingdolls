@@ -5,6 +5,7 @@ import inspect
 import logging
 from functools import partial
 from statistics import median
+import string
 from types import MappingProxyType
 from typing import (
     Protocol,
@@ -25,7 +26,7 @@ from django.forms import BaseForm, Field
 from django.forms.boundfield import BoundField
 from django.forms.renderers import BaseRenderer
 from django.forms.utils import ErrorList, pretty_name
-from django.forms.widgets import Widget, MultiWidget
+from django.forms.widgets import Widget, MultiWidget, Media
 from django.http.request import QueryDict
 from django.utils.datastructures import MultiValueDict
 from django.utils.functional import Promise
@@ -51,38 +52,41 @@ NestedPrefix = NewType("NestedPrefix", str)
 
 
 class SequenceBoundField(BoundField):
-    def __init__(self, form, field, name):
-        super().__init__(form, field, name)
-        # Get item-level errors from the field and store on widget
-        item_errors = getattr(field, '_item_errors', {})
-        if isinstance(self.field.widget, SequenceWidget):
-            self.field.widget._item_errors = item_errors
-    
-    @property
-    def errors(self):
-        # Only show field-level errors (like "invalid")
-        # Item-level errors are passed to individual widgets
-        errors = super().errors
-        # Filter out any errors that are actually item-level errors
-        # The field should only show "invalid" type errors
-        return errors
+    __slots__ = ()
+
+    def __repr__(self):
+        return f"<{self.__class__.__qualname__} name={self.name!r}, label={self.label!r}, field={self.field!r}>"
+
+    def build_widget_attrs(self, base_attrs, extra_attrs=None):
+        attrs = super().build_widget_attrs(base_attrs, extra_attrs)
+        # Get item errors from field dynamically (set during validation)
+        item_errors = getattr(self.field, "_item_errors", {})
+        # Pass item errors, error_class, and renderer through attrs (will be extracted in get_context)
+        if item_errors and isinstance(self.field.widget, SequenceWidget):
+            attrs["_item_errors"] = item_errors
+            # Pass the form's error_class so we can use it for ErrorList
+            attrs["_error_class"] = getattr(self.form, "error_class", ErrorList)
+            attrs["_renderer"] = getattr(self.form, "renderer", None)
+        return attrs
 
 
 class SequenceField(Field):
     default_error_messages: ClassVar[_ErrorMessagesMapping] = MappingProxyType(
         {
-            "invalid": _("Enter a list of values."),
+            "invalid": _("Invalid values provided."),
         }
     )
     bound_field_class = SequenceBoundField
-    __slots__ = ()
+    __slots__ = ("child_field", "min_num", "max_num", "_item_errors")
+
+    _item_errors: Mapping[int, ValidationError]
 
     def __init__(
         self,
         child_field: Field,
         /,
         *,
-        min_num: int = 0,
+        min_num: int = 1,
         max_num: int = 1_000,
         widget: Widget | type[Widget] | None = None,
         label: _StrOrPromise | None = None,
@@ -105,8 +109,8 @@ class SequenceField(Field):
         self.require_all_fields = False
         if widget is None:
             widget = SequenceWidget(child_widget=self.child_field.widget)
-        widget.min_num = min_num
-        widget.max_num = max_num
+        self.min_num = widget.min_num = min_num
+        self.max_num = widget.max_num = max_num
         super().__init__(
             required=False,
             widget=widget,
@@ -123,14 +127,29 @@ class SequenceField(Field):
             bound_field_class=bound_field_class,
         )
 
-    def to_python(self, value) -> list[object]:
+    def __repr__(self):
+        return f"<{self.__class__.__qualname__} of {self.child_field.__class__.__qualname__}, min_num={self.min_num!r}, max_num={self.max_num!r}, required={self.required!r}, disabled={self.disabled!r}>"
+
+    def __deepcopy__(self, memo):
+        result = super().__deepcopy__(memo)
+        result.child_field = self.child_field.__deepcopy__(memo)
+        result.min_num = self.min_num
+        result.max_num = self.max_num
+        return result
+
+    def _reset_index_errors(self):
+        self._item_errors = {}
+
+    def to_python(self, value: Iterable[_StrOrPromise]) -> list[object]:
         if value in self.empty_values:
-            return ()
+            return []
         cleaned = []
         cleaner = self.child_field.clean
+        if not value:
+            value = (None,) * self.min_num
         # Track item-level errors by index
-        self._item_errors = {}
-        for index, v in enumerate(value):
+        self._reset_index_errors()
+        for index, v in enumerate(value[: self.max_num]):
             try:
                 cleaned.append(cleaner(v))
             except ValidationError as e:
@@ -139,25 +158,16 @@ class SequenceField(Field):
                 # Add None as placeholder for failed item
                 cleaned.append(None)
         return cleaned
-    
+
     def clean(self, value):
-        # Reset item errors before validation
-        self._item_errors = {}
-        try:
-            result = super().clean(value)
-            # If we have item errors after cleaning, raise ValidationError
-            # but keep item errors separate for widget rendering
-            if self._item_errors:
-                # Field is invalid due to item errors, but we keep them separate
-                raise ValidationError(self.error_messages["invalid"], code="invalid")
-            return result
-        except ValidationError as e:
-            # If it's not an item error case, re-raise as-is
-            if not self._item_errors:
-                raise
-            # If we have item errors, the field is invalid
-            # but item errors are stored separately
+        self._reset_index_errors()
+        # to_python() is called by super().clean() and will set _item_errors if needed
+        result = super().clean(value)
+        # If we have item errors after cleaning, raise ValidationError
+        # but keep item errors separate for widget rendering
+        if self._item_errors:
             raise ValidationError(self.error_messages["invalid"], code="invalid")
+        return result
 
 
 class FrozenSequenceField(SequenceField):
@@ -178,8 +188,40 @@ class SequenceWidget(Widget):
         self.child_widget = child_widget
         super().__init__(attrs)
 
-    def value_from_datadict(self, data, files, name):
-        return data.getlist(name)
+    def __repr__(self):
+        return f"<{self.__class__.__qualname__} of {self.child_widget.__class__.__qualname__}>"
+
+    def value_from_datadict(
+        self, data: MultiValueDict[str, object] | Mapping[str, object], files, name
+    ):
+        # TODO(later): Does this all make sense for a series of checkboxes etc?
+        getter = data.get
+        if isinstance(data, MultiValueDict):
+            getter = data.getlist
+        if name in data:
+            return getter(name)
+        # Get PHP style array inputs.
+        arrayish = f"{name}[]"
+        if arrayish in data:
+            return getter(arrayish)
+        values: list[tuple[int, object]] = []
+        for k in data:
+            # Get PHP style array inputs, where the value between the brackets is only digits.
+            # Ignore the index if it's not a valid integer.
+            # Stores the index for sorting later, but the *value* of the index won't be the position
+            # i.e.  given 0, 2, 4, 6 as indexes, you'd still only get 4 associated back, but in that order
+            #       even if submitted as 6, 0, 4, 2. But there won't be holes, such that index 1 is None.
+            if k.startswith(f"{name}[") and k.endswith("]"):
+                index = k.removesuffix("]").removeprefix(f"{name}[")
+                try:
+                    index = int(index)
+                except ValueError:
+                    continue
+                values.append((index, getter(k)))
+        if values:
+            # Take and sort the [0], [2] style array inputs, and then discard those to only give back the values.
+            return [x[1] for x in sorted(values, key=itemgetter(0))]
+        return None
 
     def build_attrs(self, base_attrs, extra_attrs=None):
         attrs = super().build_attrs(base_attrs, extra_attrs)
@@ -200,13 +242,18 @@ class SequenceWidget(Widget):
     def get_context(self, name, value, attrs):
         context = super().get_context(name, value, attrs)
         final_attrs = context["widget"]["attrs"]
+        # This is donkeyish and terrible, but I can't think of a better way tbh... (passed from BoundField)
+        item_errors = final_attrs.pop("_item_errors", {})
+        error_class = final_attrs.pop("_error_class", ErrorList)
+        renderer = final_attrs.pop("_renderer", None)
+        # Remove from final_attrs so they don't appear in HTML
         id_ = final_attrs.get("id")
         context["widget"]["min_num"] = self.min_num
         context["widget"]["max_num"] = self.max_num
         context["widget"]["subwidgets"] = subwidgets = []
-        # Get item errors if they exist
-        item_errors = getattr(self, '_item_errors', {})
         index = 0
+        if not value:
+            value = (None,) * self.min_num
         for index, item in enumerate(value[: self.max_num]):
             widget = self.child_widget
             if id_:
@@ -214,24 +261,26 @@ class SequenceWidget(Widget):
                 widget_attrs["id"] = "%s_%s" % (id_, index)
             else:
                 widget_attrs = final_attrs
-            
+
             # Attach error to this subwidget if it exists
-            widget_context = widget.get_context(
+            widget_context: Mapping[str, object] = widget.get_context(
                 name=name,
                 value=item,
                 attrs=widget_attrs,
-            )
+            )["widget"]
+
             if index in item_errors:
                 # Convert ValidationError to ErrorList format for widget
                 error = item_errors[index]
-                if isinstance(error, ValidationError):
-                    widget_context["widget"]["errors"] = error.error_list if hasattr(error, 'error_list') else ErrorList([error])
-                else:
-                    widget_context["widget"]["errors"] = ErrorList([error])
+                # error is always a ValidationError (from to_python)
+                # ValidationError.error_list is a list, convert to form's error_class with renderer
+                widget_context["errors"] = error_class(
+                    error.error_list, renderer=renderer
+                )
                 # Add aria-invalid attribute
-                widget_context["widget"]["attrs"]["aria-invalid"] = "true"
-            
-            subwidgets.append(widget_context["widget"])
+                widget_context["attrs"]["aria-invalid"] = "true"
+
+            subwidgets.append(widget_context)
 
         empty_attrs = final_attrs.copy()
         empty_attrs.pop("id", None)
@@ -255,7 +304,9 @@ class SequenceWidget(Widget):
 
     @property
     def media(self):
-        return self.child_widget.media
+        return self.child_widget.media + Media(
+            js=[],
+        )
 
     def __deepcopy__(self, memo):
         obj = super().__deepcopy__(memo)

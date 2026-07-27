@@ -100,7 +100,8 @@ def index(request: WSGIRequest) -> HttpResponse:
 
     class ParentForm(forms.Form):
         values = ListField(forms.IntegerField(min_value=3), max_num=2)
-        emails = ListField(forms.EmailField())
+        emails = ListField(forms.EmailField(), min_num=4)
+        others = ListField(forms.BooleanField(required=False), min_num=4)
 
     form = ParentForm(
         data=request.GET or None, files=None, initial={"values": [1, 2, 3]}
