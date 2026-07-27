@@ -1,93 +1,68 @@
 from __future__ import annotations
 
-import functools
-import inspect
-import logging
-from functools import partial
-from statistics import median
-import string
+from collections.abc import Iterable, Mapping
 from types import MappingProxyType
-from typing import (
-    Protocol,
-    Mapping,
-    Any,
-    Iterable,
-    Sequence,
-    cast,
-    NewType,
-    TYPE_CHECKING,
-    ClassVar,
-)
+from typing import Any, ClassVar, Sequence, TYPE_CHECKING
 
-from django.forms.fields import MultiValueField
-from django.utils.translation import gettext_lazy as _
-from django.core.exceptions import ValidationError, ImproperlyConfigured
-from django.forms import BaseForm, Field
+from django.core.exceptions import ImproperlyConfigured, ValidationError
+from django.forms import Field
 from django.forms.boundfield import BoundField
-from django.forms.renderers import BaseRenderer
-from django.forms.utils import ErrorList, pretty_name
-from django.forms.widgets import Widget, MultiWidget, Media
-from django.http.request import QueryDict
-from django.utils.datastructures import MultiValueDict
-from django.utils.functional import Promise
+from django.forms.widgets import MultipleHiddenInput, Widget
+from django.utils.translation import gettext_lazy as _, ngettext_lazy
 
 if TYPE_CHECKING:
-    from django.utils.functional import _StrOrPromise
     from django.core.validators import _ValidatorCallable
     from django.db.models.fields import _ErrorMessagesMapping
-
-logger = logging.getLogger(__name__)
+    from django.utils.functional import _StrOrPromise
 
 __all__ = [
     "SequenceField",
     "FrozenSequenceField",
-    "FormField",  # Alias
-    "FrozenFormField",  # Alias
-    "ListField",  # Alias
-    "TupleField",  # Alias
+    "ListField",
+    "TupleField",
+    "SetField",
 ]
 
 
-NestedPrefix = NewType("NestedPrefix", str)
-
-
 class SequenceBoundField(BoundField):
-    __slots__ = ()
-
-    def __repr__(self):
-        return f"<{self.__class__.__qualname__} name={self.name!r}, label={self.label!r}, field={self.field!r}>"
-
-    def build_widget_attrs(self, base_attrs, extra_attrs=None):
-        attrs = super().build_widget_attrs(base_attrs, extra_attrs)
-        # Get item errors from field dynamically (set during validation)
-        item_errors = getattr(self.field, "_item_errors", {})
-        # Pass item errors, error_class, and renderer through attrs (will be extracted in get_context)
-        if item_errors and isinstance(self.field.widget, SequenceWidget):
-            attrs["_item_errors"] = item_errors
-            # Pass the form's error_class so we can use it for ErrorList
-            attrs["_error_class"] = getattr(self.form, "error_class", ErrorList)
-            attrs["_renderer"] = getattr(self.form, "renderer", None)
+    def build_widget_attrs(self, attrs, widget=None):
+        attrs = super().build_widget_attrs(attrs, widget)
+        widget = widget or self.field.widget
+        if isinstance(widget, SequenceWidget) and self.field._item_errors:
+            attrs["_item_errors"] = self.field._item_errors
         return attrs
 
 
 class SequenceField(Field):
     default_error_messages: ClassVar[_ErrorMessagesMapping] = MappingProxyType(
         {
-            "invalid": _("Invalid values provided."),
+            "invalid": _("Enter a list of values."),
+            "invalid_items": _("One or more values are invalid."),
+            "min_num": ngettext_lazy(
+                "Ensure this value has at least %(limit_value)d item (it has %(show_value)d).",
+                "Ensure this value has at least %(limit_value)d items (it has %(show_value)d).",
+                "limit_value",
+            ),
+            "max_num": ngettext_lazy(
+                "Ensure this value has at most %(limit_value)d item (it has %(show_value)d).",
+                "Ensure this value has at most %(limit_value)d items (it has %(show_value)d).",
+                "limit_value",
+            ),
+            "unhashable": _("Set items must be hashable."),
         }
     )
     bound_field_class = SequenceBoundField
+    hidden_widget = MultipleHiddenInput
     __slots__ = ("child_field", "min_num", "max_num", "_item_errors")
-
-    _item_errors: Mapping[int, ValidationError]
 
     def __init__(
         self,
         child_field: Field,
         /,
         *,
-        min_num: int = 1,
+        min_num: int | None = None,
         max_num: int = 1_000,
+        required: bool | None = None,
         widget: Widget | type[Widget] | None = None,
         label: _StrOrPromise | None = None,
         initial: Any | None = None,
@@ -103,16 +78,56 @@ class SequenceField(Field):
     ):
         if not isinstance(child_field, Field):
             raise ImproperlyConfigured(
-                "child_field argument for ListField must be a forms.Field instance"
+                "child_field argument for SequenceField must be a forms.Field instance"
             )
+        if min_num is None:
+            min_num = 0 if required is False else 1
+        if required is None:
+            required = min_num > 0
+        if (
+            isinstance(min_num, bool)
+            or isinstance(max_num, bool)
+            or not isinstance(required, bool)
+            or not isinstance(min_num, int)
+            or not isinstance(max_num, int)
+            or min_num < 0
+            or max_num < min_num
+        ):
+            raise ValueError("min_num and max_num must be non-negative integers")
+        if required != (min_num > 0):
+            raise ValueError("required and min_num must agree")
+
         self.child_field = child_field
-        self.require_all_fields = False
+        self.min_num = min_num
+        self.max_num = max_num
+        self._reset_item_errors()
+        if localize:
+            self.child_field.localize = True
+            self.child_field.widget.is_localized = True
+
         if widget is None:
-            widget = SequenceWidget(child_widget=self.child_field.widget)
-        self.min_num = widget.min_num = min_num
-        self.max_num = widget.max_num = max_num
+            widget = SequenceWidget(
+                child_field.widget,
+                min_num=min_num,
+                max_num=max_num,
+            )
+        elif isinstance(widget, SequenceWidget):
+            widget.min_num = min_num
+            widget.max_num = max_num
+        else:
+            child_widget = widget() if isinstance(widget, type) else widget
+            child_widget.is_required = self.child_field.required
+            if localize:
+                child_widget.is_localized = True
+            child_widget.attrs.update(self.child_field.widget_attrs(child_widget))
+            widget = SequenceWidget(
+                child_widget,
+                min_num=min_num,
+                max_num=max_num,
+            )
+
         super().__init__(
-            required=False,
+            required=required,
             widget=widget,
             label=label,
             initial=initial,
@@ -127,172 +142,185 @@ class SequenceField(Field):
             bound_field_class=bound_field_class,
         )
 
-    def __repr__(self):
-        return f"<{self.__class__.__qualname__} of {self.child_field.__class__.__qualname__}, min_num={self.min_num!r}, max_num={self.max_num!r}, required={self.required!r}, disabled={self.disabled!r}>"
-
     def __deepcopy__(self, memo):
         result = super().__deepcopy__(memo)
         result.child_field = self.child_field.__deepcopy__(memo)
-        result.min_num = self.min_num
-        result.max_num = self.max_num
+        result._reset_item_errors()
         return result
 
-    def _reset_index_errors(self):
-        self._item_errors = {}
+    def _reset_item_errors(self):
+        self._item_errors: dict[int, ValidationError] = {}
 
-    def to_python(self, value: Iterable[_StrOrPromise]) -> list[object]:
-        if value in self.empty_values:
-            return []
-        cleaned = []
-        cleaner = self.child_field.clean
-        if not value:
-            value = (None,) * self.min_num
-        # Track item-level errors by index
-        self._reset_index_errors()
-        for index, v in enumerate(value[: self.max_num]):
-            try:
-                cleaned.append(cleaner(v))
-            except ValidationError as e:
-                # Store the error for this specific item index
-                self._item_errors[index] = e
-                # Add None as placeholder for failed item
-                cleaned.append(None)
-        return cleaned
+    def to_python(self, value: object) -> list[object]:
+        if isinstance(value, Mapping):
+            raise ValidationError(self.error_messages["invalid"], code="invalid")
+        if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
+            if value in self.empty_values:
+                return []
+            raise ValidationError(self.error_messages["invalid"], code="invalid")
+        return list(value)
+
+    def validate(self, value):
+        super().validate(value)
+        length = len(value)
+        if length < self.min_num:
+            raise ValidationError(
+                self.error_messages["min_num"],
+                code="min_num",
+                params={"limit_value": self.min_num, "show_value": length},
+            )
+        if length > self.max_num:
+            raise ValidationError(
+                self.error_messages["max_num"],
+                code="max_num",
+                params={"limit_value": self.max_num, "show_value": length},
+            )
 
     def clean(self, value):
-        self._reset_index_errors()
-        # to_python() is called by super().clean() and will set _item_errors if needed
-        result = super().clean(value)
-        # If we have item errors after cleaning, raise ValidationError
-        # but keep item errors separate for widget rendering
+        self._reset_item_errors()
+        value = self.to_python(value)
+        self.validate(value)
+
+        cleaned_data = []
+        for index, item in enumerate(value):
+            try:
+                cleaned_data.append(self.child_field.clean(item))
+            except ValidationError as error:
+                self._item_errors[index] = error
+
         if self._item_errors:
-            raise ValidationError(self.error_messages["invalid"], code="invalid")
+            raise ValidationError(
+                self.error_messages["invalid_items"],
+                code="invalid_items",
+            )
+
+        result = self.compress(cleaned_data)
+        self.run_validators(result)
         return result
 
+    def compress(self, data_list: list[object]) -> list[object]:
+        return data_list
 
-class FrozenSequenceField(SequenceField):
-    def to_python(self, value) -> tuple[object, ...]:
-        return tuple(super().to_python(value))
+    def has_changed(self, initial, data):
+        if self.disabled:
+            return False
+        try:
+            initial = self.compress(
+                [self.child_field.to_python(item) for item in self.to_python(initial)]
+            )
+            data = self.compress(
+                [self.child_field.to_python(item) for item in self.to_python(data)]
+            )
+        except (TypeError, ValidationError):
+            return True
+        return initial != data
+
+
+class ListField(SequenceField):
+    pass
+
+
+class TupleField(SequenceField):
+    def compress(self, data_list: list[object]) -> tuple[object, ...]:
+        return tuple(data_list)
+
+
+class FrozenSequenceField(TupleField):
+    pass
+
+
+class SetField(SequenceField):
+    def compress(self, data_list: list[object]) -> set[object]:
+        try:
+            return set(data_list)
+        except TypeError as error:
+            raise ValidationError(
+                self.error_messages["unhashable"],
+                code="unhashable",
+            ) from error
 
 
 class SequenceWidget(Widget):
     template_name = "django/forms/widgets/sequence.html"
     use_fieldset = True
 
-    min_num: int
-    max_num: int
-
-    __slots__ = ()
-
-    def __init__(self, child_widget, attrs=None):
+    def __init__(self, child_widget: Widget, *, min_num: int, max_num: int, attrs=None):
         self.child_widget = child_widget
+        self.min_num = min_num
+        self.max_num = max_num
         super().__init__(attrs)
 
-    def __repr__(self):
-        return f"<{self.__class__.__qualname__} of {self.child_widget.__class__.__qualname__}>"
+    def value_from_datadict(self, data, files, name):
+        source = data
+        if self.child_widget.needs_multipart_form and files is not None and name in files:
+            source = files
 
-    def value_from_datadict(
-        self, data: MultiValueDict[str, object] | Mapping[str, object], files, name
-    ):
-        # TODO(later): Does this all make sense for a series of checkboxes etc?
-        getter = data.get
-        if isinstance(data, MultiValueDict):
-            getter = data.getlist
-        if name in data:
+        getter = getattr(source, "getlist", source.get)
+        if name in source:
             return getter(name)
-        # Get PHP style array inputs.
-        arrayish = f"{name}[]"
-        if arrayish in data:
-            return getter(arrayish)
-        values: list[tuple[int, object]] = []
-        for k in data:
-            # Get PHP style array inputs, where the value between the brackets is only digits.
-            # Ignore the index if it's not a valid integer.
-            # Stores the index for sorting later, but the *value* of the index won't be the position
-            # i.e.  given 0, 2, 4, 6 as indexes, you'd still only get 4 associated back, but in that order
-            #       even if submitted as 6, 0, 4, 2. But there won't be holes, such that index 1 is None.
-            if k.startswith(f"{name}[") and k.endswith("]"):
-                index = k.removesuffix("]").removeprefix(f"{name}[")
-                try:
-                    index = int(index)
-                except ValueError:
-                    continue
-                values.append((index, getter(k)))
-        if values:
-            # Take and sort the [0], [2] style array inputs, and then discard those to only give back the values.
-            return [x[1] for x in sorted(values, key=itemgetter(0))]
-        return None
 
-    def build_attrs(self, base_attrs, extra_attrs=None):
-        attrs = super().build_attrs(base_attrs, extra_attrs)
-        # Remove aria-invalid applied by BoundField
-        attrs.pop("aria-invalid", None)
-        attrs.pop("aria-describedby", None)
-        return attrs
+        array_name = f"{name}[]"
+        if array_name in source:
+            return getter(array_name)
 
-    def subwidgets(self, name, value, attrs=None):
-        value = value or []
-        for item in value:
-            yield self.child_widget.get_context(
-                name=name,
-                value=item,
-                attrs=attrs,
-            )["widget"]
+        values = []
+        for key in source:
+            if not key.startswith(f"{name}[") or not key.endswith("]"):
+                continue
+            try:
+                index = int(key.removeprefix(f"{name}[").removesuffix("]"))
+            except ValueError:
+                continue
+            values.append((index, source.get(key)))
+        return [value for _, value in sorted(values)] if values else None
 
     def get_context(self, name, value, attrs):
         context = super().get_context(name, value, attrs)
+        if self.is_localized:
+            self.child_widget.is_localized = True
+
         final_attrs = context["widget"]["attrs"]
-        # This is donkeyish and terrible, but I can't think of a better way tbh... (passed from BoundField)
         item_errors = final_attrs.pop("_item_errors", {})
-        error_class = final_attrs.pop("_error_class", ErrorList)
-        renderer = final_attrs.pop("_renderer", None)
-        # Remove from final_attrs so they don't appear in HTML
+        final_attrs.pop("aria-invalid", None)
+        final_attrs.pop("required", None)
+
+        if value is None or value == "":
+            values = [None] * self.min_num
+        elif isinstance(value, (str, bytes)):
+            values = [value]
+        else:
+            try:
+                values = list(value)
+            except TypeError:
+                values = [value]
+            if not values:
+                values = [None] * self.min_num
+
         id_ = final_attrs.get("id")
-        context["widget"]["min_num"] = self.min_num
-        context["widget"]["max_num"] = self.max_num
-        context["widget"]["subwidgets"] = subwidgets = []
-        index = 0
-        if not value:
-            value = (None,) * self.min_num
-        for index, item in enumerate(value[: self.max_num]):
-            widget = self.child_widget
+        subwidgets = []
+        for index, item in enumerate(values):
+            widget_attrs = final_attrs.copy()
             if id_:
-                widget_attrs = final_attrs.copy()
-                widget_attrs["id"] = "%s_%s" % (id_, index)
-            else:
-                widget_attrs = final_attrs
+                widget_attrs["id"] = f"{id_}_{index}"
+            if (
+                self.child_widget.is_required
+                and self.child_widget.use_required_attribute(item)
+            ):
+                widget_attrs["required"] = True
 
-            # Attach error to this subwidget if it exists
-            widget_context: Mapping[str, object] = widget.get_context(
-                name=name,
-                value=item,
-                attrs=widget_attrs,
-            )["widget"]
+            subwidget = self.child_widget.get_context(name, item, widget_attrs)[
+                "widget"
+            ]
+            if error := item_errors.get(index):
+                subwidget["attrs"]["aria-invalid"] = "true"
+                subwidget["errors"] = error.messages
+            subwidgets.append(subwidget)
 
-            if index in item_errors:
-                # Convert ValidationError to ErrorList format for widget
-                error = item_errors[index]
-                # error is always a ValidationError (from to_python)
-                # ValidationError.error_list is a list, convert to form's error_class with renderer
-                widget_context["errors"] = error_class(
-                    error.error_list, renderer=renderer
-                )
-                # Add aria-invalid attribute
-                widget_context["attrs"]["aria-invalid"] = "true"
-
-            subwidgets.append(widget_context)
-
-        empty_attrs = final_attrs.copy()
-        empty_attrs.pop("id", None)
-        context["widget"]["emptywidget"] = self.child_widget.get_context(
-            name=name,
-            value=None,
-            attrs=empty_attrs,
-        )["widget"]
+        context["widget"]["subwidgets"] = subwidgets
         return context
 
-    def use_required_attribute(self, initial):
-        return False
+    def id_for_label(self, id_):
+        return ""
 
     @property
     def is_hidden(self):
@@ -304,18 +332,9 @@ class SequenceWidget(Widget):
 
     @property
     def media(self):
-        return self.child_widget.media + Media(
-            js=[],
-        )
+        return self.child_widget.media
 
     def __deepcopy__(self, memo):
         obj = super().__deepcopy__(memo)
         obj.child_widget = self.child_widget.__deepcopy__(memo)
         return obj
-
-
-class FrozenSequenceField(SequenceField): ...
-
-
-ListField = SequenceField
-TupleField = FrozenSequenceField

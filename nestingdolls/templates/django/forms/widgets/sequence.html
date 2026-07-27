@@ -1,25 +1,6 @@
 {% spaceless %}
-<pre style="white-space: pre-wrap">{{widget}}</pre>
-<hr>
-    <!--
-    <input type="hidden" name="{{ widget.name }}-MIN_NUM" id="{{ widget.attrs.id|default:widget.name }}-MIN_NUM" value="{{ widget.min_num }}">
-    <input type="hidden" name="{{ widget.name }}-MAX_NUM" id="{{ widget.attrs.id|default:widget.name }}-MAX_NUM" value="{{ widget.max_num }}">
-    -->
-    {% for subwidget in widget.subwidgets %}
-        <div class="sequence-item">
-            {% include subwidget.template_name with widget=subwidget only %}
-            {% if subwidget.errors %}
-                <ul class="errorlist">
-                    {% for error in subwidget.errors %}
-                        <li>{{ error }}</li>
-                    {% endfor %}
-                </ul>
-            {% endif %}
-        </div>
-    {% endfor %}
-    {% if widget.emptywidget %}
-    <template id="{{ widget.emptywidget.name }}-empty">
-        {% include widget.emptywidget.template_name with widget=widget.emptywidget only %}
-    </template>
-    {% endif %}
+{% for subwidget in widget.subwidgets %}
+{% include subwidget.template_name with widget=subwidget only %}
+{% for error in subwidget.errors %}<span class="errorlist">{{ error }}</span>{% endfor %}
+{% endfor %}
 {% endspaceless %}
