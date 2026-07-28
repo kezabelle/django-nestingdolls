@@ -1,6 +1,27 @@
+{% load i18n %}
 {% spaceless %}
-{% for subwidget in widget.subwidgets %}
-{% include subwidget.template_name with widget=subwidget only %}
-{% for error in subwidget.errors %}<span class="errorlist">{{ error }}</span>{% endfor %}
-{% endfor %}
+<div class="sequence-widget" data-sequence-widget data-sequence-maximum="{{ widget.maximum_forms }}" data-sequence-initial-count="{{ widget.initial_count }}">
+  <input type="hidden" name="{{ widget.management_name }}" value="{{ widget.total_forms }}" data-sequence-total{% if widget.disabled %} disabled{% endif %}>
+  <div data-sequence-rows>
+    {% for row in widget.rows %}
+      <div data-sequence-row data-sequence-index="{{ row.index }}">
+        <input type="hidden" name="{{ row.delete_name }}" value="" data-sequence-delete{% if widget.disabled %} disabled{% endif %}>
+        {% include row.subwidget.template_name with widget=row.subwidget only %}
+        {% if row.errors %}<ul class="errorlist"{% if row.error_id %} id="{{ row.error_id }}"{% endif %}>{% for error in row.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+        <button type="button" data-sequence-remove{% if widget.disabled %} disabled{% endif %}>{% translate "Remove" %}</button>
+      </div>
+    {% endfor %}
+  </div>
+  {% for row in widget.deleted_rows %}
+    <input type="hidden" name="{{ row.delete_name }}" value="1" data-sequence-deleted-row{% if widget.disabled %} disabled{% endif %}>
+  {% endfor %}
+  <template data-sequence-empty-row>
+    <div data-sequence-row data-sequence-index="{{ widget.empty_row.index }}">
+      <input type="hidden" name="{{ widget.empty_row.delete_name }}" value="" data-sequence-delete>
+      {% include widget.empty_row.subwidget.template_name with widget=widget.empty_row.subwidget only %}
+      <button type="button" data-sequence-remove>{% translate "Remove" %}</button>
+    </div>
+  </template>
+  <button type="button" data-sequence-add{% if widget.disabled %} disabled{% endif %}>{% translate "Add another" %}</button>
+</div>
 {% endspaceless %}
