@@ -21,7 +21,8 @@ from django.forms.formsets import (
     TOTAL_FORM_COUNT,
 )
 from django.forms.widgets import Media, MultipleHiddenInput, Widget
-from django.utils.functional import Promise
+from django.utils.datastructures import MultiValueDict
+from django.utils.functional import Promise, cached_property
 from django.utils.translation import gettext_lazy as _, ngettext_lazy
 
 __all__ = [
@@ -30,6 +31,7 @@ __all__ = [
     "ListField",
     "TupleField",
     "SetField",
+    "FrozenSetField",
     "SequenceWidget",
     "SequenceBoundField",
 ]
@@ -78,6 +80,56 @@ class SequenceBoundField(BoundField):
                 row["subwidget"]["attrs"]["aria-invalid"] = "true"
         return widget._render(widget.template_name, context, self.form.renderer)
 
+    @cached_property
+    def _normalized_data(self):
+        return self.field.widget.normalize_data(self.form.data, self.html_name)
+
+    @cached_property
+    def _normalized_files(self):
+        if not self.form.files:
+            return MultiValueDict()
+        return self.field.widget.normalize_data(self.form.files, self.html_name)
+
+    @cached_property
+    def data(self):
+        return self.field.widget._value_from_normalized_data(
+            self._normalized_data,
+            self._normalized_files,
+            self.html_name,
+        )
+
+    @cached_property
+    def initial(self):
+        if self.name in self.form.initial:
+            value = self.form.get_initial_for_field(self.field, self.name)
+            return self._normalized_initial(value)
+
+        if self.form.initial:
+            normalized_initial = self.field.widget.normalize_data(
+                self.form.initial, self.name
+            )
+            if normalized_initial:
+                return self.field.widget._value_from_normalized_data(
+                    normalized_initial,
+                    MultiValueDict(),
+                    self.name,
+                )
+        return self._normalized_initial(
+            self.form.get_initial_for_field(self.field, self.name)
+        )
+
+    def _normalized_initial(self, value):
+        if not isinstance(value, Mapping):
+            return value
+        normalized_initial = self.field.widget.normalize_data(value, self.name)
+        if not normalized_initial:
+            return value
+        return self.field.widget._value_from_normalized_data(
+            normalized_initial,
+            MultiValueDict(),
+            self.name,
+        )
+
     def _deleted_indexes(self) -> set[int]:
         """Return submitted deleted rows, as ``BaseFormSet.deleted_forms`` does."""
         if not isinstance(self.field.widget, SequenceWidget):
@@ -85,7 +137,9 @@ class SequenceBoundField(BoundField):
         return {
             index
             for index in range(len(self.data))
-            if self.form.data.get(f"{self.html_name}-{index}-{DELETION_FIELD_NAME}")
+            if self._normalized_data.get(
+                f"{self.html_name}-{index}-{DELETION_FIELD_NAME}"
+            )
             == "1"
         }
 
@@ -159,7 +213,7 @@ class SequenceField(Field):
             raise ValueError("min_length and max_length must be non-negative integers")
         if not isinstance(required, bool):
             raise TypeError("required must be a bool")
-        if initial is not None and not callable(initial):
+        if initial is not None and not callable(initial) and not isinstance(initial, Mapping):
             initial_values = self._initial_values(initial)
             if len(initial_values) > max_length:
                 raise ValueError("initial must not contain more than max_length values")
@@ -296,22 +350,26 @@ class SequenceField(Field):
         if self.disabled:
             return self._clean_values(initial_values, initial_values)
 
-        management_form = ManagementForm(
-            bound_field.form.data,
-            prefix=bound_field.html_name,
-        )
-        if not management_form.is_valid():
-            raise ValidationError(
-                self.error_messages["missing_management_form"],
-                code="missing_management_form",
-                params={
-                    "field_names": ", ".join(
-                        management_form.add_prefix(field_name)
-                        for field_name in management_form.errors
-                    )
-                },
+        if bound_field._normalized_data:
+            management_form = ManagementForm(
+                bound_field._normalized_data,
+                prefix=bound_field.html_name,
             )
-        if management_form.cleaned_data[TOTAL_FORM_COUNT] > self.absolute_max:
+            if not management_form.is_valid():
+                raise ValidationError(
+                    self.error_messages["missing_management_form"],
+                    code="missing_management_form",
+                    params={
+                        "field_names": ", ".join(
+                            management_form.add_prefix(field_name)
+                            for field_name in management_form.errors
+                        )
+                    },
+                )
+            total_forms = management_form.cleaned_data[TOTAL_FORM_COUNT]
+        else:
+            total_forms = 0
+        if total_forms > self.absolute_max:
             raise ValidationError(
                 self.error_messages["too_many_forms"],
                 code="too_many_forms",
@@ -322,7 +380,7 @@ class SequenceField(Field):
         deleted_indexes = frozenset(
             index
             for index in range(len(values))
-            if bound_field.form.data.get(
+            if bound_field._normalized_data.get(
                 f"{bound_field.html_name}-{index}-{DELETION_FIELD_NAME}"
             )
             == "1"
@@ -408,9 +466,11 @@ class SetField(SequenceField):
         "unhashable": _("Set items must be hashable."),
     }
 
-    def compress(self, data_list: list[object]) -> set[object]:
+    collection_type = set
+
+    def compress(self, data_list: list[object]) -> set[object] | frozenset[object]:
         try:
-            return set(data_list)
+            return self.collection_type(data_list)
         except TypeError as error:
             raise ValidationError(
                 self.error_messages["unhashable"], code="unhashable"
@@ -451,6 +511,10 @@ class SetField(SequenceField):
         return bool(unmatched)
 
 
+class FrozenSetField(SetField):
+    collection_type = frozenset
+
+
 SequenceField = ListField
 
 
@@ -481,9 +545,16 @@ class SequenceWidget(Widget):
         return False
 
     def value_from_datadict(self, data, files, name):
-        raw_total = data.get(f"{name}-{TOTAL_FORM_COUNT}")
+        normalized_data = self.normalize_data(data, name)
+        normalized_files = self.normalize_data(files, name) if files else files
+        return self._value_from_normalized_data(normalized_data, normalized_files, name)
+
+    def _value_from_normalized_data(self, data, files, name):
+        if name in data:
+            return data.get(name)
+        management_name = f"{name}-{TOTAL_FORM_COUNT}"
         try:
-            total_forms = int(raw_total)
+            total_forms = int(data.get(management_name, 0))
         except (TypeError, ValueError):
             return []
         if total_forms < 0 or total_forms > self.absolute_max:
@@ -496,7 +567,101 @@ class SequenceWidget(Widget):
         return values
 
     def value_omitted_from_data(self, data, files, name):
-        return f"{name}-{TOTAL_FORM_COUNT}" not in data
+        return not self.normalize_data(data, name)
+
+    def normalize_data(self, data, name) -> MultiValueDict:
+        """Convert every accepted sequence spelling into canonical widget data."""
+        normalized = MultiValueDict()
+        management_names = {
+            f"{name}-{TOTAL_FORM_COUNT}",
+            f"{name}-{INITIAL_FORM_COUNT}",
+            f"{name}-{MIN_NUM_FORM_COUNT}",
+            f"{name}-{MAX_NUM_FORM_COUNT}",
+        }
+        has_management_data = False
+        direct_value = None
+        for key in data:
+            if key == name:
+                direct_value = self._value_list(data, key)
+                normalized.setlist(name, [direct_value])
+            elif key in management_names:
+                has_management_data = True
+                normalized.setlist(key, self._values(data, key))
+            else:
+                canonical_key = self._canonical_row_key(key, name)
+                if canonical_key is not None:
+                    normalized.setlist(canonical_key, self._values(data, key))
+        if normalized and not has_management_data:
+            total_forms = (
+                len(direct_value)
+                if isinstance(direct_value, list)
+                else self._indexed_row_count(normalized, name)
+            )
+            normalized.setlist(f"{name}-{TOTAL_FORM_COUNT}", [str(total_forms)])
+            normalized.setlist(f"{name}-{INITIAL_FORM_COUNT}", ["0"])
+        return normalized
+
+    def _indexed_row_count(self, data, name) -> int:
+        prefix = f"{name}-"
+        largest_index = -1
+        for key in data:
+            if not isinstance(key, str) or not key.startswith(prefix):
+                continue
+            suffix = key.removeprefix(prefix)
+            index_end = 0
+            while index_end < len(suffix) and suffix[index_end].isdigit():
+                index_end += 1
+            if not index_end or (
+                index_end < len(suffix) and suffix[index_end] not in "_-"
+            ):
+                continue
+            index = int(suffix[:index_end])
+            if index >= self.absolute_max:
+                return self.absolute_max + 1
+            largest_index = max(largest_index, index)
+        return largest_index + 1
+
+    @staticmethod
+    def _values(data, key):
+        try:
+            return data.getlist(key)
+        except AttributeError:
+            value = data.get(key)
+            return value if isinstance(value, list) else [value]
+
+    @staticmethod
+    def _value_list(data, key):
+        try:
+            value = data.getlist(key)
+        except AttributeError:
+            value = data.get(key)
+        return list(value) if isinstance(value, (list, tuple)) else value
+
+    @staticmethod
+    def _canonical_row_key(key, name) -> str | None:
+        if not isinstance(key, str):
+            return None
+        for separator in ("-", ".", "["):
+            prefix = f"{name}{separator}"
+            if not key.startswith(prefix):
+                continue
+            suffix = key.removeprefix(prefix)
+            index_end = 0
+            while index_end < len(suffix) and suffix[index_end].isdigit():
+                index_end += 1
+            if not index_end:
+                return None
+            index = suffix[:index_end]
+            if separator == "[":
+                if index_end == len(suffix) or suffix[index_end] != "]":
+                    return None
+                suffix = suffix[index_end + 1 :]
+            else:
+                suffix = suffix[index_end:]
+                if suffix and suffix[0] not in "_-":
+                    return None
+            return f"{name}-{index}{suffix}"
+        return None
 
     def get_context(self, name, value, attrs):
         context = super().get_context(name, value, attrs)
