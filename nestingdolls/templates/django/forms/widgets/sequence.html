@@ -1,13 +1,15 @@
 {% load i18n %}
 {% spaceless %}
-<div class="sequence-widget" data-sequence-widget data-sequence-maximum="{{ widget.maximum_forms }}" data-sequence-initial-count="{{ widget.initial_count }}">
-  <input type="hidden" name="{{ widget.management_name }}" value="{{ widget.total_forms }}" data-sequence-total{% if widget.disabled %} disabled{% endif %}>
+<div class="sequence-widget" data-sequence-widget data-sequence-maximum="{{ widget.maximum_forms }}" data-sequence-absolute-maximum="{{ widget.absolute_maximum_forms }}">
+  {% for management_field in widget.management_form.hidden_fields %}
+    {{ management_field }}
+  {% endfor %}
   <div data-sequence-rows>
     {% for row in widget.rows %}
       <div data-sequence-row data-sequence-index="{{ row.index }}">
         <input type="hidden" name="{{ row.delete_name }}" value="" data-sequence-delete{% if widget.disabled %} disabled{% endif %}>
         {% include row.subwidget.template_name with widget=row.subwidget only %}
-        {% if row.errors %}<ul class="errorlist"{% if row.error_id %} id="{{ row.error_id }}"{% endif %}>{% for error in row.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+        {% if row.errors %}<ul class="errorlist">{% for error in row.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
         <button type="button" data-sequence-remove{% if widget.disabled %} disabled{% endif %}>{% translate "Remove" %}</button>
       </div>
     {% endfor %}

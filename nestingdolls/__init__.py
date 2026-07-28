@@ -2,13 +2,26 @@ from __future__ import annotations
 
 import copy
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Iterable
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.forms import Field
 from django.forms.boundfield import BoundField
+from django.forms.fields import FileField
+from django.forms.formsets import (
+    BaseFormSet,
+    DEFAULT_MAX_NUM,
+    DEFAULT_MIN_NUM,
+    DELETION_FIELD_NAME,
+    INITIAL_FORM_COUNT,
+    MAX_NUM_FORM_COUNT,
+    MIN_NUM_FORM_COUNT,
+    ManagementForm,
+    TOTAL_FORM_COUNT,
+)
 from django.forms.widgets import Media, MultipleHiddenInput, Widget
+from django.utils.functional import Promise
 from django.utils.translation import gettext_lazy as _, ngettext_lazy
 
 __all__ = [
@@ -18,82 +31,84 @@ __all__ = [
     "TupleField",
     "SetField",
     "SequenceWidget",
+    "SequenceBoundField",
 ]
 
 
-@dataclass
-class _SequenceItem:
-    index: int
-    value: object
-    deleted: bool = False
-
-
-@dataclass
-class _SequenceSubmission:
-    items: list[_SequenceItem]
-    total_forms: int
-    management_error: ValidationError | None = None
-
-
-class _SequenceItemBoundField:
-    """The small part of BoundField used by Django's Field cleaning hooks."""
-
-    def __init__(self, form, field, name, initial, data):
-        self.form = form
-        self.field = field
-        self.name = name
-        self.html_name = name
-        self.initial = initial
-        self.data = data
-
-
-class _SequenceHiddenWidget(MultipleHiddenInput):
-    def format_value(self, value):
-        if isinstance(value, _SequenceSubmission):
-            return [item.value for item in value.items if not item.deleted]
-        return super().format_value(value)
-
-
 class SequenceBoundField(BoundField):
-    def build_widget_attrs(self, attrs, widget=None):
-        attrs = super().build_widget_attrs(attrs, widget)
-        widget = widget or self.field.widget
-        if not isinstance(widget, SequenceWidget):
-            return attrs
+    """Render indexed child errors without storing validation state on the field.
 
+    Django passes a widget no errors when it renders a ``BoundField``. A sequence
+    has one field-level error list but several visible child widgets, so this
+    real ``BoundField`` subclass is the small, public adapter that places a
+    child error beside the row identified by its validation index.
+    """
+
+    def as_widget(self, widget=None, attrs=None, only_initial=False):
+        widget = widget or self.field.widget
+        if only_initial or not isinstance(widget, SequenceWidget):
+            return super().as_widget(widget, attrs, only_initial)
+
+        if self.field.localize:
+            widget.is_localized = True
+        attrs = self.build_widget_attrs(attrs or {}, widget)
+        if self.auto_id and "id" not in widget.attrs:
+            attrs.setdefault("id", self.auto_id)
+
+        context = widget.get_context(self.html_name, self.value(), attrs)
+        deleted_indexes = self._deleted_indexes()
+        if deleted_indexes:
+            context["widget"]["rows"] = [
+                row
+                for row in context["widget"]["rows"]
+                if row["index"] not in deleted_indexes
+            ]
+            context["widget"]["deleted_rows"] = [
+                {"delete_name": f"{self.html_name}-{index}-{DELETION_FIELD_NAME}"}
+                for index in sorted(deleted_indexes)
+            ]
         item_errors: dict[int, list[str]] = defaultdict(list)
-        has_global_error = False
         for error in self.errors.as_data():
             params = error.params or {}
             if error.code == "item_invalid" and "index" in params:
                 item_errors[params["index"]].extend(error.messages)
-            else:
-                has_global_error = True
+        for row in context["widget"]["rows"]:
+            row["errors"] = item_errors[row["index"]]
+            if row["errors"]:
+                row["subwidget"]["attrs"]["aria-invalid"] = "true"
+        return widget._render(widget.template_name, context, self.form.renderer)
 
-        attrs["_sequence_form_use_required"] = self.form.use_required_attribute
-        attrs["_sequence_initial_count"] = len(self.field._initial_values(self.initial))
-        attrs["_sequence_item_errors"] = dict(item_errors)
-        attrs["_sequence_global_error"] = has_global_error
-        return attrs
+    def _deleted_indexes(self) -> set[int]:
+        """Return submitted deleted rows, as ``BaseFormSet.deleted_forms`` does."""
+        if not isinstance(self.field.widget, SequenceWidget):
+            return set()
+        return {
+            index
+            for index in range(len(self.data))
+            if self.form.data.get(f"{self.html_name}-{index}-{DELETION_FIELD_NAME}")
+            == "1"
+        }
 
-
-def _sequence_bound_field_class(bound_field_class: type[BoundField] | None):
-    bound_field_class = bound_field_class or SequenceBoundField
-    if issubclass(bound_field_class, SequenceBoundField):
-        return bound_field_class
-    return type(
-        f"Sequence{bound_field_class.__name__}",
-        (SequenceBoundField, bound_field_class),
-        {},
-    )
+    def _has_changed(self):
+        if not isinstance(self.field.widget, SequenceWidget):
+            return super()._has_changed()
+        if self.field.disabled:
+            return False
+        initial_values = self.field._initial_values(self.initial)
+        if any(index < len(initial_values) for index in self._deleted_indexes()):
+            return True
+        return super()._has_changed()
 
 
 class SequenceField(Field):
-    """A collection field whose rows are cleaned by one Django child field."""
+    """Validate a variable-length collection with one homogeneous child field."""
 
     default_error_messages = {
         "invalid": _("Enter a list of values."),
-        "management": _("Management form data is missing or has been tampered with."),
+        "missing_management_form": BaseFormSet.default_error_messages[
+            "missing_management_form"
+        ],
+        "too_many_forms": BaseFormSet.default_error_messages["too_many_forms"],
         "min_length": ngettext_lazy(
             "Ensure this value has at least %(limit_value)d item (it has %(show_value)d).",
             "Ensure this value has at least %(limit_value)d items (it has %(show_value)d).",
@@ -104,20 +119,30 @@ class SequenceField(Field):
             "Ensure this value has at most %(limit_value)d items (it has %(show_value)d).",
             "limit_value",
         ),
-        "too_many_forms": _("Submit at most %(limit_value)d rows."),
-        "unhashable": _("Set items must be hashable."),
     }
-    hidden_widget = _SequenceHiddenWidget
+    bound_field_class = SequenceBoundField
+    hidden_widget = MultipleHiddenInput
 
     def __init__(
         self,
         child_field: Field,
         /,
         *,
-        min_length: int = 0,
-        max_length: int = 1_000,
+        min_length: int = DEFAULT_MIN_NUM,
+        max_length: int = DEFAULT_MAX_NUM,
+        required: bool = True,
         widget: SequenceWidget | type[SequenceWidget] | None = None,
-        **kwargs,
+        label: str | Promise | None = None,
+        initial: Any | Callable[[], Any] | None = None,
+        help_text: str | Promise = "",
+        error_messages: Mapping[str, str | Promise] | None = None,
+        show_hidden_initial: bool = False,
+        validators: Sequence[Callable] = (),
+        localize: bool = False,
+        disabled: bool = False,
+        label_suffix: str | None = None,
+        template_name: str | None = None,
+        bound_field_class: type[BoundField] | None = None,
     ):
         if not isinstance(child_field, Field):
             raise ImproperlyConfigured(
@@ -132,11 +157,18 @@ class SequenceField(Field):
             or max_length < min_length
         ):
             raise ValueError("min_length and max_length must be non-negative integers")
+        if not isinstance(required, bool):
+            raise TypeError("required must be a bool")
+        if initial is not None and not callable(initial):
+            initial_values = self._initial_values(initial)
+            if len(initial_values) > max_length:
+                raise ValueError("initial must not contain more than max_length values")
 
         self.child_field = copy.deepcopy(child_field)
         self.min_length = min_length
         self.max_length = max_length
-        if kwargs.get("localize", False):
+        self.absolute_max = max_length + DEFAULT_MAX_NUM
+        if localize:
             self.child_field.localize = True
             self.child_field.widget.is_localized = True
 
@@ -145,6 +177,7 @@ class SequenceField(Field):
                 self.child_field,
                 min_length=min_length,
                 max_length=max_length,
+                absolute_max=self.absolute_max,
             )
         elif isinstance(widget, type):
             if not issubclass(widget, SequenceWidget):
@@ -153,22 +186,35 @@ class SequenceField(Field):
                 self.child_field,
                 min_length=min_length,
                 max_length=max_length,
+                absolute_max=self.absolute_max,
             )
         elif isinstance(widget, SequenceWidget):
             sequence_widget = copy.deepcopy(widget)
-            sequence_widget.configure(
-                self.child_field,
-                min_length=min_length,
-                max_length=max_length,
-            )
+            sequence_widget.child_field = self.child_field
+            sequence_widget.min_length = min_length
+            sequence_widget.max_length = max_length
+            sequence_widget.absolute_max = self.absolute_max
         else:
             raise TypeError("widget must be a SequenceWidget instance or subclass")
 
-        kwargs["widget"] = sequence_widget
-        kwargs["bound_field_class"] = _sequence_bound_field_class(
-            kwargs.get("bound_field_class")
+        selected_bound_field_class = bound_field_class or self.bound_field_class
+        if not issubclass(selected_bound_field_class, SequenceBoundField):
+            raise TypeError("bound_field_class must inherit from SequenceBoundField")
+        super().__init__(
+            required=required,
+            widget=sequence_widget,
+            label=label,
+            initial=initial,
+            help_text=help_text,
+            error_messages=error_messages,
+            show_hidden_initial=show_hidden_initial,
+            validators=validators,
+            localize=localize,
+            disabled=disabled,
+            label_suffix=label_suffix,
+            template_name=template_name,
+            bound_field_class=selected_bound_field_class,
         )
-        super().__init__(**kwargs)
 
     def __deepcopy__(self, memo):
         result = super().__deepcopy__(memo)
@@ -177,100 +223,55 @@ class SequenceField(Field):
         return result
 
     @staticmethod
-    def _empty(value: object) -> bool:
-        return value is None or value == "" or value in ([], (), set(), frozenset())
-
-    def _submission(self, value: object) -> _SequenceSubmission:
-        if isinstance(value, _SequenceSubmission):
-            return value
-        if self._empty(value):
-            return _SequenceSubmission([], 0)
-        if isinstance(value, (str, bytes, bytearray, dict)) or not isinstance(
-            value, (list, tuple, set, frozenset)
-        ):
-            raise ValidationError(self.error_messages["invalid"], code="invalid")
-        return _SequenceSubmission(
-            [_SequenceItem(index, item) for index, item in enumerate(value)], len(value)
-        )
-
-    def _initial_values(self, initial: object) -> list[object]:
-        try:
-            submission = self._submission(initial)
-        except ValidationError:
+    def _initial_values(value: object) -> list[object]:
+        if value is None or value == "":
             return []
-        return [item.value for item in submission.items if not item.deleted]
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return list(value)
+        raise ValueError("initial must be a collection of values")
 
     def to_python(self, value: object) -> list[object]:
-        submission = self._submission(value)
-        if submission.management_error:
-            raise submission.management_error
-        return [item.value for item in submission.items if not item.deleted]
+        if value is None or value == "":
+            return []
+        if not isinstance(value, list):
+            raise ValidationError(self.error_messages["invalid"], code="invalid")
+        return value
 
-    def _management_limit(self, initial: object) -> int:
-        # Deleted rows retain their index. Allow one bounded generation of extra
-        # rows as well as the active collection, while max_length still limits
-        # the final compressed value.
-        return max(
-            self.max_length * 2,
-            len(self._initial_values(initial)) + self.max_length,
-        )
-
-    def _check_submission(self, submission: _SequenceSubmission, initial: object):
-        if submission.management_error:
-            if submission.management_error.code == "management":
-                raise ValidationError(self.error_messages["management"], code="management")
-            raise submission.management_error
-        if submission.total_forms > self._management_limit(initial):
-            raise ValidationError(
-                self.error_messages["too_many_forms"],
-                code="too_many_forms",
-                params={"limit_value": self._management_limit(initial)},
-            )
-
-    def _item_error(self, index: int, error: ValidationError) -> list[ValidationError]:
-        errors = []
-        for leaf in error.error_list:
-            for message in leaf.messages:
-                errors.append(
-                    ValidationError(
-                        _("Item %(index)d: %(message)s"),
-                        code="item_invalid",
-                        params={
-                            "index": index,
-                            "message": message,
-                            "child_code": leaf.code,
-                        },
-                    )
-                )
-        return errors
-
-    def _clean_item(self, item: _SequenceItem, initial: object, form, field_name: str):
-        initial_values = self._initial_values(initial)
-        item_initial = initial_values[item.index] if item.index < len(initial_values) else None
-        bound_field = _SequenceItemBoundField(
-            form,
-            self.child_field,
-            f"{field_name}-{item.index}",
-            item_initial,
-            item.value,
-        )
-        return self.child_field._clean_bound_field(bound_field)
-
-    def clean(self, value, *, initial=None, form=None, field_name=""):
-        submitted_by_widget = isinstance(value, _SequenceSubmission)
-        submission = self._submission(value)
-        if submitted_by_widget:
-            self._check_submission(submission, initial)
-
+    def _clean_values(
+        self,
+        values: list[object],
+        initial_values: list[object],
+        deleted_indexes: frozenset[int] = frozenset(),
+    ) -> object:
+        """Clean rows with FileField's public clean(value, initial) API."""
         cleaned_data = []
         errors = []
-        for item in submission.items:
-            if item.deleted:
+        for index, value in enumerate(values):
+            if index in deleted_indexes:
                 continue
+            initial = initial_values[index] if index < len(initial_values) else None
             try:
-                cleaned_data.append(self._clean_item(item, initial, form, field_name))
+                if self.child_field.disabled:
+                    cleaned = initial
+                elif isinstance(self.child_field, FileField):
+                    cleaned = self.child_field.clean(value, initial)
+                else:
+                    cleaned = self.child_field.clean(value)
             except ValidationError as error:
-                errors.extend(self._item_error(item.index, error))
+                for message in error.messages:
+                    errors.append(
+                        ValidationError(
+                            _("Item %(index)d: %(message)s"),
+                            code="item_invalid",
+                            params={
+                                "index": index,
+                                "message": message,
+                                "child_code": error.code,
+                            },
+                        )
+                    )
+            else:
+                cleaned_data.append(cleaned)
         if errors:
             raise ValidationError(errors)
 
@@ -280,14 +281,53 @@ class SequenceField(Field):
             self.run_validators(result)
         return result
 
+    def clean(self, value):
+        return self._clean_values(self.to_python(value), [])
+
     def _clean_bound_field(self, bound_field):
-        value = bound_field.initial if self.disabled else bound_field.data
-        return self.clean(
-            value,
-            initial=bound_field.initial,
-            form=bound_field.form,
-            field_name=bound_field.html_name,
+        """Validate Django's management form and retain FileField initial values.
+
+        ``ManagementForm`` owns management-input validation. ``FileField.clean()``
+        is deliberately called with ``(data, initial)``; that public API
+        implements Django's upload, clear, and contradiction semantics. Ordinary
+        child fields continue to use their normal one-value ``clean()`` API.
+        """
+        initial_values = self._initial_values(bound_field.initial)
+        if self.disabled:
+            return self._clean_values(initial_values, initial_values)
+
+        management_form = ManagementForm(
+            bound_field.form.data,
+            prefix=bound_field.html_name,
         )
+        if not management_form.is_valid():
+            raise ValidationError(
+                self.error_messages["missing_management_form"],
+                code="missing_management_form",
+                params={
+                    "field_names": ", ".join(
+                        management_form.add_prefix(field_name)
+                        for field_name in management_form.errors
+                    )
+                },
+            )
+        if management_form.cleaned_data[TOTAL_FORM_COUNT] > self.absolute_max:
+            raise ValidationError(
+                self.error_messages["too_many_forms"],
+                code="too_many_forms",
+                params={"num": self.max_length},
+            )
+
+        values = self.to_python(bound_field.data)
+        deleted_indexes = frozenset(
+            index
+            for index in range(len(values))
+            if bound_field.form.data.get(
+                f"{bound_field.html_name}-{index}-{DELETION_FIELD_NAME}"
+            )
+            == "1"
+        )
+        return self._clean_values(values, initial_values, deleted_indexes)
 
     def validate(self, value):
         length = len(value)
@@ -314,64 +354,41 @@ class SequenceField(Field):
     def bound_data(self, data, initial):
         if self.disabled:
             return initial
-        submission = self._submission(data)
         initial_values = self._initial_values(initial)
-        items = []
-        for item in submission.items:
-            item_initial = (
-                initial_values[item.index] if item.index < len(initial_values) else None
+        return [
+            self.child_field.bound_data(
+                value, initial_values[index] if index < len(initial_values) else None
             )
-            value = item.value if item.deleted else self.child_field.bound_data(item.value, item_initial)
-            items.append(_SequenceItem(item.index, value, item.deleted))
-        return _SequenceSubmission(items, submission.total_forms, submission.management_error)
+            for index, value in enumerate(self.to_python(data))
+        ]
 
     def prepare_value(self, value):
-        submission = self._submission(value)
-        return _SequenceSubmission(
-            [
-                _SequenceItem(
-                    item.index,
-                    item.value
-                    if item.deleted
-                    else self.child_field.prepare_value(item.value),
-                    item.deleted,
-                )
-                for item in submission.items
-            ],
-            submission.total_forms,
-            submission.management_error,
-        )
+        return [
+            self.child_field.prepare_value(value)
+            for value in self._initial_values(value)
+        ]
 
     def has_changed(self, initial, data):
         if self.disabled:
             return False
         try:
-            submitted_by_widget = isinstance(data, _SequenceSubmission)
-            submission = self._submission(data)
-            if submission.management_error:
-                return True
-            if submitted_by_widget:
-                self._check_submission(submission, initial)
-        except ValidationError:
+            initial_values = self._initial_values(initial)
+            data_values = self.to_python(data)
+        except (ValidationError, ValueError):
             return True
-
-        initial_values = self._initial_values(initial)
-        data_by_index = {item.index: item for item in submission.items}
-        for index, item_initial in enumerate(initial_values):
-            item = data_by_index.get(index)
-            if item is None or item.deleted:
+        for index, initial_value in enumerate(initial_values):
+            if index >= len(data_values):
                 return True
             try:
-                item_initial = self.child_field.to_python(item_initial)
+                initial_value = self.child_field.to_python(initial_value)
             except ValidationError:
                 return True
-            if self.child_field.has_changed(item_initial, item.value):
+            if self.child_field.has_changed(initial_value, data_values[index]):
                 return True
-        for item in submission.items:
-            if item.index >= len(initial_values) and not item.deleted:
-                if self.child_field.has_changed(None, item.value):
-                    return True
-        return False
+        return any(
+            self.child_field.has_changed(None, value)
+            for value in data_values[len(initial_values) :]
+        )
 
 
 class ListField(SequenceField):
@@ -387,6 +404,10 @@ FrozenSequenceField = TupleField
 
 
 class SetField(SequenceField):
+    default_error_messages = {
+        "unhashable": _("Set items must be hashable."),
+    }
+
     def compress(self, data_list: list[object]) -> set[object]:
         try:
             return set(data_list)
@@ -399,16 +420,12 @@ class SetField(SequenceField):
         if self.disabled:
             return False
         try:
-            submitted_by_widget = isinstance(data, _SequenceSubmission)
-            submission = self._submission(data)
-            if submission.management_error:
-                return True
-            if submitted_by_widget:
-                self._check_submission(submission, initial)
-        except ValidationError:
+            initial_values = self._initial_values(initial)
+            data_values = self.to_python(data)
+        except (ValidationError, ValueError):
             return True
 
-        def unique(values: Iterable[object]) -> list[object]:
+        def unique(values):
             result = []
             for value in values:
                 if not any(
@@ -421,14 +438,10 @@ class SetField(SequenceField):
             return result
 
         try:
-            initial_values = unique(self._initial_values(initial))
-            data_values = unique(
-                item.value for item in submission.items if not item.deleted
-            )
-            unmatched = list(data_values)
-            for item_initial in initial_values:
-                for index, item_data in enumerate(unmatched):
-                    if not self.child_field.has_changed(item_initial, item_data):
+            unmatched = unique(data_values)
+            for initial_value in unique(initial_values):
+                for index, data_value in enumerate(unmatched):
+                    if not self.child_field.has_changed(initial_value, data_value):
                         unmatched.pop(index)
                         break
                 else:
@@ -442,146 +455,102 @@ SequenceField = ListField
 
 
 class SequenceWidget(Widget):
+    """Render dynamic homogeneous rows while delegating each row to one widget."""
+
     template_name = "django/forms/widgets/sequence.html"
     use_fieldset = True
 
-    def __init__(self, child_field: Field, *, min_length: int, max_length: int, attrs=None):
-        self.configure(child_field, min_length=min_length, max_length=max_length)
-        super().__init__(attrs)
-
-    def configure(self, child_field: Field, *, min_length: int, max_length: int):
+    def __init__(
+        self,
+        child_field: Field,
+        *,
+        min_length: int = DEFAULT_MIN_NUM,
+        max_length: int = DEFAULT_MAX_NUM,
+        absolute_max: int | None = None,
+        attrs=None,
+    ):
         self.child_field = child_field
         self.min_length = min_length
         self.max_length = max_length
-
-    @property
-    def _widget_total_limit(self):
-        # The field later applies the tighter initial-count-aware limit. This
-        # bound prevents a hostile TOTAL_FORMS value from allocating unbounded work.
-        return self.max_length * 2
+        self.absolute_max = (
+            max_length + DEFAULT_MAX_NUM if absolute_max is None else absolute_max
+        )
+        super().__init__(attrs)
 
     def use_required_attribute(self, initial):
-        # A group cannot express collection requiredness with one HTML attribute.
         return False
 
     def value_from_datadict(self, data, files, name):
-        management_name = f"{name}-TOTAL_FORMS"
-        raw_total = data.get(management_name)
-        if raw_total is None:
-            return _SequenceSubmission(
-                [],
-                0,
-                ValidationError(
-                    _("Management form data is missing or has been tampered with."),
-                    code="management",
-                ),
-            )
+        raw_total = data.get(f"{name}-{TOTAL_FORM_COUNT}")
         try:
             total_forms = int(raw_total)
         except (TypeError, ValueError):
-            total_forms = -1
-        if total_forms < 0 or total_forms > self._widget_total_limit:
-            return _SequenceSubmission(
-                [],
-                0,
-                ValidationError(
-                    _("Management form data is missing or has been tampered with."),
-                    code="management",
-                ),
-            )
+            return []
+        if total_forms < 0 or total_forms > self.absolute_max:
+            return []
 
-        items = []
+        values = []
         for index in range(total_forms):
             row_name = f"{name}-{index}"
-            deleted = data.get(f"{row_name}-DELETE") == "1"
-            value = None if deleted else self.child_field.widget.value_from_datadict(
-                data, files, row_name
-            )
-            items.append(_SequenceItem(index, value, deleted))
-        return _SequenceSubmission(items, total_forms)
+            values.append(self.child_field.widget.value_from_datadict(data, files, row_name))
+        return values
 
     def value_omitted_from_data(self, data, files, name):
-        return f"{name}-TOTAL_FORMS" not in data
-
-    def _submission_for_context(self, value) -> _SequenceSubmission:
-        if isinstance(value, _SequenceSubmission):
-            return value
-        if value is None or value == "":
-            return _SequenceSubmission([], 0)
-        if isinstance(value, (list, tuple, set, frozenset)):
-            return _SequenceSubmission(
-                [_SequenceItem(index, item) for index, item in enumerate(value)],
-                len(value),
-            )
-        return _SequenceSubmission([_SequenceItem(0, value)], 1)
+        return f"{name}-{TOTAL_FORM_COUNT}" not in data
 
     def get_context(self, name, value, attrs):
         context = super().get_context(name, value, attrs)
         if self.is_localized:
             self.child_field.widget.is_localized = True
 
+        values = [] if value is None else list(value)
+        initial_forms = len(values)
+        if not values:
+            values = [None] * min(max(self.min_length, int(self.is_required)), self.max_length)
         final_attrs = context["widget"]["attrs"]
-        form_use_required = final_attrs.pop("_sequence_form_use_required", True)
-        initial_count = final_attrs.pop("_sequence_initial_count", 0)
-        item_errors = final_attrs.pop("_sequence_item_errors", {})
-        global_error = final_attrs.pop("_sequence_global_error", False)
         final_attrs.pop("aria-invalid", None)
-        final_attrs.pop("required", None)
-
-        submission = self._submission_for_context(value)
-        if not submission.items:
-            count = min(max(self.min_length, int(self.is_required)), self.max_length)
-            submission = _SequenceSubmission(
-                [_SequenceItem(index, None) for index in range(count)], count
-            )
-
         id_ = final_attrs.get("id")
 
-        def make_row(item: _SequenceItem):
-            row_name = f"{name}-{item.index}"
-            widget_attrs = final_attrs.copy()
+        def make_row(index, item):
+            row_name = f"{name}-{index}"
+            child_attrs = final_attrs.copy()
             if id_:
-                widget_attrs["id"] = f"{id_}_{item.index}"
-            if (
-                form_use_required
-                and self.child_field.required
-                and self.child_field.widget.use_required_attribute(item.value)
-            ):
-                widget_attrs["required"] = True
+                child_attrs["id"] = f"{id_}_{index}"
+            if self.child_field.disabled:
+                child_attrs["disabled"] = True
             subwidget = self.child_field.widget.get_context(
-                row_name, item.value, widget_attrs
+                row_name, item, child_attrs
             )["widget"]
-            errors = item_errors.get(item.index, [])
-            if errors or global_error:
-                subwidget["attrs"]["aria-invalid"] = "true"
-            if errors:
-                error_id = f"{id_}_{item.index}_error" if id_ else None
-                if error_id:
-                    describedby = subwidget["attrs"].get("aria-describedby", "")
-                    subwidget["attrs"]["aria-describedby"] = " ".join(
-                        value for value in (describedby, error_id) if value
-                    )
             return {
-                "index": item.index,
-                "delete_name": f"{row_name}-DELETE",
-                "deleted": item.deleted,
-                "errors": errors,
-                "error_id": f"{id_}_{item.index}_error" if id_ else "",
+                "index": index,
+                "delete_name": f"{row_name}-{DELETION_FIELD_NAME}",
                 "subwidget": subwidget,
+                "errors": [],
             }
 
-        rows = [make_row(item) for item in submission.items if not item.deleted]
-        deleted_rows = [make_row(item) for item in submission.items if item.deleted]
-        empty_row = make_row(_SequenceItem("__prefix__", None))
+        management_form = ManagementForm(
+            prefix=name,
+            initial={
+                TOTAL_FORM_COUNT: len(values),
+                INITIAL_FORM_COUNT: initial_forms,
+                MIN_NUM_FORM_COUNT: self.min_length,
+                MAX_NUM_FORM_COUNT: self.max_length,
+            },
+        )
+        management_form.fields[TOTAL_FORM_COUNT].widget.attrs["data-sequence-total"] = ""
+        if final_attrs.get("disabled"):
+            for management_field in management_form.fields.values():
+                management_field.widget.attrs["disabled"] = True
+
         context["widget"].update(
             {
-                "rows": rows,
-                "deleted_rows": deleted_rows,
-                "empty_row": empty_row,
-                "total_forms": submission.total_forms,
-                "management_name": f"{name}-TOTAL_FORMS",
+                "rows": [
+                    make_row(index, item) for index, item in enumerate(values)
+                ],
+                "empty_row": make_row("__prefix__", None),
+                "management_form": management_form,
                 "maximum_forms": self.max_length,
-                "initial_count": initial_count,
+                "absolute_maximum_forms": self.absolute_max,
                 "disabled": bool(final_attrs.get("disabled")),
             }
         )
