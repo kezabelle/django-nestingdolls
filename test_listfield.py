@@ -392,6 +392,80 @@ class SetFieldTestCase(SimpleTestCase):
         self.assertEqual(context.exception.code, "unhashable")
 
 
+class NestedSequenceFieldTestCase(SimpleTestCase):
+    def test_list_field_accepts_nested_tuple_children(self):
+        """It cleans a list of pair tuples from flat nested keys."""
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.TupleField(
+                    forms.IntegerField(),
+                    min_length=2,
+                    max_length=2,
+                )
+            )
+
+        form = Form(
+            {
+                "values-0-0": "1",
+                "values-0-1": "2",
+                "values-1-0": "3",
+                "values-1-1": "4",
+            }
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["values"], [(1, 2), (3, 4)])
+
+    def test_list_field_rejects_nested_tuple_children_with_extra_items(self):
+        """It rejects tuple children that submit more than two items."""
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.TupleField(
+                    forms.IntegerField(),
+                    min_length=2,
+                    max_length=2,
+                )
+            )
+
+        form = Form(
+            {
+                "values-0-0": "1",
+                "values-0-1": "2",
+                "values-0-2": "3",
+            }
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(form.errors.as_data()["values"][0].code, "item_invalid")
+        self.assertEqual(form.errors.as_data()["values"][0].params["child_code"], "max_length")
+
+    def test_list_field_accepts_deeply_nested_list_children(self):
+        """It cleans nested list children from flat nested keys."""
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.ListField(
+                    nestingdolls.ListField(forms.IntegerField())
+                )
+            )
+
+        form = Form(
+            {
+                "values-0-0-0": "1",
+                "values-0-0-1": "2",
+                "values-0-1-0": "3",
+                "values-1-0-0": "4",
+                "values-1-1-0": "5",
+                "values-1-1-1": "6",
+            }
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(
+            form.cleaned_data["values"],
+            [[[1, 2], [3]], [[4], [5, 6]]],
+        )
+
+
 class WidgetIntegrationTestCase(SimpleTestCase):
     def test_custom_child_choices_are_rendered(self):
         """It renders child choice widgets normally."""
