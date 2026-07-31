@@ -1,4 +1,5 @@
 import unittest
+from collections import deque
 from datetime import datetime
 from decimal import Decimal
 import json
@@ -164,7 +165,22 @@ class SequenceFieldTestCase(SimpleTestCase):
                 forms.IntegerField(), initial={"values[0]": 1, "values[1]": 2}
             )
 
-        self.assertEqual(Form()["values"].value(), [1, 2])
+    def test_initial_accepts_generic_sequence_and_collection_types(self):
+        """It accepts non-string collection-shaped initial values beyond builtins."""
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        class FieldInitialForm(forms.Form):
+            values = nestingdolls.ListField(
+                forms.IntegerField(), required=False, initial=range(1, 3)
+            )
+
+        self.assertEqual(Form(initial={"values": range(3)})["values"].value(), [0, 1, 2])
+        self.assertEqual(
+            Form(initial={"values": deque([4, 5])})["values"].value(),
+            [4, 5],
+        )
+        self.assertEqual(FieldInitialForm()["values"].value(), [1, 2])
 
     def test_exact_name_scalar_mapping_is_treated_as_one_row(self):
         """It treats an exact-name scalar mapping as one row."""
@@ -184,6 +200,28 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertInHTML(
             '<input type="number" name="values-0" value="1" id="id_values_0">',
             unbound.as_p(),
+        )
+
+    def test_flattened_initial_mapping_is_normalized(self):
+        """It normalizes flattened initial mappings through the bound-field path."""
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        form = Form(
+            initial={
+                "values.0": 1,
+                "values[1]": 2,
+            }
+        )
+
+        self.assertEqual(form["values"].value(), [1, 2])
+        self.assertInHTML(
+            '<input type="number" name="values-0" value="1" id="id_values_0">',
+            form.as_p(),
+        )
+        self.assertInHTML(
+            '<input type="number" name="values-1" value="2" id="id_values_1">',
+            form.as_p(),
         )
 
     def test_partial_management_data_is_an_error(self):
@@ -1493,6 +1531,10 @@ class PublicApiTestCase(SimpleTestCase):
         self.assertIs(nestingdolls.FrozenSequenceField, nestingdolls.TupleField)
         self.assertTrue(issubclass(nestingdolls.FrozenSetField, nestingdolls.SetField))
         self.assertTrue(issubclass(nestingdolls.InvalidInitialValueError, ValueError))
+        self.assertEqual(
+            nestingdolls.ListField(forms.IntegerField(), initial=range(2)).initial,
+            range(2),
+        )
 
         with self.assertRaises(nestingdolls.InvalidInitialValueError):
             nestingdolls.ListField(forms.IntegerField(), initial="not a collection")

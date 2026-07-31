@@ -172,44 +172,39 @@ class SequenceBoundField(BoundField):
         self,
     ) -> list[object] | tuple[object, ...] | set[object] | frozenset[object] | Mapping[str, object]:
         """Use Django's normal initial path unless flattened row keys need normalizing."""
-        initial = super().initial
-        if not self.form.initial or self.name in self.form.initial:
-            return self._coerce_initial_value(initial)
-
-        normalized_initial = self.field.widget._normalize_mapping(
-            self.form.initial, self.name
-        )
-        if not normalized_initial:
-            return self._coerce_initial_value(initial)
-        return cast(
-            list[object],
-            self.field.widget._value_from_normalized_data(
-                normalized_initial,
-                MultiValueDict(),
-                self.name,
-            ),
-        )
+        if self.form.initial and self.name not in self.form.initial:
+            normalized_initial = self._normalize_initial_mapping(self.form.initial)
+            if normalized_initial is not None:
+                return normalized_initial
+        return self._coerce_initial_value(super().initial)
 
     def _coerce_initial_value(
         self, value: object
     ) -> list[object] | tuple[object, ...] | set[object] | frozenset[object] | Mapping[str, object]:
         """Convert raw initial input into the sequence value shape."""
         if isinstance(value, Mapping):
-            normalized_initial = self.field.widget._normalize_mapping(value, self.name)
-            if not normalized_initial:
+            normalized_value = self._normalize_initial_mapping(value)
+            if normalized_value is None:
                 return cast(Mapping[str, object], value)
-            return cast(
-                list[object],
-                self.field.widget._value_from_normalized_data(
-                    normalized_initial,
-                    MultiValueDict(),
-                    self.name,
-                ),
-            )
+            return normalized_value
         try:
             return cast(SequenceField, self.field)._initial_values(value)
         except InvalidInitialValueError:
             return [value]
+
+    def _normalize_initial_mapping(self, value: Mapping[str, object]) -> list[object] | None:
+        """Return normalized initial rows for mapping-style values when possible."""
+        value = self.field.widget._normalize_mapping(value, self.name)
+        if not value:
+            return None
+        return cast(
+            list[object],
+            self.field.widget._value_from_normalized_data(
+                value,
+                MultiValueDict(),
+                self.name,
+            ),
+        )
 
     @cached_property
     def _deleted_indexes(self) -> frozenset[int]:
@@ -392,12 +387,16 @@ class SequenceField(Field):
 
         post[]: isinstance(__return__, list)
         post[]: (value is None or value == "") implies __return__ == []
-        post[]: isinstance(value, (list, tuple, set, frozenset)) implies len(__return__) == len(value)
+        post[]: isinstance(value, Collection) and not isinstance(value, Mapping) implies len(__return__) == len(value)
         raises: InvalidInitialValueError
         """
         if value is None or value == "":
             return []
-        if isinstance(value, (list, tuple, set, frozenset)):
+        if (
+            isinstance(value, Collection)
+            and not isinstance(value, Mapping)
+            and not isinstance(value, (str, bytes, bytearray))
+        ):
             return list(value)
         raise InvalidInitialValueError("initial must be a collection of values")
 
@@ -492,7 +491,6 @@ class SequenceField(Field):
             )
 
         errors = []
-        management_form = sequence_bound_field._management_form
         if management_form is not None and not management_form.is_valid():
             errors.append(
                 ValidationError(
@@ -506,19 +504,16 @@ class SequenceField(Field):
                     },
                 )
             )
-        total_forms = 0
-        if management_form is not None and management_form.is_valid():
+        elif management_form is not None:
             submitted_total = management_form.cleaned_data[TOTAL_FORM_COUNT]
-            if isinstance(submitted_total, int):
-                total_forms = submitted_total
-        if total_forms > self.absolute_max:
-            errors.append(
-                ValidationError(
-                    self.error_messages["too_many_forms"],
-                    code="too_many_forms",
-                    params={"num": self.max_length},
+            if isinstance(submitted_total, int) and submitted_total > self.absolute_max:
+                errors.append(
+                    ValidationError(
+                        self.error_messages["too_many_forms"],
+                        code="too_many_forms",
+                        params={"num": self.max_length},
+                    )
                 )
-            )
         if errors:
             raise ValidationError(errors)
 
@@ -569,10 +564,10 @@ class SequenceField(Field):
         """
         if self.disabled:
             return self._initial_values(initial)
-        initial_values = self._initial_values(initial)
+        initial = self._initial_values(initial)
         return [
             self.child_field.bound_data(
-                value, initial_values[index] if index < len(initial_values) else None
+                value, initial[index] if index < len(initial) else None
             )
             for index, value in enumerate(self.to_python(data))
         ]
@@ -596,22 +591,22 @@ class SequenceField(Field):
         if not super().has_changed(initial, data):
             return False
         try:
-            initial_values = self._initial_values(initial)
+            initial = self._initial_values(initial)
         except InvalidInitialValueError:
             return True
         try:
-            data_values = self.to_python(data)
+            data = self.to_python(data)
         except ValidationError:
             return True
-        for index, initial_value in enumerate(initial_values):
-            if index >= len(data_values):
+        for index, initial_value in enumerate(initial):
+            if index >= len(data):
                 return True
             try:
-                if self.child_field.has_changed(initial_value, data_values[index]):
+                if self.child_field.has_changed(initial_value, data[index]):
                     return True
             except ValidationError:
                 return True
-        for value in data_values[len(initial_values) :]:
+        for value in data[len(initial) :]:
             try:
                 if self.child_field.has_changed(None, value):
                     return True
@@ -655,15 +650,24 @@ class SetField(SequenceField):
             ) from error
 
     def has_changed(self, initial: object, data: object) -> bool:
-        """Compare set members without caring about row order."""
+        """Compare semantic set members, not raw row order or raw row spelling.
+
+        ``has_changed()`` receives raw submitted row data but initial members are
+        already cleaned Python values. A plain ``==`` comparison would therefore
+        be wrong for child fields that coerce input or use compound widget data.
+
+        This method deduplicates submitted and initial members using the child
+        field's own ``has_changed()`` semantics, then matches those semantic
+        members without caring about row order.
+        """
         if not super().has_changed(initial, data):
             return False
         try:
-            initial_values = self._initial_values(initial)
+            initial = self._initial_values(initial)
         except InvalidInitialValueError:
             return True
         try:
-            data_values = self.to_python(data)
+            data = self.to_python(data)
         except ValidationError:
             return True
 
@@ -672,32 +676,24 @@ class SetField(SequenceField):
                 return self.child_field.widget.decompress(value)
             return self.child_field.prepare_value(value)
 
-        def unique_submitted_values(values: list[object]) -> list[object]:
+        def unique(values: list[object], same_value: Callable[[object, object], bool]) -> list[object]:
             result: list[object] = []
             for value in values:
-                if not any(
-                    not self.child_field.has_changed(
-                        self.child_field.to_python(existing), value
-                    )
-                        for existing in result
-                ):
+                if not any(same_value(existing, value) for existing in result):
                     result.append(value)
             return result
 
-        def unique_initial_values(values: list[object]) -> list[object]:
-            result: list[object] = []
-            for value in values:
-                candidate = comparison_data(value)
-                if not any(
-                    not self.child_field.has_changed(existing, candidate)
-                    for existing in result
-                ):
-                    result.append(value)
-            return result
+        def submitted_equals(existing: object, value: object) -> bool:
+            return not self.child_field.has_changed(
+                self.child_field.to_python(existing), value
+            )
+
+        def initial_equals(existing: object, value: object) -> bool:
+            return not self.child_field.has_changed(existing, comparison_data(value))
 
         try:
-            unmatched = unique_submitted_values(data_values)
-            for initial_value in unique_initial_values(initial_values):
+            unmatched = unique(data, submitted_equals)
+            for initial_value in unique(initial, initial_equals):
                 for index, data_value in enumerate(unmatched):
                     if not self.child_field.has_changed(initial_value, data_value):
                         unmatched.pop(index)
@@ -773,34 +769,43 @@ class SequenceWidget(Widget):
         post[]: (name in data and isinstance(data.get(name), list)) implies __return__ == data.get(name)
         post[]: (name in files and isinstance(files.get(name), list) and name not in data) implies __return__ == files.get(name)
         """
-        if name in data:
-            submitted_value = data.get(name)
-            if isinstance(submitted_value, list):
-                return submitted_value
-            return []
-        if name in files:
-            submitted_value = files.get(name)
-            if isinstance(submitted_value, list):
-                return submitted_value
-            return []
-        total_forms = 0
-        found_total_forms = False
-        for source in (data, files):
-            submitted_total = source.get(f"{name}-{TOTAL_FORM_COUNT}")
-            if submitted_total is None or not isinstance(submitted_total, (str, int)):
-                continue
+        def direct_sequence_value(
+            source: MultiValueDict[str, object],
+        ) -> list[object] | None:
+            if name not in source:
+                return None
+            value = source.get(name)
+            return value if isinstance(value, list) else []
+
+        def submitted_total_forms(source: MultiValueDict[str, object]) -> int | None:
+            value = source.get(f"{name}-{TOTAL_FORM_COUNT}")
+            if value is None or not isinstance(value, (str, int)):
+                return None
             try:
-                total_forms = max(total_forms, int(submitted_total))
+                return int(value)
             except (TypeError, ValueError):
-                continue
-            found_total_forms = True
-        if not found_total_forms:
+                return None
+
+        direct_data = direct_sequence_value(data)
+        if direct_data is not None:
+            return direct_data
+        direct_files = direct_sequence_value(files)
+        if direct_files is not None:
+            return direct_files
+
+        counts = [
+            count
+            for source in (data, files)
+            if (count := submitted_total_forms(source)) is not None
+        ]
+        if not counts:
             return []
-        if total_forms < 0 or total_forms > self.absolute_max:
+        form_count = max(counts)
+        if form_count < 0 or form_count > self.absolute_max:
             return []
 
         values: list[object] = []
-        for index in range(total_forms):
+        for index in range(form_count):
             row_name = f"{name}-{index}"
             values.append(
                 self.child_field.widget.value_from_datadict(data, files, row_name)
@@ -836,13 +841,9 @@ class SequenceWidget(Widget):
         post[]: (not data) implies not __return__
         post[]: (data and name in data) implies name in __return__
         """
-        normalized: MultiValueDict[str, object] = MultiValueDict()
+        normalized = MultiValueDict[str, object]()
         if not data:
             return normalized
-        management_names = set(self.management_names(name))
-        has_management_data = False
-        direct_value: list[object] | None = None
-        largest_index = -1
 
         def values_for(key: str) -> list[object]:
             try:
@@ -850,6 +851,36 @@ class SequenceWidget(Widget):
             except AttributeError:
                 value = data.get(key)
                 return value if isinstance(value, list) else [value]
+
+        def normalized_row_key(key: object) -> tuple[str, int] | None:
+            if not isinstance(key, str):
+                return None
+            for separator in ("-", ".", "["):
+                prefix = f"{name}{separator}"
+                if not key.startswith(prefix):
+                    continue
+                suffix = key.removeprefix(prefix)
+                index_end = 0
+                while index_end < len(suffix) and suffix[index_end].isdigit():
+                    index_end += 1
+                if not index_end:
+                    return None
+                index = int(suffix[:index_end])
+                if separator == "[":
+                    if index_end == len(suffix) or suffix[index_end] != "]":
+                        return None
+                    suffix = suffix[index_end + 1 :]
+                else:
+                    suffix = suffix[index_end:]
+                    if suffix and suffix[0] not in "_-":
+                        return None
+                return (f"{name}-{index}{suffix}", index)
+            return None
+
+        management_names = set(self.management_names(name))
+        has_management_data = False
+        direct_value: list[object] | None = None
+        largest_index = -1
 
         for key in data:
             if key == name:
@@ -860,34 +891,12 @@ class SequenceWidget(Widget):
                 has_management_data = True
                 normalized.setlist(key, values_for(key))
                 continue
-            if not isinstance(key, str):
+            row_key = normalized_row_key(key)
+            if row_key is None:
                 continue
-            for separator in ("-", ".", "["):
-                prefix = f"{name}{separator}"
-                if not key.startswith(prefix):
-                    continue
-                suffix = key.removeprefix(prefix)
-                index_end = 0
-                while index_end < len(suffix) and suffix[index_end].isdigit():
-                    index_end += 1
-                if not index_end:
-                    break
-                index = suffix[:index_end]
-                if separator == "[":
-                    if index_end == len(suffix) or suffix[index_end] != "]":
-                        break
-                    suffix = suffix[index_end + 1 :]
-                else:
-                    suffix = suffix[index_end:]
-                    if suffix and suffix[0] not in "_-":
-                        break
-                normalized_index = int(index)
-                largest_index = max(largest_index, normalized_index)
-                normalized.setlist(
-                    f"{name}-{normalized_index}{suffix}",
-                    values_for(key),
-                )
-                break
+            row_name, index = row_key
+            largest_index = max(largest_index, index)
+            normalized.setlist(row_name, values_for(key))
         if normalized and not has_management_data:
             total_forms = (
                 len(direct_value) if direct_value is not None else largest_index + 1
