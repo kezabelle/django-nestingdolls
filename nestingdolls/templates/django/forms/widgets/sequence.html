@@ -10,7 +10,6 @@
         <input type="hidden" name="{{ row.delete_name }}" value="" data-sequence-delete{% if widget.disabled %} disabled{% endif %}>
         {% include row.subwidget.template_name with widget=row.subwidget only %}
         {% if row.errors %}<ul class="errorlist">{% for error in row.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
-        <button type="button" data-sequence-remove{% if widget.disabled %} disabled{% endif %}>{% translate "Remove" %}</button>
       </div>
     {% endfor %}
   </div>
@@ -21,9 +20,13 @@
     <div data-sequence-row data-sequence-index="{{ widget.empty_row.index }}">
       <input type="hidden" name="{{ widget.empty_row.delete_name }}" value="" data-sequence-delete>
       {% include widget.empty_row.subwidget.template_name with widget=widget.empty_row.subwidget only %}
-      <button type="button" data-sequence-remove>{% translate "Remove" %}</button>
     </div>
   </template>
-  <button type="button" data-sequence-add{% if widget.disabled %} disabled{% endif %}>{% translate "Add another" %}</button>
+  <template data-sequence-remove-button>
+    <button type="button" data-sequence-remove{% if widget.disabled %} disabled{% endif %}>{% translate "Remove" %}</button>
+  </template>
+  <template data-sequence-add-button>
+    <button type="button" data-sequence-add{% if widget.disabled %} disabled{% endif %}>{% translate "Add another" %}</button>
+  </template>
 </div>
 {% endspaceless %}

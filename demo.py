@@ -99,9 +99,9 @@ def index(request: WSGIRequest) -> HttpResponse:
     # )
 
     class ParentForm(forms.Form):
-        values = ListField(forms.IntegerField(min_value=3), max_num=2)
-        emails = ListField(forms.EmailField(), min_num=4)
-        others = ListField(forms.BooleanField(required=False), min_num=4)
+        values = ListField(forms.IntegerField(min_value=3), max_length=2)
+        emails = ListField(forms.EmailField(), min_length=4)
+        others = ListField(forms.BooleanField(required=False), min_length=4)
 
     form = ParentForm(
         data=request.GET or None, files=None, initial={"values": [1, 2, 3]}
@@ -168,6 +168,7 @@ def index(request: WSGIRequest) -> HttpResponse:
     <form method="GET" action="" autocomplete="off">
     {% csrf_token %}
     {{ form }}
+    {{ form.media }}
     <button type="submit" name="do-it" value="yep">Submit</button>
     <a href="{% url 'index' %}">Reset</a>
     </form>

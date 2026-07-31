@@ -20,6 +20,7 @@ from django.forms.formsets import (
     ManagementForm,
     TOTAL_FORM_COUNT,
 )
+from django.forms.utils import ErrorList
 from django.forms.widgets import Media as WidgetMedia, MultipleHiddenInput, Widget
 from django.utils.datastructures import MultiValueDict
 from django.utils.functional import Promise, cached_property
@@ -47,6 +48,21 @@ class SequenceBoundField(BoundField):
     child error beside the row identified by its validation index.
     """
 
+    @property
+    def errors(self) -> ErrorList:
+        """Return only field-level errors for Django's normal field rendering."""
+        errors = super().errors
+        if not errors:
+            return errors
+        field_errors = [error for error in errors.as_data() if error.code != "item_invalid"]
+        if len(field_errors) == len(errors):
+            return errors
+        return self.form.error_class(
+            field_errors,
+            renderer=self.form.renderer,
+            field_id=self.auto_id,
+        )
+
     def as_widget(
         self,
         widget: Widget | None = None,
@@ -57,11 +73,14 @@ class SequenceBoundField(BoundField):
         widget = widget or self.field.widget
         if only_initial or not isinstance(widget, SequenceWidget):
             return super().as_widget(widget, attrs, only_initial)
-        item_errors: dict[int, list[str]] = defaultdict(list)
-        for error in self.errors.as_data():
+        item_errors: dict[int, list[object]] = defaultdict(list)
+        for error in super().errors.as_data():
             params = error.params or {}
             if error.code == "item_invalid" and "index" in params:
-                item_errors[params["index"]].extend(error.messages)
+                message = params.get("message")
+                item_errors[cast(int, params["index"])].extend(
+                    [message] if message is not None else error.messages
+                )
         deleted_indexes = self._deleted_indexes
         if not deleted_indexes and not item_errors:
             return super().as_widget(widget, attrs, only_initial)
@@ -364,7 +383,13 @@ class SequenceField(Field):
 
     @staticmethod
     def _initial_values(value: object) -> list[object]:
-        """Normalize supported initial collections into a list."""
+        """Normalize supported initial collections into a list.
+
+        post[]: isinstance(__return__, list)
+        post[]: (value is None or value == "") implies __return__ == []
+        post[]: isinstance(value, (list, tuple, set, frozenset)) implies len(__return__) == len(value)
+        raises: ValueError
+        """
         if value is None or value == "":
             return []
         if isinstance(value, (list, tuple, set, frozenset)):
@@ -372,7 +397,13 @@ class SequenceField(Field):
         raise ValueError("initial must be a collection of values")
 
     def to_python(self, value: object) -> list[object]:
-        """Require sequence input to already be list-shaped."""
+        """Require sequence input to already be list-shaped.
+
+        post[]: isinstance(__return__, list)
+        post[]: (value is None or value == "") implies __return__ == []
+        post[]: isinstance(value, list) implies __return__ == value
+        raises: ValidationError
+        """
         if value is None or value == "":
             return []
         if not isinstance(value, list):
@@ -405,7 +436,7 @@ class SequenceField(Field):
                     for message in item_error.messages:
                         errors.append(
                             ValidationError(
-                                _("Item %(index)d: %(message)s"),
+                                message,
                                 code="item_invalid",
                                 params={
                                     "index": index,
@@ -518,11 +549,19 @@ class SequenceField(Field):
             )
 
     def compress(self, data_list: list[object]) -> Collection[object]:
-        """Return the cleaned list unchanged."""
+        """Return the cleaned list unchanged.
+
+        post[]: isinstance(__return__, list)
+        post[]: __return__ == data_list
+        """
         return data_list
 
     def bound_data(self, data: object, initial: object) -> Collection[object]:
-        """Bind each submitted row against its matching initial value."""
+        """Bind each submitted row against its matching initial value.
+
+        post[]: self.disabled implies __return__ == self._initial_values(initial)
+        post[]: (not self.disabled) implies len(__return__) == len(self.to_python(data))
+        """
         if self.disabled:
             return self._initial_values(initial)
         initial_values = self._initial_values(initial)
@@ -534,14 +573,21 @@ class SequenceField(Field):
         ]
 
     def prepare_value(self, value: object) -> list[object]:
-        """Prepare each row for widget rendering."""
+        """Prepare each row for widget rendering.
+
+        post[]: isinstance(__return__, list)
+        post[]: len(__return__) == len(self._initial_values(value))
+        """
         return [
             self.child_field.prepare_value(value)
             for value in self._initial_values(value)
         ]
 
     def has_changed(self, initial: object, data: object) -> bool:
-        """Compare submitted rows using child-field change semantics."""
+        """Compare submitted rows using child-field change semantics.
+
+        post[]: isinstance(__return__, bool)
+        """
         if not super().has_changed(initial, data):
             return False
         try:
@@ -553,10 +599,9 @@ class SequenceField(Field):
             if index >= len(data_values):
                 return True
             try:
-                initial_value = self.child_field.to_python(initial_value)
-            except ValidationError:
-                return True
-            if self.child_field.has_changed(initial_value, data_values[index]):
+                if self.child_field.has_changed(initial_value, data_values[index]):
+                    return True
+            except (ValidationError, ValueError):
                 return True
         return any(
             self.child_field.has_changed(None, value)
@@ -692,7 +737,12 @@ class SequenceWidget(Widget):
         files: MultiValueDict[str, object],
         name: str,
     ) -> list[object]:
-        """Extract row values from canonicalized data and files."""
+        """Extract row values from canonicalized data and files.
+
+        post[]: isinstance(__return__, list)
+        post[]: (name in data and isinstance(data.get(name), list)) implies __return__ == data.get(name)
+        post[]: (name in files and isinstance(files.get(name), list) and name not in data) implies __return__ == files.get(name)
+        """
         if name in data:
             submitted_value = data.get(name)
             if isinstance(submitted_value, list):
@@ -735,7 +785,14 @@ class SequenceWidget(Widget):
 
     @staticmethod
     def management_names(name: str) -> tuple[str, str, str, str]:
-        """Return the management keys for a sequence field name."""
+        """Return the management keys for a sequence field name.
+
+        post[]: len(__return__) == 4
+        post[]: __return__[0] == f"{name}-{TOTAL_FORM_COUNT}"
+        post[]: __return__[1] == f"{name}-{INITIAL_FORM_COUNT}"
+        post[]: __return__[2] == f"{name}-{MIN_NUM_FORM_COUNT}"
+        post[]: __return__[3] == f"{name}-{MAX_NUM_FORM_COUNT}"
+        """
         return (
             f"{name}-{TOTAL_FORM_COUNT}",
             f"{name}-{INITIAL_FORM_COUNT}",
@@ -744,7 +801,11 @@ class SequenceWidget(Widget):
         )
 
     def _normalize_mapping(self, data: Any, name: str) -> MultiValueDict[str, object]:
-        """Canonicalize accepted row spellings into Django-style keys."""
+        """Canonicalize accepted row spellings into Django-style keys.
+
+        post[]: (not data) implies not __return__
+        post[]: (data and name in data) implies name in __return__
+        """
         normalized: MultiValueDict[str, object] = MultiValueDict()
         if not data:
             return normalized

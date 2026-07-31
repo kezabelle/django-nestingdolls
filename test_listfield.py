@@ -7,7 +7,6 @@ from django import forms
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.forms.boundfield import BoundField
 from django.forms.formsets import (
     DEFAULT_MAX_NUM,
     DELETION_FIELD_NAME,
@@ -130,11 +129,17 @@ class SequenceFieldTestCase(SimpleTestCase):
         bound = Form({"values": "1"})
         self.assertTrue(bound.is_valid(), bound.errors)
         self.assertEqual(bound.cleaned_data["values"], [1])
-        self.assertIn('name="values-0"', bound.as_p())
+        self.assertInHTML(
+            '<input type="number" name="values-0" value="1" id="id_values_0">',
+            bound.as_p(),
+        )
 
         unbound = Form(initial={"values": 1})
         self.assertEqual(unbound["values"].value(), [1])
-        self.assertIn('value="1"', unbound.as_p())
+        self.assertInHTML(
+            '<input type="number" name="values-0" value="1" id="id_values_0">',
+            unbound.as_p(),
+        )
 
     def test_partial_management_data_is_an_error(self):
         """It rejects partial management form data."""
@@ -143,6 +148,13 @@ class SequenceFieldTestCase(SimpleTestCase):
 
         missing_initial = Form(QueryDict("values-TOTAL_FORMS=1&values-0=1"))
         self.assertFalse(missing_initial.is_valid())
+        self.assertFormError(
+            missing_initial,
+            "values",
+            [
+                "ManagementForm data is missing or has been tampered with. Missing fields: values-INITIAL_FORMS. You may need to file a bug report if the issue persists."
+            ],
+        )
         self.assertEqual(
             missing_initial.errors.as_data()["values"][0].params["field_names"],
             "values-INITIAL_FORMS",
@@ -150,6 +162,13 @@ class SequenceFieldTestCase(SimpleTestCase):
 
         missing_total = Form(QueryDict("values-INITIAL_FORMS=0&values-0=1"))
         self.assertFalse(missing_total.is_valid())
+        self.assertFormError(
+            missing_total,
+            "values",
+            [
+                "ManagementForm data is missing or has been tampered with. Missing fields: values-TOTAL_FORMS. You may need to file a bug report if the issue persists."
+            ],
+        )
         self.assertEqual(
             missing_total.errors.as_data()["values"][0].params["field_names"],
             "values-TOTAL_FORMS",
@@ -182,11 +201,35 @@ class SequenceFieldTestCase(SimpleTestCase):
         errors = form.errors.as_data()["values"]
         self.assertEqual([error.code for error in errors], ["item_invalid", "item_invalid"])
         self.assertEqual([error.params["index"] for error in errors], [1, 2])
+        self.assertEqual(list(form["values"].errors), [])
 
         html = form.as_p()
         self.assertEqual(html.count('aria-invalid="true"'), 2)
-        self.assertIn('name="values-1"', html)
-        self.assertIn("Item 2: Enter a whole number.", html)
+        self.assertInHTML(
+            '<input type="number" name="values-1" value="bad" id="id_values_1" aria-invalid="true">',
+            html,
+        )
+        self.assertInHTML("<li>Enter a whole number.</li>", html)
+        self.assertNotInHTML("<li>Item 1: Enter a whole number.</li>", html)
+        self.assertNotInHTML("<li>Item 2: Enter a whole number.</li>", html)
+
+    def test_item_errors_do_not_promote_to_field_errors(self):
+        """It keeps child validation errors out of the field-level error list."""
+        class Form(forms.Form):
+            emails = nestingdolls.ListField(forms.EmailField(), min_length=4)
+
+        form = Form(sequence_data("emails", ["", "", "", "", ""]))
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(
+            [error.code for error in form.errors.as_data()["emails"]],
+            ["item_invalid"] * 5,
+        )
+        self.assertEqual(list(form["emails"].errors), [])
+
+        html = form.as_p()
+        self.assertNotInHTML("<li>Item 0: This field is required.</li>", html)
+        self.assertInHTML("<li>This field is required.</li>", html)
 
     def test_deletion_preserves_initial_indices(self):
         """It deletes rows without renumbering initial items."""
@@ -227,6 +270,11 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertTrue(empty.is_valid(), empty.errors)
         self.assertEqual(empty.cleaned_data["values"], [])
         self.assertFalse(short.is_valid())
+        self.assertFormError(
+            short,
+            "values",
+            ["Ensure this value has at least 2 items (it has 1)."],
+        )
         self.assertEqual(short.errors.as_data()["values"][0].code, "min_length")
 
     def test_deleted_extra_rows_do_not_consume_final_maximum(self):
@@ -307,6 +355,23 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertTrue(field.has_changed([True], ["1"]))
         self.assertFalse(set_field.has_changed({1, 2}, ["2", "1", "1"]))
 
+    def test_has_changed_detects_added_and_removed_integer_rows(self):
+        """It treats added and removed integer rows as changes."""
+        field = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        self.assertFalse(field.has_changed([], []))
+        self.assertTrue(field.has_changed([], [0]))
+        self.assertTrue(field.has_changed([0], []))
+        self.assertFalse(field.has_changed([0, 1], [0, 1]))
+
+    def test_clean_empty_required_sequence_raises_required(self):
+        """It raises the normal required error for an empty required sequence."""
+        field = nestingdolls.ListField(forms.IntegerField())
+
+        with self.assertRaises(ValidationError) as context:
+            field.clean([])
+        self.assertEqual(context.exception.code, "required")
+
     def test_to_python_rejects_errors_as_values(self):
         """It rejects validation errors passed in as raw values."""
         field = nestingdolls.ListField(forms.IntegerField())
@@ -314,6 +379,14 @@ class SequenceFieldTestCase(SimpleTestCase):
         with self.assertRaises(ValidationError) as context:
             field.to_python(ValidationError("not submitted data"))
         self.assertEqual(context.exception.code, "invalid")
+
+    def test_widget_value_from_datadict_accepts_each_single_row_spelling(self):
+        """It extracts one row from each supported indexed spelling."""
+        field = nestingdolls.ListField(forms.CharField(required=False), required=False)
+
+        self.assertEqual(field.widget.value_from_datadict({"values-0": "x"}, {}, "values"), ["x"])
+        self.assertEqual(field.widget.value_from_datadict({"values.0": "x"}, {}, "values"), ["x"])
+        self.assertEqual(field.widget.value_from_datadict({"values[0]": "x"}, {}, "values"), ["x"])
 
     def test_disabled_field_uses_initial_without_management_data(self):
         """It keeps disabled fields on their initial value."""
@@ -326,7 +399,10 @@ class SequenceFieldTestCase(SimpleTestCase):
 
         self.assertTrue(form.is_valid(), form.errors)
         self.assertEqual(form.cleaned_data["values"], [1])
-        self.assertIn(" disabled", form.as_p())
+        self.assertInHTML(
+            '<input type="number" name="values-0" value="1" disabled id="id_values_0">',
+            form.as_p(),
+        )
 
     def test_show_hidden_initial_uses_the_sequence_hidden_widget(self):
         """It supports hidden initial values for change detection."""
@@ -340,7 +416,10 @@ class SequenceFieldTestCase(SimpleTestCase):
         form = Form(data)
 
         self.assertFalse(form.has_changed())
-        self.assertIn('name="initial-values"', form.as_p())
+        self.assertInHTML(
+            '<input type="hidden" name="initial-values" value="1" id="initial-id_values_0">',
+            form.as_p(),
+        )
 
     def test_item_invalid_errors_preserve_child_codes(self):
         """It preserves child error codes inside item errors."""
@@ -359,6 +438,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         form = Form(sequence_data("values", ["x"]))
         self.assertFalse(form.is_valid())
         errors = form.errors.as_data()["values"]
+        self.assertEqual([error.message for error in errors], ["first", "second"])
         self.assertEqual([error.params["child_code"] for error in errors], ["first_code", "second_code"])
 
 
@@ -390,9 +470,30 @@ class SetFieldTestCase(SimpleTestCase):
         with self.assertRaises(ValidationError) as context:
             nestingdolls.FrozenSetField(forms.JSONField()).clean([{"answer": 42}])
         self.assertEqual(context.exception.code, "unhashable")
+        parent = nestingdolls.ListField(
+            nestingdolls.FrozenSetField(forms.IntegerField(), required=False),
+            required=False,
+        )
+        self.assertFalse(parent.has_changed([frozenset({1, 2})], [["2", "1", "1"]]))
 
 
 class NestedSequenceFieldTestCase(SimpleTestCase):
+    def test_nested_tuple_has_changed_uses_semantic_equality(self):
+        """It treats equal nested tuple values as unchanged."""
+        field = nestingdolls.ListField(
+            nestingdolls.TupleField(
+                forms.IntegerField(),
+                min_length=2,
+                max_length=2,
+            ),
+            required=False,
+        )
+
+        self.assertFalse(field.has_changed([(2, 0)], [[2, 0]]))
+        self.assertTrue(field.has_changed([(2, 0)], [[2, 1]]))
+        self.assertTrue(field.has_changed([(2, 0)], []))
+        self.assertTrue(field.has_changed([], [[2, 0]]))
+
     def test_list_field_accepts_nested_tuple_children(self):
         """It cleans a list of pair tuples from flat nested keys."""
         class Form(forms.Form):
@@ -465,6 +566,28 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
             [[[1, 2], [3]], [[4], [5, 6]]],
         )
 
+    def test_nested_list_has_changed_uses_child_semantics(self):
+        """It keeps nested list change detection semantic."""
+        child = nestingdolls.ListField(
+            nestingdolls.ListField(
+                nestingdolls.ListField(forms.IntegerField(), required=False),
+                required=False,
+            ),
+            required=False,
+        )
+        field = nestingdolls.ListField(child, required=False)
+
+        self.assertFalse(field.has_changed([[[2], [0]]], [[[2], [0]]]))
+        self.assertTrue(field.has_changed([[[2], [0]]], [[[2], [1]]]))
+        self.assertEqual(
+            field.has_changed([[[2], [0]]], [[[2], [1]]]),
+            child.has_changed([[2], [0]], [[2], [1]]),
+        )
+        self.assertEqual(
+            field.has_changed([[[2], [0]]], [[[2], [0]]]),
+            child.has_changed([[2], [0]], [[2], [0]]),
+        )
+
 
 class WidgetIntegrationTestCase(SimpleTestCase):
     def test_custom_child_choices_are_rendered(self):
@@ -476,7 +599,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
         html = Form(initial={"values": ["a"]}).as_p()
 
-        self.assertIn('<option value="a" selected>A</option>', html)
+        self.assertInHTML('<option value="a" selected>A</option>', html)
 
     def test_child_prepare_value_is_used(self):
         """It uses the child field's prepared value when rendering."""
@@ -485,7 +608,10 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
         html = Form(initial={"values": [{"answer": 42}]}).as_p()
 
-        self.assertIn("&quot;answer&quot;: 42", html)
+        self.assertInHTML(
+            '<textarea name="values-0" cols="40" rows="10" id="id_values_0">{&quot;answer&quot;: 42}</textarea>',
+            html,
+        )
 
     def test_boolean_rows_keep_unchecked_positions(self):
         """It keeps unchecked boolean rows in place."""
@@ -649,21 +775,63 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             self.assertEqual(field.clean(["1,5"]), [Decimal("1.5")])
 
     def test_widget_uses_management_data_and_exposes_media(self):
-        """It renders management inputs and sequence media."""
+        """It renders management inputs and enhancement templates."""
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), min_length=2)
 
         form = Form()
         html = form.as_p()
 
-        self.assertIn(f'name="values-{TOTAL_FORM_COUNT}"', html)
-        self.assertIn(f'name="values-{INITIAL_FORM_COUNT}"', html)
-        self.assertIn(f'name="values-{MIN_NUM_FORM_COUNT}"', html)
-        self.assertIn(f'name="values-{MAX_NUM_FORM_COUNT}"', html)
-        self.assertIn('name="values-0"', html)
-        self.assertIn('name="values-1"', html)
+        self.assertInHTML(
+            f'<input type="hidden" name="values-{TOTAL_FORM_COUNT}" value="2" data-sequence-total id="id_values-{TOTAL_FORM_COUNT}">',
+            html,
+        )
+        self.assertInHTML(
+            f'<input type="hidden" name="values-{INITIAL_FORM_COUNT}" value="0" id="id_values-{INITIAL_FORM_COUNT}">',
+            html,
+        )
+        self.assertInHTML(
+            f'<input type="hidden" name="values-{MIN_NUM_FORM_COUNT}" value="2" id="id_values-{MIN_NUM_FORM_COUNT}">',
+            html,
+        )
+        self.assertInHTML(
+            f'<input type="hidden" name="values-{MAX_NUM_FORM_COUNT}" value="1000" id="id_values-{MAX_NUM_FORM_COUNT}">',
+            html,
+        )
+        self.assertInHTML(
+            '<input type="number" name="values-0" id="id_values_0">',
+            html,
+        )
+        self.assertInHTML(
+            '<input type="number" name="values-1" id="id_values_1">',
+            html,
+        )
         self.assertIn("data-sequence-empty-row", html)
+        self.assertIn("data-sequence-add-button", html)
+        self.assertIn("data-sequence-remove-button", html)
+        self.assertEqual(html.count("data-sequence-add>"), 1)
+        self.assertEqual(html.count("data-sequence-remove>"), 1)
         self.assertIn("nestingdolls/sequence.js", str(form.media))
+
+    def test_widget_hides_add_button_when_initial_reaches_maximum(self):
+        """It keeps only the add template when initial rows fill the limit."""
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), max_length=2)
+
+        html = Form(initial={"values": [1, 2]}).as_p()
+
+        self.assertIn("data-sequence-add-button", html)
+        self.assertEqual(html.count("data-sequence-add>"), 1)
+
+    def test_widget_hides_add_button_when_initial_exceeds_maximum(self):
+        """It keeps only the add template when initial rows exceed the limit."""
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), max_length=2)
+
+        html = Form(initial={"values": [1, 2, 3]}).as_p()
+
+        self.assertIn("data-sequence-add-button", html)
+        self.assertEqual(html.count("data-sequence-add>"), 1)
 
 
 class PublicApiTestCase(SimpleTestCase):
