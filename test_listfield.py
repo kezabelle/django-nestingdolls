@@ -1,12 +1,10 @@
+import json
 import unittest
 from collections import deque
 from datetime import datetime
 from decimal import Decimal
-import json
 
 import django
-from hypothesis import HealthCheck, assume, example, given, settings as hypothesis_settings
-from hypothesis import strategies as st
 from django import forms
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
@@ -22,9 +20,11 @@ from django.forms.formsets import (
 from django.http import QueryDict
 from django.test import SimpleTestCase, override_settings
 from django.utils import translation
+from hypothesis import HealthCheck, assume, example, given
+from hypothesis import settings as hypothesis_settings
+from hypothesis import strategies as st
 
 import nestingdolls
-
 
 if not settings.configured:
     settings.configure(
@@ -628,14 +628,14 @@ class SetFieldTestCase(SimpleTestCase):
                 "values-0_1": "08:09:10",
                 "values-1_0": "2024-01-02",
                 "values-1_1": "03:04:05",
-            },
-            initial={
-                "values": {
-                    datetime(2024, 1, 2, 3, 4, 5),
-                    datetime(2024, 6, 7, 8, 9, 10),
-                }
-            },
-        )
+                },
+                initial={
+                    "values": {
+                        datetime(2024, 1, 2, 3, 4, 5),  # noqa: DTZ001
+                        datetime(2024, 6, 7, 8, 9, 10),  # noqa: DTZ001
+                    }
+                },
+            )
 
         self.assertFalse(form.has_changed())
 
@@ -1334,7 +1334,10 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
         self.assertTrue(form.is_valid(), form.errors)
         cleaned = form.cleaned_data["values"][0]
-        self.assertEqual(cleaned.replace(tzinfo=None), datetime(2024, 1, 2, 3, 4, 5))
+        self.assertEqual(
+            cleaned.replace(tzinfo=None),
+            datetime(2024, 1, 2, 3, 4, 5),  # noqa: DTZ001
+        )
 
     def test_multiwidget_child_accepts_dotted_and_bracketed_row_names(self):
         """It accepts dotted and bracketed names for child multiwidgets."""
@@ -1351,7 +1354,8 @@ class WidgetIntegrationTestCase(SimpleTestCase):
                 self.assertTrue(form.is_valid(), form.errors)
                 cleaned = form.cleaned_data["values"][0]
                 self.assertEqual(
-                    cleaned.replace(tzinfo=None), datetime(2024, 1, 2, 3, 4, 5)
+                    cleaned.replace(tzinfo=None),
+                    datetime(2024, 1, 2, 3, 4, 5),  # noqa: DTZ001
                 )
 
     def test_normalizes_bound_data_once(self):
@@ -1548,9 +1552,8 @@ class PublicApiTestCase(SimpleTestCase):
             {"min_length": False},
             {"max_length": None},
         ):
-            with self.subTest(kwargs=kwargs):
-                with self.assertRaises(ValueError):
-                    nestingdolls.ListField(forms.IntegerField(), **kwargs)
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                nestingdolls.ListField(forms.IntegerField(), **kwargs)
 
     def test_rejects_non_fields_and_legacy_widget_usage(self):
         """It rejects invalid child fields and legacy widget arguments."""
