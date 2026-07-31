@@ -1,8 +1,11 @@
 import unittest
 from datetime import datetime
 from decimal import Decimal
+import json
 
 import django
+from hypothesis import HealthCheck, assume, example, given, settings as hypothesis_settings
+from hypothesis import strategies as st
 from django import forms
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
@@ -46,6 +49,26 @@ def sequence_data(name, values=(), *, deleted=(), initial_forms=0):
     for index in deleted:
         data[f"{name}-{index}-{DELETION_FIELD_NAME}"] = "1"
     return data
+
+
+HYPOTHESIS_SETTINGS = hypothesis_settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+SMALL_INTEGERS = st.integers(min_value=-5, max_value=5)
+SMALL_INTEGER_LISTS = st.lists(SMALL_INTEGERS, max_size=5)
+JSON_SCALARS = st.none() | st.booleans() | st.integers(min_value=-5, max_value=5) | st.text(max_size=5)
+JSON_VALUES = st.recursive(
+    JSON_SCALARS,
+    lambda children: st.lists(children, max_size=3)
+    | st.dictionaries(st.text(max_size=4), children, max_size=3),
+    max_leaves=8,
+)
+DATETIME_ROWS = st.lists(
+    st.datetimes(timezones=st.none()).map(lambda value: value.replace(microsecond=0)),
+    max_size=4,
+)
 
 
 class SequenceFieldTestCase(SimpleTestCase):
@@ -95,6 +118,28 @@ class SequenceFieldTestCase(SimpleTestCase):
                 form = Form(data)
                 self.assertTrue(form.is_valid(), form.errors)
                 self.assertEqual(form.cleaned_data["values"], [1, 2, 3])
+
+    def test_json_null_row_is_rejected_consistently_across_supported_spellings(self):
+        """It rejects JSON null rows consistently across all supported spellings."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.JSONField(), required=False)
+
+        data_shapes = (
+            {"values": ["null"]},
+            {"values-0": "null"},
+            {"values.0": "null"},
+            {"values[0]": "null"},
+        )
+
+        for data in data_shapes:
+            with self.subTest(data=data):
+                form = Form(data)
+                self.assertFalse(form.is_valid())
+                self.assertEqual(form.errors.as_data()["values"][0].code, "item_invalid")
+                self.assertEqual(
+                    form.errors.as_data()["values"][0].params["child_code"], "required"
+                )
 
     def test_accepts_direct_and_flat_initial_spellings(self):
         """It accepts all supported initial row spellings."""
@@ -508,6 +553,79 @@ class SetFieldTestCase(SimpleTestCase):
         with self.assertRaises(ValueError):
             form.has_changed()
 
+    def test_tuple_child_set_has_changed_ignores_order_for_equal_members(self):
+        """It treats reordered tuple-set members as unchanged."""
+
+        class Form(forms.Form):
+            values = nestingdolls.SetField(
+                nestingdolls.TupleField(
+                    forms.IntegerField(),
+                    min_length=2,
+                    max_length=2,
+                ),
+                required=False,
+            )
+
+        form = Form(
+            {
+                "values-0-0": "1",
+                "values-0-1": "1",
+                "values-1-0": "1",
+                "values-1-1": "0",
+            },
+            initial={"values": {(1, 0), (1, 1)}},
+        )
+
+        self.assertFalse(form.has_changed())
+
+    def test_splitdatetime_child_set_has_changed_ignores_order_for_equal_members(self):
+        """It treats reordered SplitDateTime set members as unchanged."""
+
+        class Form(forms.Form):
+            values = nestingdolls.SetField(forms.SplitDateTimeField(), required=False)
+
+        form = Form(
+            {
+                "values-0_0": "2024-06-07",
+                "values-0_1": "08:09:10",
+                "values-1_0": "2024-01-02",
+                "values-1_1": "03:04:05",
+            },
+            initial={
+                "values": {
+                    datetime(2024, 1, 2, 3, 4, 5),
+                    datetime(2024, 6, 7, 8, 9, 10),
+                }
+            },
+        )
+
+        self.assertFalse(form.has_changed())
+
+    def test_frozenset_tuple_child_has_changed_ignores_order_for_equal_members(self):
+        """It keeps frozenset tuple children order-insensitive as well."""
+
+        class Form(forms.Form):
+            values = nestingdolls.FrozenSetField(
+                nestingdolls.TupleField(
+                    forms.IntegerField(),
+                    min_length=2,
+                    max_length=2,
+                ),
+                required=False,
+            )
+
+        form = Form(
+            {
+                "values-0-0": "1",
+                "values-0-1": "1",
+                "values-1-0": "1",
+                "values-1-1": "0",
+            },
+            initial={"values": frozenset({(1, 0), (1, 1)})},
+        )
+
+        self.assertFalse(form.has_changed())
+
 
 class NestedSequenceFieldTestCase(SimpleTestCase):
     def test_nested_tuple_has_changed_uses_semantic_equality(self):
@@ -619,6 +737,508 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
             field.has_changed([[[2], [0]]], [[[2], [0]]]),
             child.has_changed([[2], [0]], [[2], [0]]),
         )
+
+
+class _HypothesisTestCase(SimpleTestCase):
+    _row_spelling_names = ("direct", "dash", "dot", "bracket")
+    _multiwidget_spelling_names = ("dash", "dot", "bracket")
+
+    @staticmethod
+    def _spelled_sequence_data(name, values, style, formatter=str):
+        if style == "direct":
+            return {name: [formatter(value) for value in values]}
+        if style == "dash":
+            return {f"{name}-{index}": formatter(value) for index, value in enumerate(values)}
+        if style == "dot":
+            return {f"{name}.{index}": formatter(value) for index, value in enumerate(values)}
+        if style == "bracket":
+            return {f"{name}[{index}]": formatter(value) for index, value in enumerate(values)}
+        raise AssertionError(f"unsupported style: {style}")
+
+    @staticmethod
+    def _cardinality_result(required, min_length, max_length, values):
+        length = len(values)
+        if length == 0 and required:
+            return "required"
+        if length == 0:
+            return "ok"
+        if length < min_length:
+            return "min_length"
+        if length > max_length:
+            return "max_length"
+        return "ok"
+
+    @staticmethod
+    def _undeleted_rows(values, deleted):
+        return [value for index, value in enumerate(values) if index not in deleted]
+
+    @staticmethod
+    def _nested_tuple_data(name, rows):
+        return {
+            f"{name}-{row_index}-{column_index}": str(value)
+            for row_index, row in enumerate(rows)
+            for column_index, value in enumerate(row)
+        }
+
+    def _json_row_data(self, name, values, style):
+        return self._spelled_sequence_data(name, values, style, formatter=json.dumps)
+
+    def _boolean_row_data(self, name, values):
+        row_values = ["on" if value else None for value in values]
+        return sequence_data(name, row_values)
+
+    def _splitdatetime_row_data(self, name, values, style):
+        data = {}
+        for index, value in enumerate(values):
+            date_part = value.date().isoformat()
+            time_part = value.time().strftime("%H:%M:%S")
+            if style == "dash":
+                prefix = f"{name}-{index}"
+            elif style == "dot":
+                prefix = f"{name}.{index}"
+            elif style == "bracket":
+                prefix = f"{name}[{index}]"
+            else:
+                raise AssertionError(f"unsupported style: {style}")
+            data[f"{prefix}_0"] = date_part
+            data[f"{prefix}_1"] = time_part
+        return data
+
+
+class SequenceFieldPropertyTestCase(_HypothesisTestCase):
+    @HYPOTHESIS_SETTINGS
+    @example(values=[{"answer": 42}])
+    @given(values=st.lists(JSON_VALUES, max_size=4))
+    def test_json_rows_clean_equally_across_supported_spellings(self, values):
+        """It gives the same public outcome for every supported JSON spelling."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.JSONField(), required=False)
+
+        outcomes = []
+        for style in self._row_spelling_names:
+            form = Form(self._json_row_data("values", values, style))
+            if form.is_valid():
+                outcomes.append(("ok", form.cleaned_data["values"]))
+            else:
+                outcomes.append(
+                    ("error", tuple(error.code for error in form.errors.as_data()["values"]))
+                )
+        self.assertEqual(outcomes, [outcomes[0]] * len(self._row_spelling_names))
+
+    @HYPOTHESIS_SETTINGS
+    @given(
+        required=st.booleans(),
+        bounds=st.integers(min_value=0, max_value=5).flatmap(
+            lambda min_length: st.tuples(
+                st.just(min_length), st.integers(min_value=min_length, max_value=5)
+            )
+        ),
+        values=SMALL_INTEGER_LISTS,
+    )
+    def test_cardinality_matches_the_public_validation_contract(
+        self, required, bounds, values
+    ):
+        """It applies required/min/max exactly from final row cardinality."""
+        min_length, max_length = bounds
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.IntegerField(),
+                required=required,
+                min_length=min_length,
+                max_length=max_length,
+            )
+
+        form = Form(sequence_data("values", values))
+        expected = self._cardinality_result(required, min_length, max_length, values)
+        self.assertEqual(form.is_valid(), expected == "ok")
+        if expected == "ok":
+            self.assertEqual(form.cleaned_data["values"], values)
+        else:
+            self.assertEqual(form.errors.as_data()["values"][0].code, expected)
+
+    @HYPOTHESIS_SETTINGS
+    @given(
+        values=SMALL_INTEGER_LISTS,
+        initial_forms=st.integers(min_value=0, max_value=5),
+        data=st.data(),
+    )
+    def test_delete_flags_remove_rows_before_cleaned_output(
+        self, values, initial_forms, data
+    ):
+        """It removes deleted rows from cleaned output regardless of initial_forms."""
+        initial_forms = min(initial_forms, len(values))
+        deleted = (
+            data.draw(
+                st.sets(
+                    st.integers(min_value=0, max_value=len(values) - 1),
+                    max_size=len(values),
+                )
+            )
+            if values
+            else set()
+        )
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        form = Form(
+            sequence_data(
+                "values",
+                values,
+                deleted=sorted(deleted),
+                initial_forms=initial_forms,
+            )
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["values"], self._undeleted_rows(values, deleted))
+
+    @HYPOTHESIS_SETTINGS
+    @given(
+        bounds=st.integers(min_value=0, max_value=5).flatmap(
+            lambda min_length: st.tuples(
+                st.just(min_length), st.integers(min_value=min_length, max_value=5)
+            )
+        ),
+        values=SMALL_INTEGER_LISTS,
+        data=st.data(),
+    )
+    def test_cardinality_after_deletion_uses_only_remaining_rows(
+        self, bounds, values, data
+    ):
+        """It validates cardinality against undeleted rows, not raw submissions."""
+        min_length, max_length = bounds
+        deleted = (
+            data.draw(
+                st.sets(
+                    st.integers(min_value=0, max_value=len(values) - 1),
+                    max_size=len(values),
+                )
+            )
+            if values
+            else set()
+        )
+        remaining = self._undeleted_rows(values, deleted)
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.IntegerField(),
+                required=False,
+                min_length=min_length,
+                max_length=max_length,
+            )
+
+        form = Form(sequence_data("values", values, deleted=sorted(deleted)))
+        expected = self._cardinality_result(False, min_length, max_length, remaining)
+        self.assertEqual(form.is_valid(), expected == "ok")
+        if expected == "ok":
+            self.assertEqual(form.cleaned_data["values"], remaining)
+        else:
+            self.assertEqual(form.errors.as_data()["values"][0].code, expected)
+
+    @HYPOTHESIS_SETTINGS
+    @given(values=st.lists(st.booleans(), max_size=5))
+    def test_boolean_rows_preserve_unchecked_positions(self, values):
+        """It keeps false boolean rows in position with management data."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.BooleanField(required=False), required=False)
+
+        form = Form(self._boolean_row_data("values", values))
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["values"], values)
+
+    @HYPOTHESIS_SETTINGS
+    @example(values=[{"nested": [1, 2]}], style="dash")
+    @given(
+        values=st.lists(JSON_VALUES, max_size=4),
+        style=st.sampled_from(_HypothesisTestCase._row_spelling_names),
+    )
+    def test_json_rows_use_semantic_change_detection(self, values, style):
+        """It compares JSON rows semantically instead of by raw string form."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.JSONField(), required=False)
+
+        form = Form(self._json_row_data("values", values, style), initial={"values": values})
+        self.assertFalse(form.has_changed())
+
+    @HYPOTHESIS_SETTINGS
+    @given(values=DATETIME_ROWS)
+    def test_splitdatetime_rows_clean_equally_across_indexed_spellings(self, values):
+        """It cleans compound datetime rows identically across indexed spellings."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.SplitDateTimeField(), required=False)
+
+        cleaned_results = []
+        for style in self._multiwidget_spelling_names:
+            form = Form(self._splitdatetime_row_data("values", values, style))
+            self.assertTrue(form.is_valid(), (style, form.errors))
+            cleaned_results.append(
+                [item.replace(tzinfo=None) for item in form.cleaned_data["values"]]
+            )
+        self.assertEqual(cleaned_results, [values] * len(self._multiwidget_spelling_names))
+
+
+class SetFieldPropertyTestCase(_HypothesisTestCase):
+    @HYPOTHESIS_SETTINGS
+    @example(values=[1, 1])
+    @given(values=SMALL_INTEGER_LISTS)
+    def test_set_field_cleans_to_the_semantic_set(self, values):
+        """It deduplicates rows exactly as a set would."""
+
+        class Form(forms.Form):
+            values = nestingdolls.SetField(forms.IntegerField(), required=False)
+
+        form = Form(sequence_data("values", values))
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["values"], set(values))
+
+    @HYPOTHESIS_SETTINGS
+    @given(
+        initial_members=st.lists(SMALL_INTEGERS, unique=True, max_size=5),
+        data=st.data(),
+    )
+    def test_set_field_has_changed_is_false_for_duplicate_permutations(
+        self, initial_members, data
+    ):
+        """It treats duplicate permutations of the same set as unchanged."""
+
+        class Form(forms.Form):
+            values = nestingdolls.SetField(forms.IntegerField(), required=False)
+
+        initial_set = set(initial_members)
+        extras = (
+            data.draw(
+                st.lists(
+                    st.sampled_from(initial_members),
+                    max_size=3,
+                )
+            )
+            if initial_members
+            else []
+        )
+        submitted = data.draw(st.permutations(tuple(initial_members + extras)))
+        form = Form(
+            sequence_data("values", list(submitted)),
+            initial={"values": initial_set},
+        )
+        self.assertFalse(form.has_changed())
+
+    @HYPOTHESIS_SETTINGS
+    @given(
+        initial_values=SMALL_INTEGER_LISTS,
+        submitted_values=SMALL_INTEGER_LISTS,
+    )
+    def test_set_field_has_changed_tracks_semantic_set_changes(
+        self, initial_values, submitted_values
+    ):
+        """It reports changes from semantic set inequality."""
+        assume(set(initial_values) != set(submitted_values))
+
+        class Form(forms.Form):
+            values = nestingdolls.SetField(forms.IntegerField(), required=False)
+
+        form = Form(
+            sequence_data("values", submitted_values),
+            initial={"values": set(initial_values)},
+        )
+        self.assertTrue(form.has_changed())
+
+    @HYPOTHESIS_SETTINGS
+    @given(
+        initial_members=st.lists(
+            st.tuples(SMALL_INTEGERS, SMALL_INTEGERS),
+            unique=True,
+            max_size=5,
+        ),
+        data=st.data(),
+    )
+    def test_tuple_child_set_has_changed_is_false_for_reordered_equal_members(
+        self, initial_members, data
+    ):
+        """It treats reordered tuple-set members as unchanged."""
+
+        class Form(forms.Form):
+            values = nestingdolls.SetField(
+                nestingdolls.TupleField(
+                    forms.IntegerField(),
+                    min_length=2,
+                    max_length=2,
+                ),
+                required=False,
+            )
+
+        submitted = data.draw(st.permutations(tuple(initial_members)))
+        form = Form(
+            self._nested_tuple_data("values", list(submitted)),
+            initial={"values": set(initial_members)},
+        )
+        self.assertFalse(form.has_changed())
+
+    @HYPOTHESIS_SETTINGS
+    @given(
+        initial_members=st.lists(
+            st.tuples(SMALL_INTEGERS, SMALL_INTEGERS),
+            unique=True,
+            max_size=5,
+        ),
+        submitted_members=st.lists(
+            st.tuples(SMALL_INTEGERS, SMALL_INTEGERS),
+            unique=True,
+            max_size=5,
+        ),
+    )
+    def test_tuple_child_set_has_changed_is_true_for_semantic_difference(
+        self, initial_members, submitted_members
+    ):
+        """It reports changes when tuple-set members differ semantically."""
+        assume(set(initial_members) != set(submitted_members))
+
+        class Form(forms.Form):
+            values = nestingdolls.SetField(
+                nestingdolls.TupleField(
+                    forms.IntegerField(),
+                    min_length=2,
+                    max_length=2,
+                ),
+                required=False,
+            )
+
+        form = Form(
+            self._nested_tuple_data("values", submitted_members),
+            initial={"values": set(initial_members)},
+        )
+        self.assertTrue(form.has_changed())
+
+    @HYPOTHESIS_SETTINGS
+    @given(
+        initial_members=st.lists(
+            st.datetimes(timezones=st.none()).map(
+                lambda value: value.replace(microsecond=0)
+            ),
+            unique=True,
+            max_size=4,
+        ),
+        data=st.data(),
+    )
+    def test_splitdatetime_child_set_has_changed_is_false_for_reordered_equal_members(
+        self, initial_members, data
+    ):
+        """It treats reordered SplitDateTime set members as unchanged."""
+
+        class Form(forms.Form):
+            values = nestingdolls.SetField(forms.SplitDateTimeField(), required=False)
+
+        submitted = list(data.draw(st.permutations(tuple(initial_members))))
+        form = Form(
+            self._splitdatetime_row_data("values", submitted, "dash"),
+            initial={"values": set(initial_members)},
+        )
+        self.assertFalse(form.has_changed())
+
+    @HYPOTHESIS_SETTINGS
+    @given(
+        initial_members=st.lists(
+            st.datetimes(timezones=st.none()).map(
+                lambda value: value.replace(microsecond=0)
+            ),
+            unique=True,
+            max_size=4,
+        ),
+        submitted_members=st.lists(
+            st.datetimes(timezones=st.none()).map(
+                lambda value: value.replace(microsecond=0)
+            ),
+            unique=True,
+            max_size=4,
+        ),
+    )
+    def test_splitdatetime_child_set_has_changed_is_true_for_semantic_difference(
+        self, initial_members, submitted_members
+    ):
+        """It reports changes when SplitDateTime set members differ semantically."""
+        assume(set(initial_members) != set(submitted_members))
+
+        class Form(forms.Form):
+            values = nestingdolls.SetField(forms.SplitDateTimeField(), required=False)
+
+        form = Form(
+            self._splitdatetime_row_data("values", submitted_members, "dash"),
+            initial={"values": set(initial_members)},
+        )
+        self.assertTrue(form.has_changed())
+
+
+class NestedSequencePropertyTestCase(_HypothesisTestCase):
+    @HYPOTHESIS_SETTINGS
+    @example(rows=[(2, 0)])
+    @given(
+        rows=st.lists(
+            st.tuples(
+                SMALL_INTEGERS,
+                SMALL_INTEGERS,
+            ),
+            max_size=5,
+        )
+    )
+    def test_nested_tuple_rows_are_unchanged_under_semantic_equality(self, rows):
+        """It treats tuple initials and list submissions as equal when values match."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.TupleField(
+                    forms.IntegerField(),
+                    min_length=2,
+                    max_length=2,
+                ),
+                required=False,
+            )
+
+        submitted_rows = [list(row) for row in rows]
+        form = Form(self._nested_tuple_data("values", submitted_rows), initial={"values": rows})
+        self.assertFalse(form.has_changed())
+
+    @HYPOTHESIS_SETTINGS
+    @given(
+        initial_rows=st.lists(
+            st.tuples(
+                SMALL_INTEGERS,
+                SMALL_INTEGERS,
+            ),
+            max_size=5,
+        ),
+        submitted_rows=st.lists(
+            st.tuples(
+                SMALL_INTEGERS,
+                SMALL_INTEGERS,
+            ),
+            max_size=5,
+        ),
+    )
+    def test_nested_tuple_rows_report_changes_when_semantic_values_differ(
+        self, initial_rows, submitted_rows
+    ):
+        """It reports a change whenever nested tuple rows differ semantically."""
+        assume(initial_rows != submitted_rows)
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.TupleField(
+                    forms.IntegerField(),
+                    min_length=2,
+                    max_length=2,
+                ),
+                required=False,
+            )
+
+        form = Form(
+            self._nested_tuple_data("values", [list(row) for row in submitted_rows]),
+            initial={"values": initial_rows},
+        )
+        self.assertTrue(form.has_changed())
 
 
 class WidgetIntegrationTestCase(SimpleTestCase):

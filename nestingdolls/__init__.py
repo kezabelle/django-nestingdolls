@@ -8,7 +8,7 @@ from typing import Any, Self, cast
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.forms import Field
 from django.forms.boundfield import BoundField
-from django.forms.fields import BooleanField, FileField
+from django.forms.fields import BooleanField, FileField, MultiValueField
 from django.forms.formsets import (
     BaseFormSet,
     DEFAULT_MAX_NUM,
@@ -667,21 +667,37 @@ class SetField(SequenceField):
         except ValidationError:
             return True
 
-        def unique(values: list[object]) -> list[object]:
+        def comparison_data(value: object) -> object:
+            if isinstance(self.child_field, MultiValueField):
+                return self.child_field.widget.decompress(value)
+            return self.child_field.prepare_value(value)
+
+        def unique_submitted_values(values: list[object]) -> list[object]:
             result: list[object] = []
             for value in values:
                 if not any(
                     not self.child_field.has_changed(
                         self.child_field.to_python(existing), value
                     )
+                        for existing in result
+                ):
+                    result.append(value)
+            return result
+
+        def unique_initial_values(values: list[object]) -> list[object]:
+            result: list[object] = []
+            for value in values:
+                candidate = comparison_data(value)
+                if not any(
+                    not self.child_field.has_changed(existing, candidate)
                     for existing in result
                 ):
                     result.append(value)
             return result
 
         try:
-            unmatched = unique(data_values)
-            for initial_value in unique(initial_values):
+            unmatched = unique_submitted_values(data_values)
+            for initial_value in unique_initial_values(initial_values):
                 for index, data_value in enumerate(unmatched):
                     if not self.child_field.has_changed(initial_value, data_value):
                         unmatched.pop(index)

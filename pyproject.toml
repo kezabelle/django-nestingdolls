@@ -13,6 +13,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "crosshair-tool",
+    "hypothesis",
 ]
 
 [tool.setuptools]
