@@ -364,6 +364,23 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertTrue(field.has_changed([0], []))
         self.assertFalse(field.has_changed([0, 1], [0, 1]))
 
+    def test_has_changed_propagates_child_value_errors(self):
+        """It preserves child has_changed() value errors."""
+
+        class ExtraRowBoomField(forms.CharField):
+            def has_changed(self, initial, data):
+                if initial is None:
+                    raise ValueError("extra row boom")
+                return super().has_changed(initial, data)
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(ExtraRowBoomField(), required=False)
+
+        form = Form({"values-0": "x"})
+
+        with self.assertRaises(ValueError):
+            form.has_changed()
+
     def test_clean_empty_required_sequence_raises_required(self):
         """It raises the normal required error for an empty required sequence."""
         field = nestingdolls.ListField(forms.IntegerField())
@@ -475,6 +492,21 @@ class SetFieldTestCase(SimpleTestCase):
             required=False,
         )
         self.assertFalse(parent.has_changed([frozenset({1, 2})], [["2", "1", "1"]]))
+
+    def test_has_changed_propagates_child_value_errors(self):
+        """It preserves child comparison value errors."""
+
+        class AnyBoomField(forms.CharField):
+            def has_changed(self, initial, data):
+                raise ValueError("boom")
+
+        class Form(forms.Form):
+            values = nestingdolls.SetField(AnyBoomField(), required=False)
+
+        form = Form({"values-0": "x", "values-1": "x"})
+
+        with self.assertRaises(ValueError):
+            form.has_changed()
 
 
 class NestedSequenceFieldTestCase(SimpleTestCase):
@@ -840,8 +872,9 @@ class PublicApiTestCase(SimpleTestCase):
         self.assertIs(nestingdolls.SequenceField, nestingdolls.ListField)
         self.assertIs(nestingdolls.FrozenSequenceField, nestingdolls.TupleField)
         self.assertTrue(issubclass(nestingdolls.FrozenSetField, nestingdolls.SetField))
+        self.assertTrue(issubclass(nestingdolls.InvalidInitialValueError, ValueError))
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(nestingdolls.InvalidInitialValueError):
             nestingdolls.ListField(forms.IntegerField(), initial="not a collection")
         with self.assertRaises(ValueError):
             nestingdolls.ListField(forms.IntegerField(), max_length=1, initial=[1, 2])

@@ -28,6 +28,7 @@ from django.utils.safestring import SafeString
 from django.utils.translation import gettext_lazy as _, ngettext_lazy
 
 __all__ = [
+    "InvalidInitialValueError",
     "SequenceField",
     "FrozenSequenceField",
     "ListField",
@@ -37,6 +38,10 @@ __all__ = [
     "SequenceWidget",
     "SequenceBoundField",
 ]
+
+
+class InvalidInitialValueError(ValueError):
+    """Raised when a sequence initial value is not collection-shaped."""
 
 
 class SequenceBoundField(BoundField):
@@ -203,7 +208,7 @@ class SequenceBoundField(BoundField):
             )
         try:
             return cast(SequenceField, self.field)._initial_values(value)
-        except ValueError:
+        except InvalidInitialValueError:
             return [value]
 
     @cached_property
@@ -250,7 +255,7 @@ class SequenceBoundField(BoundField):
             return changed
         try:
             initial_length = len(cast(SequenceField, self.field)._initial_values(self.initial))
-        except ValueError:
+        except InvalidInitialValueError:
             return True
         return any(index < initial_length for index in self._deleted_indexes)
 
@@ -388,13 +393,13 @@ class SequenceField(Field):
         post[]: isinstance(__return__, list)
         post[]: (value is None or value == "") implies __return__ == []
         post[]: isinstance(value, (list, tuple, set, frozenset)) implies len(__return__) == len(value)
-        raises: ValueError
+        raises: InvalidInitialValueError
         """
         if value is None or value == "":
             return []
         if isinstance(value, (list, tuple, set, frozenset)):
             return list(value)
-        raise ValueError("initial must be a collection of values")
+        raise InvalidInitialValueError("initial must be a collection of values")
 
     def to_python(self, value: object) -> list[object]:
         """Require sequence input to already be list-shaped.
@@ -592,8 +597,11 @@ class SequenceField(Field):
             return False
         try:
             initial_values = self._initial_values(initial)
+        except InvalidInitialValueError:
+            return True
+        try:
             data_values = self.to_python(data)
-        except (ValidationError, ValueError):
+        except ValidationError:
             return True
         for index, initial_value in enumerate(initial_values):
             if index >= len(data_values):
@@ -601,12 +609,15 @@ class SequenceField(Field):
             try:
                 if self.child_field.has_changed(initial_value, data_values[index]):
                     return True
-            except (ValidationError, ValueError):
+            except ValidationError:
                 return True
-        return any(
-            self.child_field.has_changed(None, value)
-            for value in data_values[len(initial_values) :]
-        )
+        for value in data_values[len(initial_values) :]:
+            try:
+                if self.child_field.has_changed(None, value):
+                    return True
+            except ValidationError:
+                return True
+        return False
 
 
 class ListField(SequenceField):
@@ -649,8 +660,11 @@ class SetField(SequenceField):
             return False
         try:
             initial_values = self._initial_values(initial)
+        except InvalidInitialValueError:
+            return True
+        try:
             data_values = self.to_python(data)
-        except (ValidationError, ValueError):
+        except ValidationError:
             return True
 
         def unique(values: list[object]) -> list[object]:
