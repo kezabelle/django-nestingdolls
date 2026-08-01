@@ -57,6 +57,10 @@ HYPOTHESIS_SETTINGS = hypothesis_settings(
     deadline=None,
     suppress_health_check=[HealthCheck.too_slow],
 )
+PARSER_HYPOTHESIS_SETTINGS = hypothesis_settings(
+    max_examples=500,
+    deadline=None,
+)
 SMALL_INTEGERS = st.integers(min_value=-5, max_value=5)
 SMALL_INTEGER_LISTS = st.lists(SMALL_INTEGERS, max_size=5)
 JSON_SCALARS = (
@@ -76,6 +80,28 @@ JSON_VALUES = st.recursive(
 DATETIME_ROWS = st.lists(
     st.datetimes(timezones=st.none()).map(lambda value: value.replace(microsecond=0)),
     max_size=4,
+)
+PARSER_KEYS = st.one_of(
+    st.text(max_size=40),
+    st.builds(
+        lambda separator, index, suffix: f"values{separator}{index}{suffix}",
+        st.sampled_from(("-", ".", "[")),
+        st.text(alphabet="0123456789²١", max_size=30),
+        st.text(alphabet="]_-.[]junk", max_size=12),
+    ),
+)
+PARSER_VALUES = st.one_of(
+    st.none(),
+    st.booleans(),
+    st.integers(),
+    st.text(max_size=20),
+    st.lists(st.text(max_size=10), max_size=5),
+)
+PARSER_MAPPINGS = st.dictionaries(PARSER_KEYS, PARSER_VALUES, max_size=20)
+PARSER_WIDGET = nestingdolls.SequenceWidget(
+    forms.CharField(required=False),
+    max_length=4,
+    absolute_max=8,
 )
 
 
@@ -451,6 +477,173 @@ class SequenceFieldTestCase(SimpleTestCase):
 
         self.assertFalse(form.is_valid())
         self.assertEqual(form.errors.as_data()["values"][0].code, "too_many_forms")
+
+    def test_indexes_are_ascii_only_and_do_not_use_unbounded_integer_parsing(self):
+        """It ignores Unicode digits and safely saturates extremely long indexes."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.IntegerField(), max_length=1, required=False
+            )
+
+        unicode_digits = Form({"values-²": "1", "values[١]": "2"})
+        self.assertTrue(unicode_digits.is_valid(), unicode_digits.errors)
+        self.assertEqual(unicode_digits.cleaned_data["values"], [])
+
+        long_index = Form({f"values-{'9' * 5000}": "1"})
+        self.assertFalse(long_index.is_valid())
+        self.assertEqual(
+            long_index.errors.as_data()["values"][0].code, "too_many_forms"
+        )
+        normalized = long_index.fields["values"].widget._normalize_mapping(
+            long_index.data, "values"
+        )
+        self.assertFalse(any(key.startswith("values-1001") for key in normalized))
+
+    def test_direct_payload_cannot_forge_a_small_management_total(self):
+        """It enforces the hard limit independently of a smaller submitted total."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), max_length=1)
+
+        field = Form.base_fields["values"]
+        data = {
+            "values": ["1"] * (field.absolute_max + 1),
+            f"values-{TOTAL_FORM_COUNT}": "1",
+            f"values-{INITIAL_FORM_COUNT}": "0",
+        }
+        form = Form(data)
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(form.errors.as_data()["values"][0].code, "too_many_forms")
+
+    def test_management_total_authority_and_data_file_union_are_deterministic(self):
+        """Data totals win, file totals are the fallback, and inference uses both."""
+
+        class DataOrFilesWidget(forms.TextInput):
+            def value_from_datadict(self, data, files, name):
+                return data.get(name, files.get(name))
+
+            def value_omitted_from_data(self, data, files, name):
+                return name not in data and name not in files
+
+        class TextForm(forms.Form):
+            values = nestingdolls.ListField(
+                forms.CharField(widget=DataOrFilesWidget), required=False
+            )
+
+        inferred = TextForm({"values-0": "data"}, files={"values-1": "file"})
+        self.assertTrue(inferred.is_valid(), inferred.errors)
+        self.assertEqual(inferred.cleaned_data["values"], ["data", "file"])
+
+        class UploadForm(forms.Form):
+            values = nestingdolls.ListField(forms.FileField(), required=False)
+
+        first = SimpleUploadedFile("first.txt", b"first")
+        second = SimpleUploadedFile("second.txt", b"second")
+        data = {
+            f"values-{TOTAL_FORM_COUNT}": "1",
+            f"values-{INITIAL_FORM_COUNT}": "0",
+        }
+        files = {
+            f"values-{TOTAL_FORM_COUNT}": "2",
+            f"values-{INITIAL_FORM_COUNT}": "0",
+            "values-0": first,
+            "values-1": second,
+        }
+        data_authoritative = UploadForm(data, files=files)
+        self.assertTrue(data_authoritative.is_valid(), data_authoritative.errors)
+        self.assertEqual(data_authoritative.cleaned_data["values"], [first])
+
+        files_authoritative = UploadForm({}, files=files)
+        self.assertTrue(files_authoritative.is_valid(), files_authoritative.errors)
+        self.assertEqual(files_authoritative.cleaned_data["values"], [first, second])
+
+        malformed = TextForm(
+            {
+                f"values-{TOTAL_FORM_COUNT}": "not a number",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                "values-0": "data",
+            },
+            files={"values-1": "file"},
+        )
+        self.assertFalse(malformed.is_valid())
+        self.assertEqual(
+            malformed.errors.as_data()["values"][0].code,
+            "missing_management_form",
+        )
+
+    def test_rows_beyond_an_authoritative_total_are_ignored(self):
+        """It matches formsets by ignoring indexed rows beyond the submitted total."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        data = sequence_data("values", ["1"])
+        data["values-1"] = "not an integer"
+        form = Form(data)
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["values"], [1])
+
+    def test_absolute_limit_short_circuits_child_cleaning_and_change_detection(self):
+        """It does no child work once an excessive direct payload is known."""
+
+        class CountingField(forms.IntegerField):
+            clean_calls = 0
+            change_calls = 0
+
+            def clean(self, value):
+                type(self).clean_calls += 1
+                return super().clean(value)
+
+            def has_changed(self, initial, data):
+                type(self).change_calls += 1
+                return super().has_changed(initial, data)
+
+        field = nestingdolls.ListField(
+            CountingField(), max_length=0, required=False
+        )
+        values = ["1"] * (field.absolute_max + 1)
+
+        with self.assertRaises(ValidationError) as context:
+            field.clean(values)
+        self.assertEqual(context.exception.error_list[0].code, "too_many_forms")
+        self.assertTrue(field.has_changed([], values))
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                CountingField(), max_length=0, required=False
+            )
+
+        form = Form(
+            {
+                "values": values,
+                f"values-{TOTAL_FORM_COUNT}": "0",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+            }
+        )
+        self.assertFalse(form.is_valid())
+        self.assertEqual(form.errors.as_data()["values"][0].code, "too_many_forms")
+        self.assertTrue(form.has_changed())
+        self.assertEqual(CountingField.clean_calls, 0)
+        self.assertEqual(CountingField.change_calls, 0)
+
+    def test_disabled_children_clean_and_validate_sequence_initials(self):
+        """It coerces valid disabled initials and rejects invalid ones."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(disabled=True))
+
+        valid = Form(sequence_data("values", ["99"]), initial={"values": ["7"]})
+        self.assertTrue(valid.is_valid(), valid.errors)
+        self.assertEqual(valid.cleaned_data["values"], [7])
+
+        invalid = Form(sequence_data("values", ["99"]), initial={"values": ["bad"]})
+        self.assertFalse(invalid.is_valid())
+        error = invalid.errors.as_data()["values"][0]
+        self.assertEqual(error.code, "item_invalid")
+        self.assertEqual(error.params["child_code"], "invalid")
 
     def test_sparse_extra_rows_are_skipped_but_initial_rows_are_not(self):
         """It skips missing extra rows but still requires initial rows."""
@@ -1035,6 +1228,16 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
     ):
         """It applies required/min/max exactly from final row cardinality."""
         min_length, max_length = bounds
+
+        if required and max_length == 0:
+            with self.assertRaises(ValueError):
+                nestingdolls.ListField(
+                    forms.IntegerField(),
+                    required=required,
+                    min_length=min_length,
+                    max_length=max_length,
+                )
+            return
 
         class Form(forms.Form):
             values = nestingdolls.ListField(
@@ -2119,6 +2322,51 @@ class PublicApiTestCase(SimpleTestCase):
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 nestingdolls.ListField(forms.IntegerField(), **kwargs)
+        with self.assertRaises(ValueError):
+            nestingdolls.ListField(forms.IntegerField(), max_length=0)
+
+        for kwargs in (
+            {"min_length": -1},
+            {"min_length": 2, "max_length": 1},
+            {"max_length": 2, "absolute_max": 1},
+        ):
+            with self.subTest(widget_kwargs=kwargs), self.assertRaises(ValueError):
+                nestingdolls.SequenceWidget(forms.IntegerField(), **kwargs)
+
+    def test_widget_attrs_sees_final_sequence_configuration(self):
+        """Django's constructor hook sees the configured private widget copy."""
+
+        class InspectingField(nestingdolls.ListField):
+            observed = None
+
+            def widget_attrs(self, widget):
+                self.observed = (
+                    type(widget.child_field),
+                    widget.min_length,
+                    widget.max_length,
+                    widget.absolute_max,
+                )
+                return {"data-hook": "configured"}
+
+        class CustomWidget(nestingdolls.SequenceWidget):
+            def __init__(self, child_field):
+                super().__init__(child_field)
+
+        supplied = nestingdolls.SequenceWidget(forms.CharField())
+        for widget in (None, CustomWidget, supplied):
+            with self.subTest(widget=widget):
+                field = InspectingField(
+                    forms.IntegerField(),
+                    min_length=1,
+                    max_length=2,
+                    widget=widget,
+                )
+                self.assertEqual(
+                    field.observed,
+                    (forms.IntegerField, 1, 2, field.absolute_max),
+                )
+                self.assertEqual(field.widget.attrs["data-hook"], "configured")
+                self.assertIs(field.widget.child_field, field.child_field)
 
     def test_rejects_non_fields_and_legacy_widget_usage(self):
         """It rejects invalid child fields and legacy widget arguments."""
@@ -2174,11 +2422,42 @@ class PublicApiTestCase(SimpleTestCase):
         self.assertIn("Enter a whole number.", form.as_p())
 
     def test_sequence_bound_field_rejects_non_sequence_field(self):
-        """It asserts direct misuse with a non-sequence field."""
+        """It rejects direct misuse with a non-sequence field under optimized Python."""
         form = forms.Form()
 
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(TypeError, "field must be a SequenceField"):
             nestingdolls.SequenceBoundField(form, forms.CharField(), "value")
+
+
+class SequenceParserPropertyTestCase(SimpleTestCase):
+    @PARSER_HYPOTHESIS_SETTINGS
+    @example(data={f"values-{'9' * 5000}": "x"}, files={})
+    @example(data={"values-²": "x", "values[١]": "y"}, files={})
+    @given(data=PARSER_MAPPINGS, files=PARSER_MAPPINGS)
+    def test_normalization_is_total_bounded_idempotent_and_prefix_local(
+        self, data, files
+    ):
+        """Arbitrary keys cannot escape the canonical bounded parser contract."""
+        normalized = PARSER_WIDGET._normalize_mapping(data, "values")
+        renormalized = PARSER_WIDGET._normalize_mapping(normalized, "values")
+        self.assertEqual(renormalized, normalized)
+
+        management_names = set(PARSER_WIDGET.management_names("values"))
+        for key in normalized:
+            if key == "values" or key in management_names:
+                continue
+            self.assertTrue(key.startswith("values-"), key)
+            suffix = key.removeprefix("values-")
+            digits = suffix[: len(suffix) - len(suffix.lstrip("0123456789"))]
+            self.assertTrue(digits, key)
+            self.assertLess(int(digits), PARSER_WIDGET.absolute_max)
+
+        unrelated = {f"other:{key}": value for key, value in data.items()}
+        self.assertEqual(
+            PARSER_WIDGET._normalize_mapping(data | unrelated, "values"), normalized
+        )
+        value = PARSER_WIDGET.value_from_datadict(data, files, "values")
+        self.assertLessEqual(len(value), PARSER_WIDGET.absolute_max)
 
 
 if __name__ == "__main__":  # pragma: no cover

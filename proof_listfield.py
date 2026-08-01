@@ -9,6 +9,7 @@ from django import forms
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.forms.formsets import (
+    DEFAULT_MAX_NUM,
     DELETION_FIELD_NAME,
     INITIAL_FORM_COUNT,
     MAX_NUM_FORM_COUNT,
@@ -77,6 +78,176 @@ def _frozen_set_field() -> nestingdolls.FrozenSetField:
     return nestingdolls.FrozenSetField(forms.IntegerField(), required=False)
 
 
+_PARSER_WIDGET = nestingdolls.SequenceWidget(
+    forms.CharField(required=False), max_length=2, absolute_max=4
+)
+
+
+def _model_normalized_row_key(key: str) -> tuple[str, int] | None:
+    for separator in ("-", ".", "["):
+        prefix = f"values{separator}"
+        if not key.startswith(prefix):
+            continue
+        suffix = key[len(prefix) :]
+        index_end = 0
+        index = 0
+        while index_end < len(suffix) and "0" <= suffix[index_end] <= "9":
+            if index < 4:
+                index = min(4, index * 10 + ord(suffix[index_end]) - ord("0"))
+            index_end += 1
+        if index_end == 0:
+            return None
+        if separator == "[":
+            if index_end == len(suffix) or suffix[index_end] != "]":
+                return None
+            suffix = suffix[index_end + 1 :]
+        else:
+            suffix = suffix[index_end:]
+        if suffix and suffix[0] not in "_-.[":
+            return None
+        return (f"values-{index}{suffix}", index)
+    return None
+
+
+def actual_arbitrary_key_normalization(key: str) -> tuple[str, ...]:
+    normalized = _PARSER_WIDGET._normalize_mapping({key: "x"}, "values")
+    return tuple(sorted(normalized))
+
+
+def model_arbitrary_key_normalization(key: str) -> tuple[str, ...]:
+    management_names = _PARSER_WIDGET.management_names("values")
+    if key in management_names:
+        return (key,)
+    if key == "values":
+        return tuple(
+            sorted(
+                (
+                    "values",
+                    f"values-{TOTAL_FORM_COUNT}",
+                    f"values-{INITIAL_FORM_COUNT}",
+                )
+            )
+        )
+    row_key = _model_normalized_row_key(key)
+    if row_key is None:
+        return ()
+    canonical, index = row_key
+    keys = [f"values-{TOTAL_FORM_COUNT}", f"values-{INITIAL_FORM_COUNT}"]
+    if index < 4:
+        keys.append(canonical)
+    return tuple(sorted(keys))
+
+
+def prove_arbitrary_key_normalization(key: str) -> bool:
+    """
+    pre: len(key) <= 8
+    post[]: __return__
+    """
+    return actual_arbitrary_key_normalization(
+        key
+    ) == model_arbitrary_key_normalization(key)
+
+
+def actual_saturated_index(digits: str) -> tuple[str, bool]:
+    if not 1 <= len(digits) <= 6 or any(
+        digit < "0" or digit > "9" for digit in digits
+    ):
+        return ("invalid", False)
+    normalized = _PARSER_WIDGET._normalize_mapping(
+        {f"values-{digits}": "x"}, "values"
+    )
+    total = normalized.get(f"values-{TOTAL_FORM_COUNT}")
+    row_present = any(
+        key not in _PARSER_WIDGET.management_names("values") for key in normalized
+    )
+    return (total if isinstance(total, str) else "", row_present)
+
+
+def model_saturated_index(digits: str) -> tuple[str, bool]:
+    if not 1 <= len(digits) <= 6 or any(
+        digit < "0" or digit > "9" for digit in digits
+    ):
+        return ("invalid", False)
+    index = 0
+    for digit in digits:
+        if index < 4:
+            index = min(4, index * 10 + ord(digit) - ord("0"))
+    return (str(index + 1), index < 4)
+
+
+def prove_saturated_index(digits: str) -> bool:
+    """
+    pre: 1 <= len(digits) <= 6
+    pre: all("0" <= digit <= "9" for digit in digits)
+    post[]: __return__
+    """
+    return actual_saturated_index(digits) == model_saturated_index(digits)
+
+
+def actual_management_source_precedence(
+    data_has_total: bool, data_total: int, file_total: int
+) -> int:
+    if not 0 <= data_total <= 4 or not 0 <= file_total <= 4:
+        return -1
+    data: dict[str, object] = {}
+    if data_has_total:
+        data[f"values-{TOTAL_FORM_COUNT}"] = str(data_total)
+        data[f"values-{INITIAL_FORM_COUNT}"] = "0"
+    files = {
+        f"values-{TOTAL_FORM_COUNT}": str(file_total),
+        f"values-{INITIAL_FORM_COUNT}": "0",
+    }
+    return len(_PARSER_WIDGET.value_from_datadict(data, files, "values"))
+
+
+def model_management_source_precedence(
+    data_has_total: bool, data_total: int, file_total: int
+) -> int:
+    if not 0 <= data_total <= 4 or not 0 <= file_total <= 4:
+        return -1
+    return data_total if data_has_total else file_total
+
+
+def prove_management_source_precedence(
+    data_has_total: bool, data_total: int, file_total: int
+) -> bool:
+    """
+    pre: 0 <= data_total <= 4
+    pre: 0 <= file_total <= 4
+    post[]: __return__
+    """
+    return actual_management_source_precedence(
+        data_has_total, data_total, file_total
+    ) == model_management_source_precedence(data_has_total, data_total, file_total)
+
+
+def actual_absolute_limit(values: list[int]) -> tuple[str, tuple[int, ...], bool]:
+    field = _integer_field(max_length=2, required=False)
+    field.absolute_max = 2
+    field.widget.absolute_max = 2
+    try:
+        cleaned = cast(list[int], field.clean(values))
+    except ValidationError as exc:
+        outcome = (exc.error_list[0].code or "invalid", ())
+    else:
+        outcome = ("ok", tuple(cleaned))
+    return (*outcome, field.has_changed([], values))
+
+
+def model_absolute_limit(values: list[int]) -> tuple[str, tuple[int, ...], bool]:
+    if len(values) > 2:
+        return ("too_many_forms", (), True)
+    return ("ok", tuple(values), bool(values))
+
+
+def prove_absolute_limit(values: list[int]) -> bool:
+    """
+    pre: len(values) <= 4
+    post[]: __return__
+    """
+    return actual_absolute_limit(values) == model_absolute_limit(values)
+
+
 def actual_clean_cardinality(
     min_length: int, max_length: int, required: bool, values: list[int]
 ) -> tuple[str, tuple[int, ...]]:
@@ -96,9 +267,17 @@ def actual_clean_cardinality(
 def model_clean_cardinality(
     min_length: int, max_length: int, required: bool, values: list[int]
 ) -> tuple[str, tuple[int, ...]]:
-    if min_length < 0 or max_length < 0 or min_length > max_length:
+    if (
+        min_length < 0
+        or max_length < 0
+        or min_length > max_length
+        or required
+        and max_length == 0
+    ):
         return ("constructor_error", ())
     length = len(values)
+    if length > max_length + DEFAULT_MAX_NUM:
+        return ("too_many_forms", ())
     if length == 0 and required:
         return ("required", ())
     if length == 0:
@@ -147,61 +326,6 @@ def prove_has_changed_integer_rows(initial: list[int], data: list[int]) -> bool:
     ) == model_has_changed_integer_rows(initial, data)
 
 
-def actual_single_row_spelling(style: int, value: str) -> tuple[str, ...]:
-    field = _char_field()
-    if style == 0:
-        data: dict[str, object] = {"values-0": value}
-    elif style == 1:
-        data = {"values.0": value}
-    else:
-        data = {"values[0]": value}
-    return tuple(field.widget.value_from_datadict(data, {}, "values"))
-
-
-def model_single_row_spelling(style: int, value: str) -> tuple[str, ...]:
-    del style
-    return (value,)
-
-
-def prove_single_row_spelling(style: int, value: str) -> bool:
-    """
-    pre: 0 <= style <= 2
-    post[]: __return__
-    """
-    return actual_single_row_spelling(style, value) == model_single_row_spelling(
-        style, value
-    )
-
-
-def actual_direct_value_precedence(
-    direct_first: str, direct_second: str, indexed_value: str
-) -> tuple[str, ...]:
-    field = _char_field()
-    data = {
-        "values": [direct_first, direct_second],
-        "values-0": indexed_value,
-    }
-    return tuple(field.widget.value_from_datadict(data, {}, "values"))
-
-
-def model_direct_value_precedence(
-    direct_first: str, direct_second: str, indexed_value: str
-) -> tuple[str, ...]:
-    del indexed_value
-    return (direct_first, direct_second)
-
-
-def prove_direct_value_precedence(
-    direct_first: str, direct_second: str, indexed_value: str
-) -> bool:
-    """
-    post[]: __return__
-    """
-    return actual_direct_value_precedence(
-        direct_first, direct_second, indexed_value
-    ) == model_direct_value_precedence(direct_first, direct_second, indexed_value)
-
-
 def actual_alias_collision(
     first_style: int, first_value: str, second_style: int, second_value: str
 ) -> tuple[str, ...]:
@@ -236,42 +360,6 @@ def prove_alias_collision(
     return actual_alias_collision(
         first_style, first_value, second_style, second_value
     ) == model_alias_collision(first_style, first_value, second_style, second_value)
-
-
-def actual_generated_management_total(key_style: int, value: str) -> tuple[str, ...]:
-    if not 0 <= key_style <= 2:
-        return ("invalid_style", "")
-    field = _char_field()
-    if key_style == 0:
-        data: dict[str, object] = {"values-2": value}
-    elif key_style == 1:
-        data = {"values.2": value}
-    else:
-        data = {"values[2]": value}
-    normalized = field.widget._normalize_mapping(data, "values")
-    total_forms = normalized.get(f"values-{TOTAL_FORM_COUNT}")
-    initial_forms = normalized.get(f"values-{INITIAL_FORM_COUNT}")
-    return (
-        total_forms if isinstance(total_forms, str) else "",
-        initial_forms if isinstance(initial_forms, str) else "",
-    )
-
-
-def model_generated_management_total(key_style: int, value: str) -> tuple[str, ...]:
-    if not 0 <= key_style <= 2:
-        return ("invalid_style", "")
-    del key_style, value
-    return ("3", "0")
-
-
-def prove_generated_management_total(key_style: int, value: str) -> bool:
-    """
-    pre: 0 <= key_style <= 2
-    post[]: __return__
-    """
-    return actual_generated_management_total(
-        key_style, value
-    ) == model_generated_management_total(key_style, value)
 
 
 def actual_clean_with_deleted_and_omitted(

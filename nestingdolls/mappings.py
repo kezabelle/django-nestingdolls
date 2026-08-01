@@ -59,20 +59,21 @@ class MappingWidget(Widget):
         if not data:
             return {}
 
+        flat_prefixes = (f"{name}-", f"{name}.")
+        bracket_prefix = f"{name}["
+
         def normalized_key(key: object) -> str | None:
             if not isinstance(key, str):
                 return None
-            for separator in ("-", "."):
-                prefix = f"{name}{separator}"
+            for prefix in flat_prefixes:
                 if key.startswith(prefix) and len(key) > len(prefix):
                     return f"{name}-{key.removeprefix(prefix)}"
-            prefix = f"{name}["
-            if not key.startswith(prefix):
+            if not key.startswith(bracket_prefix):
                 return None
-            end = key.find("]", len(prefix))
+            end = key.find("]", len(bracket_prefix))
             if end < 0:
                 return None
-            child_name = key[len(prefix) : end]
+            child_name = key[len(bracket_prefix) : end]
             suffix = key[end + 1 :]
             if not child_name or suffix and suffix[0] not in "_-.[":
                 return None
@@ -200,7 +201,8 @@ class MappingBoundField(BoundField):
 
     def __init__(self, form: BaseForm, field: Field, name: str) -> None:
         super().__init__(form, field, name)
-        assert isinstance(self.field, MappingField)
+        if not isinstance(self.field, MappingField):
+            raise TypeError("field must be a MappingField")
 
     @property
     def errors(self) -> ErrorList:

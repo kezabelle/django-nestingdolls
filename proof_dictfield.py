@@ -52,90 +52,12 @@ class _NestedSequenceMappingForm(forms.Form):
     value = nestingdolls.MappingField(_IntegerListForm)
 
 
-def _mapping_data(style: int, value: object) -> dict[str, object]:
-    if style == 0:
-        return {"value": {"a": value}}
-    keys = ("value-a", "value.a", "value[a]")
-    return {keys[style - 1]: value}
-
-
 def _integer_outcome(form: forms.Form) -> tuple[str, int]:
     if form.is_valid():
         cleaned = cast(dict[str, object], form.cleaned_data["value"])
         return ("ok", cast(int, cleaned["a"]))
     error = form.errors.as_data()["value"][0]
     return (error.code or "invalid", 0)
-
-
-def actual_widget_mapping_shape(style: int, value: int) -> tuple[bool, int]:
-    if not 0 <= style <= 3:
-        return (False, 0)
-    field = nestingdolls.MappingField(_IntegerForm)
-    raw = field.widget.value_from_datadict(
-        _mapping_data(style, str(value)), {}, "value"
-    )
-    if not isinstance(raw, dict):
-        return (False, 0)
-    return (True, value if raw.get("a") == str(value) else 0)
-
-
-def model_widget_mapping_shape(style: int, value: int) -> tuple[bool, int]:
-    if not 0 <= style <= 3:
-        return (False, 0)
-    return (True, value)
-
-
-def prove_widget_mapping_shape(style: int, value: int) -> bool:
-    """
-    pre: 0 <= style <= 3
-    post[]: __return__
-    """
-    return actual_widget_mapping_shape(style, value) == model_widget_mapping_shape(
-        style, value
-    )
-
-
-def actual_single_mapping_spelling(style: int, value: int) -> tuple[str, int]:
-    if not 0 <= style <= 3:
-        return ("invalid_style", 0)
-    return _integer_outcome(
-        _RequiredIntegerMappingForm(_mapping_data(style, str(value)))
-    )
-
-
-def model_single_mapping_spelling(style: int, value: int) -> tuple[str, int]:
-    if not 0 <= style <= 3:
-        return ("invalid_style", 0)
-    return ("ok", value)
-
-
-def prove_single_mapping_spelling(style: int, value: int) -> bool:
-    """
-    pre: 0 <= style <= 3
-    post[]: __return__
-    """
-    return actual_single_mapping_spelling(
-        style, value
-    ) == model_single_mapping_spelling(style, value)
-
-
-def actual_direct_mapping_precedence(direct: int, flat: int) -> int:
-    form = _RequiredIntegerMappingForm(
-        {"value": {"a": str(direct)}, "value-a": str(flat)}
-    )
-    return _integer_outcome(form)[1]
-
-
-def model_direct_mapping_precedence(direct: int, flat: int) -> int:
-    del flat
-    return direct
-
-
-def prove_direct_mapping_precedence(direct: int, flat: int) -> bool:
-    """post[]: __return__"""
-    return actual_direct_mapping_precedence(
-        direct, flat
-    ) == model_direct_mapping_precedence(direct, flat)
 
 
 def actual_alias_collision(

@@ -1224,6 +1224,36 @@ class PublicApiTestCase(SimpleTestCase):
         self.assertIs(nestingdolls.FormField, nestingdolls.MappingField)
         self.assertIs(nestingdolls.Subform, nestingdolls.MappingField)
 
+    def test_widget_attrs_sees_final_mapping_configuration(self):
+        """Django's constructor hook sees the final Form class on every widget path."""
+
+        class OtherForm(forms.Form):
+            other = forms.CharField()
+
+        class InspectingField(nestingdolls.MappingField):
+            observed = None
+
+            def widget_attrs(self, widget):
+                self.observed = widget.form_class
+                return {"data-hook": "configured"}
+
+        class CustomWidget(nestingdolls.MappingWidget):
+            pass
+
+        supplied = nestingdolls.MappingWidget(OtherForm)
+        for widget in (None, CustomWidget, supplied):
+            with self.subTest(widget=widget):
+                field = InspectingField(PointForm, widget=widget)
+                self.assertIs(field.observed, PointForm)
+                self.assertIs(field.widget.form_class, PointForm)
+                self.assertEqual(field.widget.attrs["data-hook"], "configured")
+        self.assertIs(supplied.form_class, OtherForm)
+
+    def test_mapping_bound_field_rejects_non_mapping_field(self):
+        """It rejects direct misuse with a non-mapping field under optimized Python."""
+        with self.assertRaisesRegex(TypeError, "field must be a MappingField"):
+            nestingdolls.MappingBoundField(forms.Form(), forms.CharField(), "value")
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -65,7 +65,8 @@ class SequenceBoundField(BoundField):
 
     def __init__(self, form: BaseForm, field: Field, name: str) -> None:
         super().__init__(form, field, name)
-        assert isinstance(self.field, SequenceField)
+        if not isinstance(self.field, SequenceField):
+            raise TypeError("field must be a SequenceField")
 
     @property
     def errors(self) -> ErrorList:
@@ -431,7 +432,7 @@ class SequenceField(Field):
             initial = initial_values[index] if index < len(initial_values) else None
             try:
                 if self.child_field.disabled:
-                    cleaned = initial
+                    cleaned = self.child_field.clean(initial)
                 elif isinstance(self.child_field, FileField):
                     cleaned = self.child_field.clean(value, initial)
                 else:
