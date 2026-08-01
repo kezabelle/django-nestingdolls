@@ -1,13 +1,25 @@
 # nestingdolls
 
-`nestingdolls` adds mapping and sequence fields to Django Forms. These fields
-can validate nested Python or JSON-shaped data without a separate formset.
+`nestingdolls` adds fields for nested data to Django forms. Use these two
+primary entry points:
 
-## Mapping Fields
+- `DictField` validates a fixed group of named values. It returns a `dict`.
+- `ListField` validates a variable number of values of one type. It returns a
+  `list`.
 
-`MappingField` validates one fixed mapping shape with a child Form. It returns
-the child Form's cleaned data as a `dict`. `DictField`, `FormField`, and
-`Subform` are aliases for `MappingField`.
+## DictField
+
+### Purpose
+
+Use `DictField` for one object that has a fixed set of named values. Examples
+include coordinates, postal addresses, and settings.
+
+`DictField` takes a Django form class as its first argument. The child form
+defines the names, fields, and validation rules.
+
+### Basic use
+
+This example defines and validates a point that has two integer values:
 
 ```python
 from django import forms
@@ -20,79 +32,43 @@ class PointForm(forms.Form):
 
 
 class ExampleForm(forms.Form):
-    point = nestingdolls.MappingField(PointForm)
-```
+    point = nestingdolls.DictField(PointForm)
 
-The form accepts direct mapping data:
 
-```python
 form = ExampleForm({"point": {"x": "1", "y": "2"}})
-form.is_valid()
-form.cleaned_data == {"point": {"x": 1, "y": 2}}
+
+assert form.is_valid()
+assert form.cleaned_data == {"point": {"x": 1, "y": 2}}
 ```
 
-It also accepts normal dash paths, dot paths, and bracket paths:
+### Field-specific behavior
 
-- `point-x`
-- `point.x`
-- `point[x]`
+If the input contains an exact mapping, the exact mapping has priority over
+flat field names.
 
-These path styles work through nested mapping and sequence fields. An exact
-mapping value takes precedence over flattened paths.
+The child form runs its normal `clean_<field>()` methods and its `clean()`
+method. The widget displays the child form inside the parent field. A
+non-field error stays inside the child form.
 
-`required=False` permits a completely empty mapping and returns `{}`. If any
-child value is submitted, the child Form keeps its normal required fields and
-validation rules. Child field and non-field errors render inside the nested
-Form. A mapping inside a sequence renders its error beside the sequence row.
+### Related names
 
-The child Form keeps its normal `clean_<field>()`, `clean()`, file, compound
-widget, media, and multipart behavior.
+`MappingField`, `FormField`, and `Subform` are aliases for `DictField`. All four
+names have the same behavior.
 
-### Nested Mapping And Sequence Example
+## ListField
 
-```python
-class ItemForm(forms.Form):
-    name = forms.CharField()
-    tags = nestingdolls.ListField(forms.CharField(), required=False)
+### Purpose
 
+Use `ListField` for an ordered group of repeated values. Examples include
+email addresses, integer identifiers, and uploaded files.
 
-class ExampleForm(forms.Form):
-    items = nestingdolls.ListField(
-        nestingdolls.MappingField(ItemForm),
-        required=False,
-    )
-```
+`ListField` takes a Django field instance as its first argument. The child
+field defines the widget, conversion, and validation for each row.
 
-## Sequence Fields
+### Basic use
 
-`ListField` is a Django form field for a variable-length list of child fields.
-It lets one form field contain zero or more rows of the same child field type.
-It works with normal Django form validation and widget rendering, and can
-be used in place of separate formsets in many cases.
-
-Use `ListField` for most cases. The package also exports:
-
-- `TupleField`: returns a tuple
-- `SetField`: returns a deduplicated set
-- `FrozenSetField`: returns a deduplicated frozenset
-
-### When To Use
-
-Use `ListField` when a form needs repeated values.
-
-Common cases:
-
-- a list of email addresses
-- a list of integer IDs
-- a list of JSON fragments
-- a list of uploaded files
-- a list of fixed-size pairs with `TupleField`
-- an unordered set of values with `SetField`
-- nested lists or tuples inside a larger sequence
-
-### Basic Examples
-
-#### List of Integers
+This example defines and validates a list that contains no more than five
+integers:
 
 ```python
 from django import forms
@@ -106,64 +82,111 @@ class ExampleForm(forms.Form):
         min_length=0,
         max_length=5,
     )
+
+
+form = ExampleForm({"values": ["1", "2"]})
+
+assert form.is_valid()
+assert form.cleaned_data == {"values": [1, 2]}
 ```
 
-#### List of Pairs
+### Field-specific behavior
+
+Use `min_length` and `max_length` to control the number of rows.
+
+The server displays usable rows without JavaScript. JavaScript adds controls
+that add and remove rows. The widget keeps these controls in inert `<template>`
+elements until JavaScript starts.
+
+The widget includes its JavaScript in Django form media. Render `form.media`
+when you want the add and remove controls.
+
+### Related types
+
+Use these related fields when you need a different cleaned value:
+
+- `TupleField` returns a tuple.
+- `SetField` removes duplicate values and returns a set.
+- `FrozenSetField` removes duplicate values and returns a frozenset.
+
+`min_length` and `max_length` apply after `SetField` or `FrozenSetField` removes
+duplicate values.
+
+## Behavior that both fields share
+
+### Django integration
+
+Both fields use standard Django fields, widgets, and validation. Each child
+field keeps its normal conversion and validation rules.
+
+Both fields support file uploads, compound widgets, multipart forms, and
+widget media. Each validation error stays near the child value that caused
+the error.
+
+### Empty values
+
+Set `required=False` to permit an empty value. `DictField` then returns `{}`.
+`ListField` then returns `[]`.
+
+If the user supplies a child value, the child field applies its normal
+required rules.
+
+### Input forms
+
+Both fields accept direct input. Give `DictField` a mapping. Give `ListField`
+a list.
+
+Both fields also accept flat input names. Use a child name for `DictField`.
+Use a numeric row index for `ListField`:
+
+- Dash style: `point-x` or `values-0`
+- Dot style: `point.x` or `values.0`
+- Bracket style: `point[x]` or `values[0]`
+
+These name styles work for form data and initial values. They also work in
+nested fields.
+
+### Nested fields
+
+You can put either primary field inside the other primary field. This example
+defines a list of items. Each item has a name and a list of tags.
 
 ```python
 from django import forms
 import nestingdolls
 
 
+class ItemForm(forms.Form):
+    name = forms.CharField()
+    tags = nestingdolls.ListField(
+        forms.CharField(),
+        required=False,
+    )
+
+
 class ExampleForm(forms.Form):
-    pairs = nestingdolls.ListField(
-        nestingdolls.TupleField(
-            forms.IntegerField(),
-            min_length=2,
-            max_length=2,
-        ),
+    owner = forms.CharField()
+    items = nestingdolls.ListField(
+        nestingdolls.DictField(ItemForm),
         required=False,
     )
 ```
 
-#### Deduplicated Set of Email addresses
+After validation, `items` is a list of dictionaries. The `tags` value in each
+dictionary is a list:
 
 ```python
-from django import forms
-import nestingdolls
-
-
-class ExampleForm(forms.Form):
-    tags = nestingdolls.SetField(
-        forms.EmailField(),
-        required=False,
-    )
+cleaned_data = {
+    "owner": "kezabelle",
+    "items": [
+        {
+            "name": "Example item",
+            "tags": ["one", "two"],
+        },
+        {
+            "name": "Another item",
+            "tags": ["a", "b"],
+        },
+    ],
+}
 ```
-
-### Input Forms
-
-The field accepts these row styles for both `data` and `initial`:
-
-- direct list input such as `{"values": ["1", "2"]}`
-- dash style such as `values-0`, `values-1`
-- dot style such as `values.0`, `values.1`
-- bracket style such as `values[0]`, `values[1]`
-
-### JavaScript
-
-JavaScript is optional.
-It only enhances add and remove controls through progressive enhancement.
-The widget template stores these controls in inert `<template>` nodes.
-
-### Limits and Rules
-
-- One field has one child field type.
-- `min_length` and `max_length` apply to row count.
-- `SetField` checks cardinality **after** deduplication.
-
-### Use-Cases By Type
-
-- Use `ListField` for ordered repeated values.
-- Use `TupleField` when each row has a fixed number of items.
-- Use `SetField` when duplicate submitted rows should collapse to one member.
-- Use `FrozenSetField` when the cleaned result must be immutable.
