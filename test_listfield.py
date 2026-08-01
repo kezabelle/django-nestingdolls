@@ -1441,6 +1441,38 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         self.assertTrue(form.is_valid(), form.errors)
         self.assertEqual(form.cleaned_data["values"][0].name, "one.txt")
 
+    def test_reused_widget_derives_multipart_requirement_from_the_new_child(self):
+        """It does not retain multipart state from a widget's original child."""
+        text_widget = nestingdolls.SequenceWidget(forms.CharField())
+        file_widget = nestingdolls.SequenceWidget(forms.FileField())
+
+        class UploadForm(forms.Form):
+            values = nestingdolls.ListField(forms.FileField(), widget=text_widget)
+
+        class TextForm(forms.Form):
+            values = nestingdolls.ListField(forms.CharField(), widget=file_widget)
+
+        self.assertTrue(UploadForm().is_multipart())
+        self.assertFalse(TextForm().is_multipart())
+
+    def test_splitdatetime_initial_microseconds_do_not_report_a_change(self):
+        """It applies Django's initial microsecond normalization to each row."""
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.SplitDateTimeField())
+
+        initial = datetime(2024, 1, 2, 3, 4, 5, 123456)  # noqa: DTZ001
+        initial_shapes = (
+            {"values": [initial]},
+            {"values": initial},
+        )
+        for initial_data in initial_shapes:
+            with self.subTest(initial_data=initial_data):
+                form = Form(
+                    {"values-0_0": "2024-01-02", "values-0_1": "03:04:05"},
+                    initial=initial_data,
+                )
+                self.assertFalse(form.has_changed())
+
     def test_flat_file_uploads_without_management_data_are_accepted(self):
         """It accepts flat file uploads without management fields."""
         class Form(forms.Form):
@@ -1532,6 +1564,8 @@ class PublicApiTestCase(SimpleTestCase):
     def test_public_aliases_and_bounds(self):
         """It keeps the public aliases and constructor bounds intact."""
         self.assertIs(nestingdolls.SequenceField, nestingdolls.ListField)
+        self.assertTrue(issubclass(nestingdolls.TupleField, nestingdolls.SequenceField))
+        self.assertTrue(issubclass(nestingdolls.SetField, nestingdolls.SequenceField))
         self.assertIs(nestingdolls.FrozenSequenceField, nestingdolls.TupleField)
         self.assertTrue(issubclass(nestingdolls.FrozenSetField, nestingdolls.SetField))
         self.assertTrue(issubclass(nestingdolls.InvalidInitialValueError, ValueError))
@@ -1579,6 +1613,13 @@ class PublicApiTestCase(SimpleTestCase):
         self.assertFalse(form.is_valid())
         self.assertIsInstance(form["values"], CustomBoundField)
         self.assertIn("Enter a whole number.", form.as_p())
+
+    def test_sequence_bound_field_rejects_non_sequence_field(self):
+        """It asserts direct misuse with a non-sequence field."""
+        form = forms.Form()
+
+        with self.assertRaises(AssertionError):
+            nestingdolls.SequenceBoundField(form, forms.CharField(), "value")
 
 
 if __name__ == "__main__":  # pragma: no cover

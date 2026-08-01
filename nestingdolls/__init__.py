@@ -3,10 +3,11 @@ from __future__ import annotations
 import copy
 from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
-from typing import Any, Self, cast
+from datetime import datetime, time
+from typing import Any, Protocol, Self, cast
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.forms import Field
+from django.forms import BaseForm, Field
 from django.forms.boundfield import BoundField
 from django.forms.fields import BooleanField, FileField, MultiValueField
 from django.forms.formsets import (
@@ -46,6 +47,14 @@ class InvalidInitialValueError(ValueError):
     """Raised when a sequence initial value is not collection-shaped."""
 
 
+class _RenderableWidget(Protocol):
+    template_name: str
+
+    def _render(
+        self, template_name: str, context: Mapping[str, object], renderer: object
+    ) -> str: ...
+
+
 class SequenceBoundField(BoundField):
     """Render indexed child errors without storing validation state on the field.
 
@@ -55,13 +64,21 @@ class SequenceBoundField(BoundField):
     child error beside the row identified by its validation index.
     """
 
+    field: SequenceField
+
+    def __init__(self, form: BaseForm, field: Field, name: str) -> None:
+        super().__init__(form, field, name)
+        assert isinstance(self.field, SequenceField)
+
     @property
     def errors(self) -> ErrorList:
         """Return only field-level errors for Django's normal field rendering."""
         errors = super().errors
         if not errors:
             return errors
-        field_errors = [error for error in errors.as_data() if error.code != "item_invalid"]
+        field_errors = [
+            error for error in errors.as_data() if error.code != "item_invalid"
+        ]
         if len(field_errors) == len(errors):
             return errors
         return self.form.error_class(
@@ -73,7 +90,7 @@ class SequenceBoundField(BoundField):
     def as_widget(
         self,
         widget: Widget | None = None,
-        attrs: dict[str, Any] | None = None,
+        attrs: dict[str, str | bool] | None = None,
         only_initial: bool = False,
     ) -> SafeString:
         """Delegate normal rendering to Django and only patch sequence rows when needed."""
@@ -115,7 +132,9 @@ class SequenceBoundField(BoundField):
             ]
         return cast(
             SafeString,
-            cast(Any, widget)._render(widget.template_name, context, self.form.renderer),
+            cast(_RenderableWidget, widget)._render(
+                widget.template_name, context, self.form.renderer
+            ),
         )
 
     @cached_property
@@ -172,24 +191,40 @@ class SequenceBoundField(BoundField):
     @cached_property
     def initial(
         self,
-    ) -> list[object] | tuple[object, ...] | set[object] | frozenset[object] | Mapping[str, object]:
+    ) -> (
+        list[object]
+        | tuple[object, ...]
+        | set[object]
+        | frozenset[object]
+        | Mapping[str, object]
+    ):
         """Use Django's normal initial path unless flattened row keys need normalizing."""
         if self.form.initial and self.name not in self.form.initial:
             normalized_initial = self._normalize_initial_mapping(self.form.initial)
-            if normalized_initial is not None:
-                return normalized_initial
-        value = super().initial
+            value = super().initial if normalized_initial is None else normalized_initial
+        else:
+            value = super().initial
         if isinstance(value, Mapping):
             normalized_value = self._normalize_initial_mapping(value)
             if normalized_value is None:
                 return cast(Mapping[str, object], value)
-            return normalized_value
+            value = normalized_value
         try:
-            return cast(SequenceField, self.field)._initial_values(value)
+            value = self.field._initial_values(value)
         except InvalidInitialValueError:
-            return [value]
+            value = [value]
+        if not self.field.child_field.widget.supports_microseconds:
+            return [
+                item.replace(microsecond=0)
+                if isinstance(item, (datetime, time))
+                else item
+                for item in value
+            ]
+        return value
 
-    def _normalize_initial_mapping(self, value: Mapping[str, object]) -> list[object] | None:
+    def _normalize_initial_mapping(
+        self, value: Mapping[str, object]
+    ) -> list[object] | None:
         """Return normalized initial rows for mapping-style values when possible."""
         value = self.field.widget._normalize_mapping(value, self.name)
         if not value:
@@ -226,7 +261,7 @@ class SequenceBoundField(BoundField):
         file_input = self._file_input
         if self.html_name in data_input or self.html_name in file_input:
             return frozenset()
-        initial_count = len(cast(SequenceField, self.field)._initial_values(self.initial))
+        initial_count = len(self.field._initial_values(self.initial))
         return frozenset(
             index
             for index in range(len(self.data))
@@ -246,7 +281,7 @@ class SequenceBoundField(BoundField):
         if changed or not self._deleted_indexes:
             return changed
         try:
-            initial_length = len(cast(SequenceField, self.field)._initial_values(self.initial))
+            initial_length = len(self.field._initial_values(self.initial))
         except InvalidInitialValueError:
             return True
         return any(index < initial_length for index in self._deleted_indexes)
@@ -285,7 +320,7 @@ class SequenceField(Field):
         required: bool = True,
         widget: SequenceWidget | type[SequenceWidget] | None = None,
         label: str | Promise | None = None,
-        initial: Any | Callable[[], Any] | None = None,
+        initial: object | Callable[[], object] | None = None,
         help_text: str | Promise = "",
         error_messages: Mapping[str, str | Promise] | None = None,
         show_hidden_initial: bool = False,
@@ -371,7 +406,7 @@ class SequenceField(Field):
             bound_field_class=selected_bound_field_class,
         )
 
-    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
+    def __deepcopy__(self, memo: dict[int, object]) -> Self:
         """Copy the field and its child field together."""
         result = super().__deepcopy__(memo)
         result.child_field = copy.deepcopy(self.child_field, memo)
@@ -610,8 +645,7 @@ class SequenceField(Field):
         return False
 
 
-class ListField(SequenceField):
-    """Collect cleaned rows into a mutable list."""
+ListField = SequenceField
 
 
 class TupleField(SequenceField):
@@ -670,7 +704,9 @@ class SetField(SequenceField):
                 return self.child_field.widget.decompress(value)
             return self.child_field.prepare_value(value)
 
-        def unique(values: list[object], same_value: Callable[[object, object], bool]) -> list[object]:
+        def unique(
+            values: list[object], same_value: Callable[[object, object], bool]
+        ) -> list[object]:
             result: list[object] = []
             for value in values:
                 if not any(same_value(existing, value) for existing in result):
@@ -705,9 +741,6 @@ class FrozenSetField(SetField):
     collection_type = frozenset
 
 
-SequenceField = ListField  # type: ignore[misc]
-
-
 class SequenceWidget(Widget):
     """Render dynamic homogeneous rows while delegating each row to one widget."""
 
@@ -736,10 +769,9 @@ class SequenceWidget(Widget):
         self.absolute_max = (
             max_length + DEFAULT_MAX_NUM if absolute_max is None else absolute_max
         )
-        self.needs_multipart_form = bool(child_field.widget.needs_multipart_form)
         super().__init__(dict(attrs) if attrs is not None else None)
 
-    def use_required_attribute(self, initial: Any) -> bool:
+    def use_required_attribute(self, initial: object) -> bool:
         """Disable HTML required handling for dynamic rows."""
         return False
 
@@ -763,6 +795,7 @@ class SequenceWidget(Widget):
         post[]: (name in data and isinstance(data.get(name), list)) implies __return__ == data.get(name)
         post[]: (name in files and isinstance(files.get(name), list) and name not in data) implies __return__ == files.get(name)
         """
+
         def direct_sequence_value(
             source: MultiValueDict[str, object],
         ) -> list[object] | None:
@@ -906,7 +939,9 @@ class SequenceWidget(Widget):
         values = [] if value is None else list(value)
         initial_forms = len(values)
         if not values:
-            values = [None] * min(max(self.min_length, int(self.is_required)), self.max_length)
+            values = [None] * min(
+                max(self.min_length, int(self.is_required)), self.max_length
+            )
         final_attrs = context["widget"]["attrs"]
         final_attrs.pop("aria-invalid", None)
         id_ = final_attrs.get("id")
@@ -965,6 +1000,11 @@ class SequenceWidget(Widget):
     def is_hidden(self) -> bool:
         """Expose whether the child widget is hidden."""
         return bool(self.child_field.widget.is_hidden)
+
+    @property
+    def needs_multipart_form(self) -> bool:  # type: ignore[override]
+        """Expose whether the child widget needs multipart form data."""
+        return bool(self.child_field.widget.needs_multipart_form)
 
     @property
     def media(self) -> WidgetMedia:

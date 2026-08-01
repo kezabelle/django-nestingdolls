@@ -5,32 +5,40 @@ MYPY := $(UV_RUN) mypy
 CROSSHAIR := $(UV_RUN) crosshair
 TSC := ./node_modules/typescript/bin/tsc
 
+DEFAULT_GOAL := help
+
 .PHONY: js tscheck ruff mypy test check crosshair crosshair-cover crosshair-diff crosshair-slow
 
-js:
+.DEFAULT_GOAL := $(DEFAULT_GOAL)
+
+help: ## Show targets and short task text. (This command)
+	@awk 'BEGIN {FS = ": ## " ; print "Available targets\n-----------------"} /^[[:alnum:]_-]+: ## / {print $$1 " → " $$2}' $(MAKEFILE_LIST)
+
+js: ## Build JavaScript from TypeScript.
 	$(TSC) -p tsconfig.json
 
-tscheck:
+tscheck: ## Check TypeScript. Do not write files.
 	$(TSC) -p tsconfig.json --noEmit
 
-ruff:
+ruff: ## Run Ruff on kept Python files.
 	$(RUFF) check nestingdolls/__init__.py test_listfield.py test_settings.py
 
-mypy:
-	DJANGO_SETTINGS_MODULE=test_settings $(MYPY) --strict nestingdolls/__init__.py
+mypy: ## Run mypy with strict checks.
+	$(MYPY) nestingdolls/__init__.py
 
-test:
+test: ## Run the Django test file.
 	$(PYTHON) test_listfield.py
 
+check: ## Run all fast checks.
 check: tscheck ruff mypy test
 
-crosshair:
+crosshair: ## Run CrossHair checks.
 	$(CROSSHAIR) check proof_listfield.py
 
-crosshair-cover:
+crosshair-cover: ## Show CrossHair example tests.
 	$(CROSSHAIR) cover --example_output_format=pytest proof_listfield.prove_clean_cardinality proof_listfield.prove_has_changed_integer_rows proof_listfield.prove_alias_collision proof_listfield.prove_clean_with_deleted_and_omitted proof_listfield.prove_nested_tuple_rows proof_listfield.prove_set_dedup
 
-crosshair-diff:
+crosshair-diff: ## Compare actual and model behavior.
 	$(CROSSHAIR) diffbehavior proof_listfield.actual_clean_cardinality proof_listfield.model_clean_cardinality
 	$(CROSSHAIR) diffbehavior proof_listfield.actual_has_changed_integer_rows proof_listfield.model_has_changed_integer_rows
 	$(CROSSHAIR) diffbehavior proof_listfield.actual_single_row_spelling proof_listfield.model_single_row_spelling
@@ -49,5 +57,5 @@ crosshair-diff:
 	$(CROSSHAIR) diffbehavior proof_listfield.actual_frozenset_has_changed proof_listfield.model_frozenset_has_changed
 	$(CROSSHAIR) diffbehavior proof_listfield.actual_frozenset_child_delegation proof_listfield.model_frozenset_child_delegation
 
-crosshair-slow:
+crosshair-slow: ## Run slow CrossHair checks.
 	$(CROSSHAIR) check --max_uninteresting_iterations=25 --per_condition_timeout=12 proof_listfield.py
