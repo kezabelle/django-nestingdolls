@@ -6,4 +6,4 @@ __all__ = [
 
 
 class InvalidInitialValueError(ValueError):
-    """Raised when a sequence initial value is not collection-shaped."""
+    """Raised when composite-field initial data has the wrong shape."""

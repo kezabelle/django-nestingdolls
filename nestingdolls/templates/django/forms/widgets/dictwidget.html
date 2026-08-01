@@ -1,13 +1,9 @@
 {% spaceless %}
-{% if renderer == "as_p" %}
-{{ subform.as_p }}
-{% elif renderer == "as_table" %}
-{{ subform.as_table }}
-{% elif renderer == "as_ul" %}
-{{ subform.as_ul }}
-{% elif renderer == "as_div" %}
-{{ subform.as_div }}
+{% if widget.is_hidden %}
+  {% for field in widget.subform %}{{ field.as_hidden }}{% endfor %}
 {% else %}
-{{ subform }}
+<div class="dict-widget">
+  {{ widget.subform }}
+</div>
 {% endif %}
 {% endspaceless %}

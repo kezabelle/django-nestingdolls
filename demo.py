@@ -71,7 +71,7 @@ def index(request: WSGIRequest) -> HttpResponse:
     # class ChildForm(forms.Form):
     #     child_name = forms.CharField()
     #     born = forms.IntegerField()
-    #     grandchild = nestingdolls.DictField(
+    #     grandchild = nestingdolls.MappingField(
     #         GrandChildForm,
     #         required=False,
     #         # label="Grandchild!",
@@ -81,12 +81,12 @@ def index(request: WSGIRequest) -> HttpResponse:
     #     parent_name = forms.CharField(required=True)
     #     year_of_birth = forms.IntegerField(required=True)
     #     parent = forms.BooleanField(required=False)
-    #     child1 = nestingdolls.DictField(
+    #     child1 = nestingdolls.MappingField(
     #         ChildForm,
     #         label="Child Number 1",
     #         label_suffix="!",
     #     )
-    #     child2 = nestingdolls.DictField(
+    #     child2 = nestingdolls.MappingField(
     #         subform=ChildForm(
     #             label_suffix="::",
     #             use_required_attribute=False,

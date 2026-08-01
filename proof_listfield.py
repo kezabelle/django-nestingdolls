@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import django
 from django import forms
 from django.conf import settings
@@ -13,10 +15,8 @@ from django.forms.formsets import (
     MIN_NUM_FORM_COUNT,
     TOTAL_FORM_COUNT,
 )
-from typing import cast
 
 import nestingdolls
-
 
 if not settings.configured:
     settings.configure(

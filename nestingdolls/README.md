@@ -1,5 +1,68 @@
 # nestingdolls
 
+`nestingdolls` adds mapping and sequence fields to Django Forms. These fields
+can validate nested Python or JSON-shaped data without a separate formset.
+
+## Mapping Fields
+
+`MappingField` validates one fixed mapping shape with a child Form. It returns
+the child Form's cleaned data as a `dict`. `DictField`, `FormField`, and
+`Subform` are aliases for `MappingField`.
+
+```python
+from django import forms
+import nestingdolls
+
+
+class PointForm(forms.Form):
+    x = forms.IntegerField()
+    y = forms.IntegerField()
+
+
+class ExampleForm(forms.Form):
+    point = nestingdolls.MappingField(PointForm)
+```
+
+The form accepts direct mapping data:
+
+```python
+form = ExampleForm({"point": {"x": "1", "y": "2"}})
+form.is_valid()
+form.cleaned_data == {"point": {"x": 1, "y": 2}}
+```
+
+It also accepts normal dash paths, dot paths, and bracket paths:
+
+- `point-x`
+- `point.x`
+- `point[x]`
+
+These path styles work through nested mapping and sequence fields. An exact
+mapping value takes precedence over flattened paths.
+
+`required=False` permits a completely empty mapping and returns `{}`. If any
+child value is submitted, the child Form keeps its normal required fields and
+validation rules. Child field and non-field errors render inside the nested
+Form. A mapping inside a sequence renders its error beside the sequence row.
+
+The child Form keeps its normal `clean_<field>()`, `clean()`, file, compound
+widget, media, and multipart behavior.
+
+### Nested Mapping And Sequence Example
+
+```python
+class ItemForm(forms.Form):
+    name = forms.CharField()
+    tags = nestingdolls.ListField(forms.CharField(), required=False)
+
+
+class ExampleForm(forms.Form):
+    items = nestingdolls.ListField(
+        nestingdolls.MappingField(ItemForm),
+        required=False,
+    )
+```
+
 ## Sequence Fields
 
 `ListField` is a Django form field for a variable-length list of child fields.
@@ -13,7 +76,7 @@ Use `ListField` for most cases. The package also exports:
 - `SetField`: returns a deduplicated set
 - `FrozenSetField`: returns a deduplicated frozenset
 
-### When To Use 
+### When To Use
 
 Use `ListField` when a form needs repeated values.
 
@@ -88,7 +151,7 @@ The field accepts these row styles for both `data` and `initial`:
 
 ### JavaScript
 
-JavaScript is optional. 
+JavaScript is optional.
 It only enhances add and remove controls through progressive enhancement.
 The widget template stores these controls in inert `<template>` nodes.
 

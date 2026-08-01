@@ -468,6 +468,7 @@ class SequenceField(Field):
                     cleaned = self.child_field.clean(value)
             except ValidationError as error:
                 for item_error in error.error_list:
+                    params = item_error.params or {}
                     for message in item_error.messages:
                         errors.append(
                             ValidationError(
@@ -476,7 +477,9 @@ class SequenceField(Field):
                                 params={
                                     "index": index,
                                     "message": message,
-                                    "child_code": item_error.code,
+                                    "child_code": params.get(
+                                        "child_code", item_error.code
+                                    ),
                                 },
                             )
                         )
@@ -894,7 +897,7 @@ class SequenceWidget(Widget):
                     suffix = suffix[index_end + 1 :]
                 else:
                     suffix = suffix[index_end:]
-                    if suffix and suffix[0] not in "_-":
+                    if suffix and suffix[0] not in "_-.[":
                         return None
                 return (f"{name}-{index}{suffix}", index)
             return None

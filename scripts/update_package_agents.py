@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import nestingdolls
-
 
 BEGIN_MARKER = "<!-- BEGIN GENERATED FIELD METHODS -->"
 END_MARKER = "<!-- END GENERATED FIELD METHODS -->"
@@ -85,6 +84,14 @@ def render_inherited_section(name: str, parent: str) -> list[str]:
 def render_generated_block() -> str:
     sections: list[str] = [
         BEGIN_MARKER,
+        "",
+        *render_class_section(nestingdolls.MappingField),
+        "",
+        *render_alias_section("DictField", "MappingField"),
+        "",
+        *render_alias_section("FormField", "MappingField"),
+        "",
+        *render_alias_section("Subform", "MappingField"),
         "",
         *render_class_section(nestingdolls.SequenceField),
         "",
