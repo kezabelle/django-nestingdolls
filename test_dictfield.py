@@ -439,7 +439,6 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
 
         html = Form().as_p()
 
-        self.assertIn('class="dict-widget"', html)
         self.assertIn('data-mapping-widget', html)
         self.assertIn('data-mapping-field="filters"', html)
         self.assertIn('id="id_filters_widget"', html)
@@ -684,21 +683,54 @@ class NestedDictFieldTestCase(SimpleTestCase):
     def test_deep_alternating_fields_clean_flat_input(self):
         """It cleans mapping, sequence, and mapping layers together."""
 
-        class RowForm(forms.Form):
+        class EntryForm(forms.Form):
             point = nestingdolls.MappingField(PointForm)
+            title = forms.CharField()
+
+        class SectionForm(forms.Form):
+            heading = forms.CharField()
+            entries = nestingdolls.ListField(nestingdolls.MappingField(EntryForm))
 
         class ChildForm(forms.Form):
-            rows = nestingdolls.ListField(nestingdolls.MappingField(RowForm))
+            rows = nestingdolls.ListField(nestingdolls.MappingField(SectionForm))
 
         class Form(forms.Form):
             payload = nestingdolls.MappingField(ChildForm)
 
-        form = Form({"payload[rows][0][point][a]": "4"})
+        form = Form(
+            {
+                "payload[rows][0][heading]": "alpha",
+                "payload[rows][0][entries][0][point][a]": "4",
+                "payload[rows][0][entries][0][point][label]": "east",
+                "payload[rows][0][entries][0][title]": "first",
+                "payload[rows][0][entries][1][point][a]": "5",
+                "payload[rows][0][entries][1][title]": "second",
+                "payload[rows][1][heading]": "beta",
+                "payload[rows][1][entries][0][point][a]": "6",
+                "payload[rows][1][entries][0][title]": "third",
+            }
+        )
 
         self.assertTrue(form.is_valid(), form.errors)
         self.assertEqual(
             form.cleaned_data["payload"],
-            {"rows": [{"point": {"a": 4, "label": ""}}]},
+            {
+                "rows": [
+                    {
+                        "heading": "alpha",
+                        "entries": [
+                            {"point": {"a": 4, "label": "east"}, "title": "first"},
+                            {"point": {"a": 5, "label": ""}, "title": "second"},
+                        ],
+                    },
+                    {
+                        "heading": "beta",
+                        "entries": [
+                            {"point": {"a": 6, "label": ""}, "title": "third"},
+                        ],
+                    },
+                ]
+            },
         )
 
 

@@ -846,6 +846,58 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
             [[[1, 2], [3]], [[4], [5, 6]]],
         )
 
+    def test_list_field_cleans_deeply_nested_alternating_fields(self):
+        """It cleans list, mapping, and list layers together from mixed flat keys."""
+
+        class PointForm(forms.Form):
+            a = forms.IntegerField()
+            label = forms.CharField(required=False)
+
+        class EntryForm(forms.Form):
+            point = nestingdolls.MappingField(PointForm)
+            title = forms.CharField()
+
+        class SectionForm(forms.Form):
+            name = forms.CharField()
+            entries = nestingdolls.ListField(nestingdolls.MappingField(EntryForm))
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(nestingdolls.MappingField(SectionForm))
+
+        data = {
+            "values[0][name]": "alpha",
+            "values[0][entries][0][point][a]": "1",
+            "values[0][entries][0][point][label]": "north",
+            "values[0][entries][0][title]": "first",
+            "values[0][entries][1][point][a]": "2",
+            "values[0][entries][1][title]": "second",
+            "values[1][name]": "beta",
+            "values[1][entries][0][point][a]": "3",
+            "values[1][entries][0][title]": "third",
+        }
+
+        form = Form(data)
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(
+            form.cleaned_data["values"],
+            [
+                {
+                    "name": "alpha",
+                    "entries": [
+                        {"point": {"a": 1, "label": "north"}, "title": "first"},
+                        {"point": {"a": 2, "label": ""}, "title": "second"},
+                    ],
+                },
+                {
+                    "name": "beta",
+                    "entries": [
+                        {"point": {"a": 3, "label": ""}, "title": "third"},
+                    ],
+                },
+            ],
+        )
+
     def test_nested_list_has_changed_uses_child_semantics(self):
         """It keeps nested list change detection semantic."""
         child = nestingdolls.ListField(
