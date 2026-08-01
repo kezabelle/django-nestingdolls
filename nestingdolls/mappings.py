@@ -336,7 +336,7 @@ class MappingField(Field):
     default_error_messages = {  # noqa: RUF012
         "invalid": _("Enter a mapping of values."),
     }
-    bound_field_class = MappingBoundField
+    bound_field_class: type[MappingBoundField] = MappingBoundField
 
     def __init__(
         self,
@@ -355,37 +355,33 @@ class MappingField(Field):
         disabled: bool = False,
         label_suffix: str | None = None,
         template_name: str | None = None,
-        bound_field_class: type[BoundField] | None = None,
+        bound_field_class: type[MappingBoundField] | None = None,
     ) -> None:
         """Configure a fixed mapping field."""
         if not isinstance(form_class, type) or not issubclass(form_class, BaseForm):
             raise ImproperlyConfigured(
                 "form_class argument for MappingField must be a BaseForm subclass"
             )
-        if not isinstance(required, bool):
-            raise TypeError("required must be a bool")
         if initial is not None and not callable(initial):
             self._initial_value(initial)
 
         self.form_class = form_class
-        if widget is None:
-            dict_widget = MappingWidget(form_class)
-        elif isinstance(widget, type):
-            if not issubclass(widget, MappingWidget):
-                raise TypeError("widget must be a MappingWidget instance or subclass")
-            dict_widget = widget(form_class)
-        elif isinstance(widget, MappingWidget):
-            dict_widget = copy.deepcopy(widget)
-            dict_widget.form_class = form_class
-        else:
+        widget = MappingWidget if widget is None else widget
+        if not (
+            isinstance(widget, MappingWidget)
+            or isinstance(widget, type)
+            and issubclass(widget, MappingWidget)
+        ):
             raise TypeError("widget must be a MappingWidget instance or subclass")
+        if isinstance(widget, type):
+            widget = widget(form_class)
 
-        selected_bound_field_class = bound_field_class or self.bound_field_class
-        if not issubclass(selected_bound_field_class, MappingBoundField):
+        bound_field_class = bound_field_class or self.bound_field_class
+        if not issubclass(bound_field_class, MappingBoundField):
             raise TypeError("bound_field_class must inherit from MappingBoundField")
         super().__init__(
             required=required,
-            widget=dict_widget,
+            widget=widget,
             label=label,  # type: ignore[arg-type]
             initial=initial,
             help_text=help_text,  # type: ignore[arg-type]
@@ -396,8 +392,10 @@ class MappingField(Field):
             disabled=disabled,
             label_suffix=label_suffix,
             template_name=template_name,
-            bound_field_class=selected_bound_field_class,
+            bound_field_class=bound_field_class,
         )
+        # Django copies the widget. Configure that copy to match this field.
+        self.widget.form_class = form_class
 
     @staticmethod
     def _initial_value(value: object) -> dict[str, object]:

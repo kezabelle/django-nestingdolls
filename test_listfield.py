@@ -2116,8 +2116,6 @@ class PublicApiTestCase(SimpleTestCase):
             {"min_length": -1},
             {"max_length": -1},
             {"min_length": 2, "max_length": 1},
-            {"min_length": False},
-            {"max_length": None},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 nestingdolls.ListField(forms.IntegerField(), **kwargs)
@@ -2130,6 +2128,33 @@ class PublicApiTestCase(SimpleTestCase):
             nestingdolls.ListField(forms.IntegerField(), widget=forms.TextInput)
         with self.assertRaises(TypeError):
             nestingdolls.ListField(forms.IntegerField(), min_num=1)
+
+    def test_widget_instance_is_copied_and_rebound_to_field_configuration(self):
+        """Django copies a supplied widget before the field configures it."""
+        original_child = forms.CharField()
+        widget = nestingdolls.SequenceWidget(
+            original_child,
+            min_length=4,
+            max_length=5,
+            absolute_max=6,
+        )
+
+        field = nestingdolls.ListField(
+            forms.IntegerField(),
+            min_length=1,
+            max_length=2,
+            widget=widget,
+        )
+
+        self.assertIsNot(field.widget, widget)
+        self.assertIs(field.widget.child_field, field.child_field)
+        self.assertEqual(field.widget.min_length, 1)
+        self.assertEqual(field.widget.max_length, 2)
+        self.assertEqual(field.widget.absolute_max, field.absolute_max)
+        self.assertIs(widget.child_field, original_child)
+        self.assertEqual(widget.min_length, 4)
+        self.assertEqual(widget.max_length, 5)
+        self.assertEqual(widget.absolute_max, 6)
 
     def test_custom_bound_field_keeps_sequence_error_integration(self):
         """It lets custom bound fields keep sequence error rendering."""

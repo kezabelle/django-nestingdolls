@@ -137,20 +137,14 @@ class SequenceBoundField(BoundField):
     @cached_property
     def _data_input(self) -> MultiValueDict[str, object]:
         """Cache normalized submitted form data for this field."""
-        return cast(
-            MultiValueDict[str, object],
-            self.field.widget._normalize_mapping(self.form.data, self.html_name),
-        )
+        return self.field.widget._normalize_mapping(self.form.data, self.html_name)
 
     @cached_property
     def _file_input(self) -> MultiValueDict[str, object]:
         """Cache normalized submitted files for this field."""
         if not self.form.files:
             return MultiValueDict()
-        return cast(
-            MultiValueDict[str, object],
-            self.field.widget._normalize_mapping(self.form.files, self.html_name),
-        )
+        return self.field.widget._normalize_mapping(self.form.files, self.html_name)
 
     @cached_property
     def _management_form(self) -> ManagementForm | None:
@@ -176,13 +170,10 @@ class SequenceBoundField(BoundField):
     @cached_property
     def data(self) -> list[object]:
         """Return the bound value extracted from normalized data and files."""
-        return cast(
-            list[object],
-            self.field.widget._value_from_normalized_data(
-                self._data_input,
-                self._file_input,
-                self.html_name,
-            ),
+        return self.field.widget._value_from_normalized_data(
+            self._data_input,
+            self._file_input,
+            self.html_name,
         )
 
     @cached_property
@@ -228,13 +219,10 @@ class SequenceBoundField(BoundField):
         value = self.field.widget._normalize_mapping(value, self.name)
         if not value:
             return None
-        return cast(
-            list[object],
-            self.field.widget._value_from_normalized_data(
-                value,
-                MultiValueDict(),
-                self.name,
-            ),
+        return self.field.widget._value_from_normalized_data(
+            value,
+            MultiValueDict(),
+            self.name,
         )
 
     @cached_property
@@ -306,8 +294,9 @@ class SequenceField(Field):
             "limit_value",
         ),
     }
-    bound_field_class = SequenceBoundField
+    bound_field_class: type[SequenceBoundField] = SequenceBoundField
     hidden_widget = MultipleHiddenInput
+    widget: SequenceWidget
 
     def __init__(
         self,
@@ -328,24 +317,15 @@ class SequenceField(Field):
         disabled: bool = False,
         label_suffix: str | None = None,
         template_name: str | None = None,
-        bound_field_class: type[BoundField] | None = None,
+        bound_field_class: type[SequenceBoundField] | None = None,
     ) -> None:
         """Configure a homogeneous variable-length field."""
         if not isinstance(child_field, Field):
             raise ImproperlyConfigured(
                 "child_field argument for SequenceField must be a forms.Field instance"
             )
-        if (
-            isinstance(min_length, bool)
-            or isinstance(max_length, bool)
-            or not isinstance(min_length, int)
-            or not isinstance(max_length, int)
-            or min_length < 0
-            or max_length < min_length
-        ):
+        if min_length < 0 or max_length < min_length:
             raise ValueError("min_length and max_length must be non-negative integers")
-        if not isinstance(required, bool):
-            raise TypeError("required must be a bool")
         if (
             initial is not None
             and not callable(initial)
@@ -361,37 +341,22 @@ class SequenceField(Field):
         self.absolute_max = max_length + DEFAULT_MAX_NUM
         self.child_field.localize = localize
 
-        if widget is None:
-            sequence_widget = SequenceWidget(
-                self.child_field,
-                min_length=min_length,
-                max_length=max_length,
-                absolute_max=self.absolute_max,
-            )
-        elif isinstance(widget, type):
-            if not issubclass(widget, SequenceWidget):
-                raise TypeError("widget must be a SequenceWidget instance or subclass")
-            sequence_widget = widget(
-                self.child_field,
-                min_length=min_length,
-                max_length=max_length,
-                absolute_max=self.absolute_max,
-            )
-        elif isinstance(widget, SequenceWidget):
-            sequence_widget = copy.deepcopy(widget)
-            sequence_widget.child_field = self.child_field
-            sequence_widget.min_length = min_length
-            sequence_widget.max_length = max_length
-            sequence_widget.absolute_max = self.absolute_max
-        else:
+        widget = SequenceWidget if widget is None else widget
+        if not (
+            isinstance(widget, SequenceWidget)
+            or isinstance(widget, type)
+            and issubclass(widget, SequenceWidget)
+        ):
             raise TypeError("widget must be a SequenceWidget instance or subclass")
+        if isinstance(widget, type):
+            widget = widget(self.child_field)
 
-        selected_bound_field_class = bound_field_class or self.bound_field_class
-        if not issubclass(selected_bound_field_class, SequenceBoundField):
+        bound_field_class = bound_field_class or self.bound_field_class
+        if not issubclass(bound_field_class, SequenceBoundField):
             raise TypeError("bound_field_class must inherit from SequenceBoundField")
         super().__init__(
             required=required,
-            widget=sequence_widget,
+            widget=widget,
             label=label,  # type: ignore[arg-type]
             initial=initial,
             help_text=help_text,  # type: ignore[arg-type]
@@ -402,8 +367,13 @@ class SequenceField(Field):
             disabled=disabled,
             label_suffix=label_suffix,
             template_name=template_name,
-            bound_field_class=selected_bound_field_class,
+            bound_field_class=bound_field_class,
         )
+        # Django copies the widget. Configure that copy to match this field.
+        self.widget.child_field = self.child_field
+        self.widget.min_length = min_length
+        self.widget.max_length = max_length
+        self.widget.absolute_max = self.absolute_max
 
     def __deepcopy__(self, memo: dict[int, object]) -> Self:
         """Copy the field and its child field together."""

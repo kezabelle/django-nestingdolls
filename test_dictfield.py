@@ -377,8 +377,42 @@ class DictFieldTestCase(SimpleTestCase):
             nestingdolls.MappingField(PointForm, widget=forms.TextInput)
         with self.assertRaises(TypeError):
             nestingdolls.MappingField(PointForm, bound_field_class=forms.BoundField)
-        with self.assertRaises(TypeError):
-            nestingdolls.MappingField(PointForm, required=1)  # type: ignore[arg-type]
+
+    def test_widget_extensions_are_copied_and_rebound_to_the_child_form(self):
+        """Django copies widget instances and the field supplies its Form class."""
+
+        class OtherForm(forms.Form):
+            other = forms.CharField()
+
+        class CustomWidget(nestingdolls.MappingWidget):
+            pass
+
+        widget = CustomWidget(OtherForm)
+        instance_field = nestingdolls.MappingField(PointForm, widget=widget)
+        class_field = nestingdolls.MappingField(PointForm, widget=CustomWidget)
+
+        self.assertIsNot(instance_field.widget, widget)
+        self.assertIs(instance_field.widget.form_class, PointForm)
+        self.assertIs(widget.form_class, OtherForm)
+        self.assertIsInstance(class_field.widget, CustomWidget)
+        self.assertIs(class_field.widget.form_class, PointForm)
+
+    def test_custom_bound_field_keeps_mapping_error_integration(self):
+        """Compatible custom bound fields remain supported."""
+
+        class CustomBoundField(nestingdolls.MappingBoundField):
+            pass
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(
+                PointForm, bound_field_class=CustomBoundField
+            )
+
+        form = Form({"point-a": "bad"})
+
+        self.assertFalse(form.is_valid())
+        self.assertIsInstance(form["point"], CustomBoundField)
+        self.assertIn("Enter a whole number.", form.as_p())
 
 
 class DictFieldRenderingTestCase(SimpleTestCase):
