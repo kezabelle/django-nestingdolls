@@ -59,11 +59,18 @@ HYPOTHESIS_SETTINGS = hypothesis_settings(
 )
 SMALL_INTEGERS = st.integers(min_value=-5, max_value=5)
 SMALL_INTEGER_LISTS = st.lists(SMALL_INTEGERS, max_size=5)
-JSON_SCALARS = st.none() | st.booleans() | st.integers(min_value=-5, max_value=5) | st.text(max_size=5)
+JSON_SCALARS = (
+    st.none()
+    | st.booleans()
+    | st.integers(min_value=-5, max_value=5)
+    | st.text(max_size=5)
+)
 JSON_VALUES = st.recursive(
     JSON_SCALARS,
-    lambda children: st.lists(children, max_size=3)
-    | st.dictionaries(st.text(max_size=4), children, max_size=3),
+    lambda children: (
+        st.lists(children, max_size=3)
+        | st.dictionaries(st.text(max_size=4), children, max_size=3)
+    ),
     max_leaves=8,
 )
 DATETIME_ROWS = st.lists(
@@ -94,6 +101,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_plain_mapping_uses_indexed_values_without_management_data(self):
         """It accepts plain indexed mappings without management fields."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
@@ -104,6 +112,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_accepts_direct_and_flat_data_spellings(self):
         """It accepts all supported submitted row spellings."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
@@ -120,8 +129,11 @@ class SequenceFieldTestCase(SimpleTestCase):
                 self.assertTrue(form.is_valid(), form.errors)
                 self.assertEqual(form.cleaned_data["values"], [1, 2, 3])
 
-    def test_sparse_high_index_dot_and_bracket_rows_are_accepted_without_management_data(self):
+    def test_sparse_high_index_dot_and_bracket_rows_are_accepted_without_management_data(
+        self,
+    ):
         """It accepts sparse dot and bracket spellings without explicit management rows."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), required=False)
 
@@ -153,13 +165,16 @@ class SequenceFieldTestCase(SimpleTestCase):
             with self.subTest(data=data):
                 form = Form(data)
                 self.assertFalse(form.is_valid())
-                self.assertEqual(form.errors.as_data()["values"][0].code, "item_invalid")
+                self.assertEqual(
+                    form.errors.as_data()["values"][0].code, "item_invalid"
+                )
                 self.assertEqual(
                     form.errors.as_data()["values"][0].params["child_code"], "required"
                 )
 
     def test_accepts_direct_and_flat_initial_spellings(self):
         """It accepts all supported initial row spellings."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
@@ -176,6 +191,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_field_initial_accepts_flat_spellings(self):
         """It accepts flat spellings in field-level initial data."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(
                 forms.IntegerField(), initial={"values[0]": 1, "values[1]": 2}
@@ -183,6 +199,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_initial_accepts_generic_sequence_and_collection_types(self):
         """It accepts non-string collection-shaped initial values beyond builtins."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), required=False)
 
@@ -191,7 +208,9 @@ class SequenceFieldTestCase(SimpleTestCase):
                 forms.IntegerField(), required=False, initial=range(1, 3)
             )
 
-        self.assertEqual(Form(initial={"values": range(3)})["values"].value(), [0, 1, 2])
+        self.assertEqual(
+            Form(initial={"values": range(3)})["values"].value(), [0, 1, 2]
+        )
         self.assertEqual(
             Form(initial={"values": deque([4, 5])})["values"].value(),
             [4, 5],
@@ -200,6 +219,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_exact_name_scalar_mapping_is_treated_as_one_row(self):
         """It treats an exact-name scalar mapping as one row."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
@@ -220,6 +240,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_flattened_initial_mapping_is_normalized(self):
         """It normalizes flattened initial mappings through the bound-field path."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
@@ -242,6 +263,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_partial_management_data_is_an_error(self):
         """It rejects partial management form data."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
@@ -275,15 +297,24 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_overlapping_spellings_use_normal_overwrite_semantics(self):
         """It lets later overlapping spellings overwrite earlier ones."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
         cases = (
             ({"values-1": "2", "values.1": "3"}, [3], "later canonical row wins"),
-            ({"values": ["1"], "values-0": "2"}, [1], "direct value wins over indexed convenience"),
+            (
+                {"values": ["1"], "values-0": "2"},
+                [1],
+                "direct value wins over indexed convenience",
+            ),
             ({"values-01": "2", "values-1": "3"}, [3], "later normalized index wins"),
             ({"values-0": "2", "values[00]": "3"}, [3], "later bracket alias wins"),
-            ({"values.0": "2", "values[00]": "3"}, [3], "later bracket canonical alias wins"),
+            (
+                {"values.0": "2", "values[00]": "3"},
+                [3],
+                "later bracket canonical alias wins",
+            ),
         )
         for data, expected, label in cases:
             with self.subTest(label=label, data=data):
@@ -293,6 +324,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_item_errors_are_inline_and_available_to_api_consumers(self):
         """It exposes per-row errors in HTML and error data."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
@@ -300,7 +332,9 @@ class SequenceFieldTestCase(SimpleTestCase):
 
         self.assertFalse(form.is_valid())
         errors = form.errors.as_data()["values"]
-        self.assertEqual([error.code for error in errors], ["item_invalid", "item_invalid"])
+        self.assertEqual(
+            [error.code for error in errors], ["item_invalid", "item_invalid"]
+        )
         self.assertEqual([error.params["index"] for error in errors], [1, 2])
         self.assertEqual(list(form["values"].errors), [])
 
@@ -316,6 +350,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_item_errors_do_not_promote_to_field_errors(self):
         """It keeps child validation errors out of the field-level error list."""
+
         class Form(forms.Form):
             emails = nestingdolls.ListField(forms.EmailField(), min_length=4)
 
@@ -334,6 +369,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_deletion_preserves_initial_indices(self):
         """It deletes rows without renumbering initial items."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
@@ -347,6 +383,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_delete_flags_follow_django_boolean_semantics(self):
         """It treats standard Django truthy delete flags as deletes."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), required=False)
 
@@ -360,6 +397,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_cardinality_is_independent_from_required(self):
         """It keeps cardinality checks separate from required checks."""
+
         class OptionalForm(forms.Form):
             values = nestingdolls.ListField(
                 forms.IntegerField(), required=False, min_length=2
@@ -380,6 +418,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_deleted_extra_rows_do_not_consume_final_maximum(self):
         """It ignores deleted extra rows when enforcing the maximum."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), max_length=1)
 
@@ -390,6 +429,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_management_total_uses_formset_absolute_maximum(self):
         """It uses the formset absolute maximum for management totals."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), max_length=1)
 
@@ -403,6 +443,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_flat_mapping_uses_the_same_absolute_maximum(self):
         """It applies the same absolute maximum to flat mappings."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), max_length=1)
 
@@ -413,6 +454,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_sparse_extra_rows_are_skipped_but_initial_rows_are_not(self):
         """It skips missing extra rows but still requires initial rows."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
@@ -431,6 +473,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_explicit_management_data_skips_omitted_extra_rows(self):
         """It skips omitted extra rows while keeping submitted initial rows."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), required=False)
 
@@ -444,6 +487,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_leading_zero_indexes_normalize_once(self):
         """It normalizes leading-zero indexes to one row key."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
@@ -455,7 +499,9 @@ class SequenceFieldTestCase(SimpleTestCase):
         """It rejects unhashable cleaned values for sets."""
         field = nestingdolls.SetField(forms.JSONField())
 
-        self.assertNotIn("unhashable", nestingdolls.ListField(forms.JSONField()).error_messages)
+        self.assertNotIn(
+            "unhashable", nestingdolls.ListField(forms.JSONField()).error_messages
+        )
 
         with self.assertRaises(ValidationError) as context:
             field.clean([{"answer": 42}])
@@ -515,12 +561,19 @@ class SequenceFieldTestCase(SimpleTestCase):
         """It extracts one row from each supported indexed spelling."""
         field = nestingdolls.ListField(forms.CharField(required=False), required=False)
 
-        self.assertEqual(field.widget.value_from_datadict({"values-0": "x"}, {}, "values"), ["x"])
-        self.assertEqual(field.widget.value_from_datadict({"values.0": "x"}, {}, "values"), ["x"])
-        self.assertEqual(field.widget.value_from_datadict({"values[0]": "x"}, {}, "values"), ["x"])
+        self.assertEqual(
+            field.widget.value_from_datadict({"values-0": "x"}, {}, "values"), ["x"]
+        )
+        self.assertEqual(
+            field.widget.value_from_datadict({"values.0": "x"}, {}, "values"), ["x"]
+        )
+        self.assertEqual(
+            field.widget.value_from_datadict({"values[0]": "x"}, {}, "values"), ["x"]
+        )
 
     def test_disabled_field_uses_initial_without_management_data(self):
         """It keeps disabled fields on their initial value."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(
                 forms.IntegerField(), disabled=True, initial=[1]
@@ -537,6 +590,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_show_hidden_initial_uses_the_sequence_hidden_widget(self):
         """It supports hidden initial values for change detection."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(
                 forms.IntegerField(), initial=[1], show_hidden_initial=True
@@ -554,6 +608,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
     def test_item_invalid_errors_preserve_child_codes(self):
         """It preserves child error codes inside item errors."""
+
         class MultiErrorField(forms.Field):
             def clean(self, value):
                 raise ValidationError(
@@ -570,7 +625,10 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertFalse(form.is_valid())
         errors = form.errors.as_data()["values"]
         self.assertEqual([error.message for error in errors], ["first", "second"])
-        self.assertEqual([error.params["child_code"] for error in errors], ["first_code", "second_code"])
+        self.assertEqual(
+            [error.params["child_code"] for error in errors],
+            ["first_code", "second_code"],
+        )
 
 
 class TupleFieldTestCase(SequenceFieldTestCase):
@@ -659,14 +717,14 @@ class SetFieldTestCase(SimpleTestCase):
                 "values-0_1": "08:09:10",
                 "values-1_0": "2024-01-02",
                 "values-1_1": "03:04:05",
-                },
-                initial={
-                    "values": {
-                        datetime(2024, 1, 2, 3, 4, 5),  # noqa: DTZ001
-                        datetime(2024, 6, 7, 8, 9, 10),  # noqa: DTZ001
-                    }
-                },
-            )
+            },
+            initial={
+                "values": {
+                    datetime(2024, 1, 2, 3, 4, 5),  # noqa: DTZ001
+                    datetime(2024, 6, 7, 8, 9, 10),  # noqa: DTZ001
+                }
+            },
+        )
 
         self.assertFalse(form.has_changed())
 
@@ -715,6 +773,7 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
 
     def test_list_field_accepts_nested_tuple_children(self):
         """It cleans a list of pair tuples from flat nested keys."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(
                 nestingdolls.TupleField(
@@ -738,6 +797,7 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
 
     def test_list_field_rejects_nested_tuple_children_with_extra_items(self):
         """It rejects tuple children that submit more than two items."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(
                 nestingdolls.TupleField(
@@ -757,15 +817,16 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
 
         self.assertFalse(form.is_valid())
         self.assertEqual(form.errors.as_data()["values"][0].code, "item_invalid")
-        self.assertEqual(form.errors.as_data()["values"][0].params["child_code"], "max_length")
+        self.assertEqual(
+            form.errors.as_data()["values"][0].params["child_code"], "max_length"
+        )
 
     def test_list_field_accepts_deeply_nested_list_children(self):
         """It cleans nested list children from flat nested keys."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(
-                nestingdolls.ListField(
-                    nestingdolls.ListField(forms.IntegerField())
-                )
+                nestingdolls.ListField(nestingdolls.ListField(forms.IntegerField()))
             )
 
         form = Form(
@@ -817,11 +878,20 @@ class _HypothesisTestCase(SimpleTestCase):
         if style == "direct":
             return {name: [formatter(value) for value in values]}
         if style == "dash":
-            return {f"{name}-{index}": formatter(value) for index, value in enumerate(values)}
+            return {
+                f"{name}-{index}": formatter(value)
+                for index, value in enumerate(values)
+            }
         if style == "dot":
-            return {f"{name}.{index}": formatter(value) for index, value in enumerate(values)}
+            return {
+                f"{name}.{index}": formatter(value)
+                for index, value in enumerate(values)
+            }
         if style == "bracket":
-            return {f"{name}[{index}]": formatter(value) for index, value in enumerate(values)}
+            return {
+                f"{name}[{index}]": formatter(value)
+                for index, value in enumerate(values)
+            }
         raise AssertionError(f"unsupported style: {style}")
 
     @staticmethod
@@ -891,7 +961,10 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
                 outcomes.append(("ok", form.cleaned_data["values"]))
             else:
                 outcomes.append(
-                    ("error", tuple(error.code for error in form.errors.as_data()["values"]))
+                    (
+                        "error",
+                        tuple(error.code for error in form.errors.as_data()["values"]),
+                    )
                 )
         self.assertEqual(outcomes, [outcomes[0]] * len(self._row_spelling_names))
 
@@ -961,7 +1034,9 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
             )
         )
         self.assertTrue(form.is_valid(), form.errors)
-        self.assertEqual(form.cleaned_data["values"], self._undeleted_rows(values, deleted))
+        self.assertEqual(
+            form.cleaned_data["values"], self._undeleted_rows(values, deleted)
+        )
 
     @HYPOTHESIS_SETTINGS
     @given(
@@ -1012,7 +1087,9 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
         """It keeps false boolean rows in position with management data."""
 
         class Form(forms.Form):
-            values = nestingdolls.ListField(forms.BooleanField(required=False), required=False)
+            values = nestingdolls.ListField(
+                forms.BooleanField(required=False), required=False
+            )
 
         form = Form(self._boolean_row_data("values", values))
         self.assertTrue(form.is_valid(), form.errors)
@@ -1030,7 +1107,9 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.JSONField(), required=False)
 
-        form = Form(self._json_row_data("values", values, style), initial={"values": values})
+        form = Form(
+            self._json_row_data("values", values, style), initial={"values": values}
+        )
         self.assertFalse(form.has_changed())
 
     @HYPOTHESIS_SETTINGS
@@ -1048,7 +1127,9 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
             cleaned_results.append(
                 [item.replace(tzinfo=None) for item in form.cleaned_data["values"]]
             )
-        self.assertEqual(cleaned_results, [values] * len(self._multiwidget_spelling_names))
+        self.assertEqual(
+            cleaned_results, [values] * len(self._multiwidget_spelling_names)
+        )
 
 
 class SetFieldPropertyTestCase(_HypothesisTestCase):
@@ -1267,7 +1348,9 @@ class NestedSequencePropertyTestCase(_HypothesisTestCase):
             )
 
         submitted_rows = [list(row) for row in rows]
-        form = Form(self._nested_tuple_data("values", submitted_rows), initial={"values": rows})
+        form = Form(
+            self._nested_tuple_data("values", submitted_rows), initial={"values": rows}
+        )
         self.assertFalse(form.has_changed())
 
     @HYPOTHESIS_SETTINGS
@@ -1313,10 +1396,9 @@ class NestedSequencePropertyTestCase(_HypothesisTestCase):
 class WidgetIntegrationTestCase(SimpleTestCase):
     def test_custom_child_choices_are_rendered(self):
         """It renders child choice widgets normally."""
+
         class Form(forms.Form):
-            values = nestingdolls.ListField(
-                forms.ChoiceField(choices=(("a", "A"),))
-            )
+            values = nestingdolls.ListField(forms.ChoiceField(choices=(("a", "A"),)))
 
         html = Form(initial={"values": ["a"]}).as_p()
 
@@ -1324,6 +1406,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
     def test_child_prepare_value_is_used(self):
         """It uses the child field's prepared value when rendering."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.JSONField())
 
@@ -1336,6 +1419,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
     def test_boolean_rows_keep_unchecked_positions(self):
         """It keeps unchecked boolean rows in place."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.BooleanField(required=False))
 
@@ -1347,6 +1431,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
     def test_plain_mapping_keeps_unchecked_positions(self):
         """It keeps unchecked boolean positions in flat mappings."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.BooleanField(required=False))
 
@@ -1357,6 +1442,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
     def test_multiwidget_child_uses_indexed_row_name(self):
         """It passes indexed row names into child multiwidgets."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.SplitDateTimeField())
 
@@ -1372,6 +1458,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
     def test_multiwidget_child_accepts_dotted_and_bracketed_row_names(self):
         """It accepts dotted and bracketed names for child multiwidgets."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.SplitDateTimeField())
 
@@ -1391,6 +1478,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
     def test_normalizes_bound_data_once(self):
         """It normalizes one form's bound data only once."""
+
         class CountingWidget(nestingdolls.SequenceWidget):
             normalizations = 0
 
@@ -1409,6 +1497,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
     def test_normalized_data_is_not_shared_between_form_instances(self):
         """It keeps normalization caches scoped to one form instance."""
+
         class CountingWidget(nestingdolls.SequenceWidget):
             normalizations = 0
 
@@ -1433,7 +1522,9 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         initial = SimpleUploadedFile("initial.txt", b"initial")
 
         class Form(forms.Form):
-            values = nestingdolls.ListField(forms.FileField(required=False), required=False)
+            values = nestingdolls.ListField(
+                forms.FileField(required=False), required=False
+            )
 
         kept = Form(sequence_data("values", [None]), initial={"values": [initial]})
         self.assertTrue(kept.is_valid(), kept.errors)
@@ -1463,6 +1554,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
     def test_file_uploads_use_child_widget_extraction(self):
         """It reads file uploads through the child widget."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.FileField())
 
@@ -1488,6 +1580,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
     def test_splitdatetime_initial_microseconds_do_not_report_a_change(self):
         """It applies Django's initial microsecond normalization to each row."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.SplitDateTimeField())
 
@@ -1506,6 +1599,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
     def test_flat_file_uploads_without_management_data_are_accepted(self):
         """It accepts flat file uploads without management fields."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.FileField())
 
@@ -1517,6 +1611,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
     def test_form_required_attribute_opt_out_is_preserved(self):
         """It respects the form-level required-attribute opt-out."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
@@ -1533,6 +1628,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
     def test_widget_uses_management_data_and_exposes_media(self):
         """It renders management inputs and enhancement templates."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), min_length=2)
 
@@ -1572,6 +1668,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
     def test_widget_hides_add_button_when_initial_reaches_maximum(self):
         """It keeps only the add template when initial rows fill the limit."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), max_length=2)
 
@@ -1582,6 +1679,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
     def test_widget_hides_add_button_when_initial_exceeds_maximum(self):
         """It keeps only the add template when initial rows exceed the limit."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), max_length=2)
 
@@ -1631,6 +1729,7 @@ class PublicApiTestCase(SimpleTestCase):
 
     def test_custom_bound_field_keeps_sequence_error_integration(self):
         """It lets custom bound fields keep sequence error rendering."""
+
         class CustomBoundField(nestingdolls.SequenceBoundField):
             pass
 

@@ -7,7 +7,7 @@ TSC := ./node_modules/typescript/bin/tsc
 
 DEFAULT_GOAL := help
 
-.PHONY: js tscheck ruff mypy test check crosshair crosshair-cover crosshair-diff crosshair-slow
+.PHONY: js tscheck format ruff mypy test agents check crosshair crosshair-cover crosshair-diff crosshair-slow
 
 .DEFAULT_GOAL := $(DEFAULT_GOAL)
 
@@ -20,8 +20,11 @@ js: ## Build JavaScript from TypeScript.
 tscheck: ## Check TypeScript. Do not write files.
 	$(TSC) -p tsconfig.json --noEmit
 
-ruff: ## Run Ruff on kept Python files.
-	$(RUFF) check nestingdolls/__init__.py test_listfield.py test_settings.py
+format: ## Run Ruff formatter on maintained Python files.
+	$(RUFF) format nestingdolls/__init__.py test_listfield.py test_settings.py proof_listfield.py scripts/update_package_agents.py
+
+ruff: ## Run Ruff with auto-fixes on kept Python files.
+	$(RUFF) check --fix nestingdolls/__init__.py test_listfield.py test_settings.py
 
 mypy: ## Run mypy with strict checks.
 	$(MYPY) nestingdolls/__init__.py
@@ -29,8 +32,11 @@ mypy: ## Run mypy with strict checks.
 test: ## Run the Django test file.
 	$(PYTHON) test_listfield.py
 
-check: ## Run all fast checks.
-check: tscheck ruff mypy test
+agents: ## Update the generated field method reference in nestingdolls/AGENTS.md.
+	$(PYTHON) scripts/update_package_agents.py
+
+check: ## Update generated docs and run all fast checks.
+check: tscheck ruff mypy test agents
 
 crosshair: ## Run CrossHair checks.
 	$(CROSSHAIR) check proof_listfield.py

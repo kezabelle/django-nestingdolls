@@ -64,9 +64,7 @@ def _nested_list_field(required: bool = False) -> nestingdolls.ListField:
     )
 
 
-def _set_field(
-    min_length: int = 0, max_length: int = 4
-) -> nestingdolls.SetField:
+def _set_field(min_length: int = 0, max_length: int = 4) -> nestingdolls.SetField:
     return nestingdolls.SetField(
         forms.IntegerField(),
         min_length=min_length,
@@ -120,10 +118,9 @@ def prove_clean_cardinality(
     pre: len(values) <= 4
     post[]: __return__
     """
-    return (
-        actual_clean_cardinality(min_length, max_length, required, values)
-        == model_clean_cardinality(min_length, max_length, required, values)
-    )
+    return actual_clean_cardinality(
+        min_length, max_length, required, values
+    ) == model_clean_cardinality(min_length, max_length, required, values)
 
 
 def actual_has_changed_integer_rows(initial: list[int], data: list[int]) -> bool:
@@ -145,9 +142,9 @@ def prove_has_changed_integer_rows(initial: list[int], data: list[int]) -> bool:
     pre: len(data) <= 4
     post[]: __return__
     """
-    return actual_has_changed_integer_rows(initial, data) == model_has_changed_integer_rows(
+    return actual_has_changed_integer_rows(
         initial, data
-    )
+    ) == model_has_changed_integer_rows(initial, data)
 
 
 def actual_single_row_spelling(style: int, value: str) -> tuple[str, ...]:
@@ -309,7 +306,10 @@ def model_clean_with_deleted_and_omitted(
 ) -> tuple[str, tuple[int, ...]]:
     del initial_values
     skipped = set(deleted_indexes) | set(omitted_indexes)
-    return ("ok", tuple(value for index, value in enumerate(values) if index not in skipped))
+    return (
+        "ok",
+        tuple(value for index, value in enumerate(values) if index not in skipped),
+    )
 
 
 def prove_clean_with_deleted_and_omitted(
@@ -373,7 +373,9 @@ def actual_omitted_extra_indexes(
     for index in present_indexes:
         data[f"values-{index}"] = str(index)
     initial = {"values": list(range(initial_count))}
-    bound_field = cast(nestingdolls.SequenceBoundField, Form(data, initial=initial)["values"])
+    bound_field = cast(
+        nestingdolls.SequenceBoundField, Form(data, initial=initial)["values"]
+    )
     return tuple(sorted(bound_field._omitted_indexes))
 
 
@@ -455,9 +457,7 @@ def prove_nested_tuple_rows(
     )
 
 
-def actual_nested_tuple_extra_item(
-    first: int, second: int, extra: int
-) -> str:
+def actual_nested_tuple_extra_item(first: int, second: int, extra: int) -> str:
     class Form(forms.Form):
         values = _tuple_pair_field()
 
@@ -483,9 +483,9 @@ def prove_nested_tuple_extra_item(first: int, second: int, extra: int) -> bool:
     """
     post[]: __return__
     """
-    return actual_nested_tuple_extra_item(first, second, extra) == model_nested_tuple_extra_item(
+    return actual_nested_tuple_extra_item(
         first, second, extra
-    )
+    ) == model_nested_tuple_extra_item(first, second, extra)
 
 
 def actual_nested_tuple_has_changed(
@@ -520,7 +520,9 @@ def actual_tuple_child_delegation(
 ) -> bool:
     child = nestingdolls.TupleField(forms.IntegerField(), min_length=2, max_length=2)
     parent = nestingdolls.ListField(child, required=False)
-    return parent.has_changed([(initial_left, initial_right)], [[data_left, data_right]])
+    return parent.has_changed(
+        [(initial_left, initial_right)], [[data_left, data_right]]
+    )
 
 
 def model_tuple_child_delegation(

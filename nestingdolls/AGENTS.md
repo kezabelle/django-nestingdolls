@@ -35,11 +35,65 @@ Relationship notes:
 - `SequenceWidget` is the composite widget for repeated rows.
 - `SequenceBoundField` customizes bound data, row errors, and row deletion state.
 
+## Generated Field Method Reference
+
+<!-- BEGIN GENERATED FIELD METHODS -->
+
+### SequenceField
+
+#### Overrides parent methods
+
+- `__init__(self, child_field: 'Field', /, *, min_length: 'int' = 0, max_length: 'int' = 1000, required: 'bool' = True, widget: 'SequenceWidget | type[SequenceWidget] | None' = None, label: 'str | Promise | None' = None, initial: 'object | Callable[[], object] | None' = None, help_text: 'str | Promise' = '', error_messages: 'Mapping[str, str | Promise] | None' = None, show_hidden_initial: 'bool' = False, validators: 'Sequence[Callable[..., Any]]' = (), localize: 'bool' = False, disabled: 'bool' = False, label_suffix: 'str | None' = None, template_name: 'str | None' = None, bound_field_class: 'type[BoundField] | None' = None) -> 'None'`
+- `__deepcopy__(self, memo: 'dict[int, object]') -> 'Self'`
+- `to_python(self, value: 'object') -> 'list[object]'`
+- `clean(self, value: 'object') -> 'Collection[object]'`
+- `_clean_bound_field(self, bound_field: 'BoundField') -> 'Collection[object]'`
+- `validate(self, value: 'Collection[object]') -> 'None'`
+- `bound_data(self, data: 'object', initial: 'object') -> 'Collection[object]'`
+- `prepare_value(self, value: 'object') -> 'list[object]'`
+- `has_changed(self, initial: 'object', data: 'object') -> 'bool'`
+#### Methods introduced here
+
+- `_clean_values(self, values: 'list[object]', initial_values: 'list[object]', deleted_indexes: 'frozenset[int]' = frozenset(), omitted_indexes: 'frozenset[int]' = frozenset()) -> 'list[object]'`
+- `compress(self, data_list: 'list[object]') -> 'Collection[object]'`
+
+### ListField
+
+Alias of `SequenceField`. It defines no methods of its own.
+
+### FrozenSequenceField
+
+#### Overrides parent methods
+
+- `compress(self, data_list: 'list[object]') -> 'tuple[object, ...]'`
+
+### FrozenSequenceField
+
+Alias of `TupleField`. It defines no methods of its own.
+
+### SetField
+
+#### Overrides parent methods
+
+- `compress(self, data_list: 'list[object]') -> 'set[object] | frozenset[object]'`
+- `has_changed(self, initial: 'object', data: 'object') -> 'bool'`
+
+### FrozenSetField
+
+`FrozenSetField` defines no methods of its own.
+It inherits `SetField` behavior.
+
+<!-- END GENERATED FIELD METHODS -->
+
 ## Checks
 
 Run these checks after behavior-sensitive changes:
 
-- `make check` (runs all of `tsc` + `ruff` + `mypy` + `test`)
+- `make check` updates docs and then runs `tscheck`, `ruff`, `mypy`, and `test`
+
+Also run this when changes touch normalization, change detection, or collection semantics:
+
+- `make crosshair`
 
 ## Documented User Guarantees
 
@@ -75,14 +129,9 @@ Current source and tests document these behaviors:
 - `nestingdolls/templates/django/forms/widgets/sequence.html`
 - `test_listfield.py`
 
-
-Also run this when changes touch normalization, change detection, or collection semantics:
-
-- `make crosshair`
-
 ## Doc Notes
 
 Keep user docs `ListField`-first.
 Describe the current exported field family.
 Do not promise behavior that is not present in source and tests.
-Use ASD-STE100 Simplified Technical English (STE)
+Use ASD-STE100 Simplified Technical English (STE).
