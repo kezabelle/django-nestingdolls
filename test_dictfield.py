@@ -428,6 +428,26 @@ class DictFieldRenderingTestCase(SimpleTestCase):
 
 
 class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
+    def test_widget_wrapper_exposes_field_specific_references(self):
+        """The wrapper keeps an obvious link back to the parent field name/id."""
+
+        class ChildForm(forms.Form):
+            title = forms.CharField()
+
+        class Form(forms.Form):
+            filters = nestingdolls.MappingField(ChildForm)
+
+        html = Form().as_p()
+
+        self.assertIn('class="dict-widget"', html)
+        self.assertIn('data-mapping-widget', html)
+        self.assertIn('data-mapping-field="filters"', html)
+        self.assertIn('id="id_filters_widget"', html)
+        self.assertInHTML(
+            '<input type="text" name="filters-title" required id="id_filters-title">',
+            html,
+        )
+
     def test_repeated_query_values_use_child_widget_extraction(self):
         """Widgets that use getlist receive every submitted child value."""
 

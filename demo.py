@@ -4,15 +4,16 @@ import os
 import pprint
 import sys
 import textwrap
-from types import MappingProxyType
+from typing import ClassVar
 
 import django
 from django import forms
 from django.conf import settings
 from django.core.handlers.wsgi import WSGIRequest
-from django.http import Http404, HttpResponse
+from django.http import HttpResponse
 from django.template import Context, Template
 from django.urls import path
+from django.views import View
 
 import nestingdolls
 from nestingdolls import ListField
@@ -58,66 +59,78 @@ favicon_etag = hashlib.sha1(favicon).hexdigest()
 favicon_b64 = base64.b64encode(favicon).decode("utf-8")
 
 
-def favicon_serve(request):
-    return HttpResponse(
-        favicon, content_type="image/x-icon", headers={"Etag": favicon_etag}
-    )
-
-
-def index(request: WSGIRequest) -> HttpResponse:
-    # class GrandChildForm(forms.Form):
-    #     grandchild_name = forms.CharField()
-    #
-    # class ChildForm(forms.Form):
-    #     child_name = forms.CharField()
-    #     born = forms.IntegerField()
-    #     grandchild = nestingdolls.MappingField(
-    #         GrandChildForm,
-    #         required=False,
-    #         # label="Grandchild!",
-    #     )
-    #
-    # class ParentForm(forms.Form):
-    #     parent_name = forms.CharField(required=True)
-    #     year_of_birth = forms.IntegerField(required=True)
-    #     parent = forms.BooleanField(required=False)
-    #     child1 = nestingdolls.MappingField(
-    #         ChildForm,
-    #         label="Child Number 1",
-    #         label_suffix="!",
-    #     )
-    #     child2 = nestingdolls.MappingField(
-    #         subform=ChildForm(
-    #             label_suffix="::",
-    #             use_required_attribute=False,
-    #         ),
-    #         required=False,
-    #     )
-    #
-    # form = ParentForm(
-    #     data=request.GET or None, files=None, initial={}, use_required_attribute=False
-    # )
-
-    class ParentForm(forms.Form):
-        values = ListField(forms.IntegerField(min_value=3), max_length=2)
-        emails = ListField(forms.EmailField(), min_length=4)
-        others = ListField(forms.BooleanField(required=False), min_length=4)
-
-    form = ParentForm(
-        data=request.GET or None, files=None, initial={"values": [1, 2, 3]}
-    )
-
-    output = MappingProxyType({})
-    if form.is_valid():
-        output = pprint.pformat(
-            form.cleaned_data,
-            indent=4,
-            sort_dicts=True,
+class FaviconView(View):
+    def get(self, request: WSGIRequest) -> HttpResponse:
+        return HttpResponse(
+            favicon, content_type="image/x-icon", headers={"Etag": favicon_etag}
         )
 
-    return HttpResponse(
-        Template(
-            textwrap.dedent("""\
+
+class AddressForm(forms.Form):
+    street = forms.CharField()
+    city = forms.CharField()
+    postcode = forms.CharField()
+
+
+class ContactForm(forms.Form):
+    name = forms.CharField()
+    email = forms.EmailField()
+
+
+class ListsForm(forms.Form):
+    scores = ListField(forms.IntegerField(min_value=0), min_length=1, max_length=4)
+    emails = ListField(forms.EmailField(), required=False, max_length=4)
+
+
+class MappingsForm(forms.Form):
+    billing_address = nestingdolls.MappingField(AddressForm)
+    emergency_contact = nestingdolls.MappingField(ContactForm, required=False)
+
+
+class LineItemForm(forms.Form):
+    description = forms.CharField()
+    quantity = forms.IntegerField(min_value=1)
+
+
+class ListOfMappingsForm(forms.Form):
+    items = ListField(
+        nestingdolls.MappingField(LineItemForm), min_length=1, max_length=5
+    )
+
+
+class MilestoneForm(forms.Form):
+    title = forms.CharField()
+    reviewers = ListField(forms.EmailField(), required=False, max_length=3)
+
+
+class ProjectForm(forms.Form):
+    name = forms.CharField()
+    milestones = ListField(
+        nestingdolls.MappingField(MilestoneForm), min_length=1, max_length=4
+    )
+
+
+class DeeplyNestedForm(forms.Form):
+    project = nestingdolls.MappingField(ProjectForm)
+
+
+class CollectionTypesForm(forms.Form):
+    coordinates = nestingdolls.TupleField(
+        forms.DecimalField(max_digits=5, decimal_places=2), min_length=2, max_length=3
+    )
+    tags = nestingdolls.SetField(forms.SlugField(), min_length=1, max_length=5)
+
+
+PAGES = (
+    ("lists", "Lists"),
+    ("mappings", "Mappings"),
+    ("list-of-mappings", "List of mappings"),
+    ("deeply-nested", "Deep nesting"),
+    ("collection-types", "Tuple and set"),
+)
+
+DEMO_TEMPLATE = Template(
+    textwrap.dedent("""\
 <!DOCTYPE html>
 <html lang="en">
     <head>
@@ -143,6 +156,7 @@ def index(request: WSGIRequest) -> HttpResponse:
         cursor: pointer;
         color: #0000FF;
     }
+    nav a { margin-right: 1rem; }
     form > div,
     form fieldset > div {
         display: flex;
@@ -160,43 +174,134 @@ def index(request: WSGIRequest) -> HttpResponse:
         font-size: 1rem;
         padding: 0.5rem;
     }
-    
     </style>
     </head>
     <body>
-    
+
+    <nav>
+    <ul>{% for url_name, label in pages %}<li><a href="{% url url_name %}">{{ label }}</a></li>{% endfor %}</ul>
+    </nav>
+    <h1>{{ title }}</h1>
+    <p>{{ description }}</p>
+
     <form method="GET" action="" autocomplete="off">
-    {% csrf_token %}
     {{ form }}
     {{ form.media }}
     <button type="submit" name="do-it" value="yep">Submit</button>
-    <a href="{% url 'index' %}">Reset</a>
+    <a href="{{ reset_url }}">Reset</a>
     </form>
-    
+
     {% if output %}
     <hr>
-    <pre>{{output}}</pre>
+    <pre>{{ output }}</pre>
     {% endif %}
-    
+
     </body>
 </html>
-        """)
-        ).render(
-            context=Context(
-                {
-                    "form": form,
-                    "output": output,
-                },
-            ),
-        ),
+    """)
+)
+
+
+class DemoView(View):
+    form_class: ClassVar[type[forms.Form]]
+    title: ClassVar[str]
+    description: ClassVar[str]
+    initial: ClassVar[dict[str, object]]
+
+    def get_form(self, request: WSGIRequest) -> forms.Form:
+        return self.form_class(data=request.GET or None, initial=self.initial)
+
+    def get_output(self, form: forms.Form) -> str:
+        if form.is_bound and form.is_valid():
+            return pprint.pformat(form.cleaned_data, indent=4, sort_dicts=True)
+        return ""
+
+    def get_context_data(
+        self, *, form: forms.Form, request: WSGIRequest
+    ) -> dict[str, object]:
+        return {
+            "description": self.description,
+            "form": form,
+            "output": self.get_output(form),
+            "pages": PAGES,
+            "reset_url": request.path,
+            "title": self.title,
+        }
+
+    def get(self, request: WSGIRequest) -> HttpResponse:
+        form = self.get_form(request)
+        return HttpResponse(
+            DEMO_TEMPLATE.render(
+                Context(self.get_context_data(form=form, request=request))
+            )
+        )
+
+
+class ListsView(DemoView):
+    form_class = ListsForm
+    title = "Lists"
+    description = "Scalar child fields with minimum and maximum lengths."
+    initial: ClassVar[dict[str, object]] = {
+        "scores": [3, 8],
+        "emails": ["Ada@example.com"],
+    }
+
+
+class MappingsView(DemoView):
+    form_class = MappingsForm
+    title = "Mappings"
+    description = "A required address and an optional contact form."
+    initial: ClassVar[dict[str, object]] = {
+        "billing_address": {
+            "street": "1 Python Way",
+            "city": "London",
+            "postcode": "SW1A 1AA",
+        }
+    }
+
+
+class ListOfMappingsView(DemoView):
+    form_class = ListOfMappingsForm
+    title = "List of mappings"
+    description = "Add and remove structured line items."
+    initial: ClassVar[dict[str, object]] = {
+        "items": [{"description": "Widget", "quantity": 2}]
+    }
+
+
+class DeeplyNestedView(DemoView):
+    form_class = DeeplyNestedForm
+    title = "Deep nesting"
+    description = (
+        "A mapping containing a list of mappings, each containing another list."
     )
+    initial: ClassVar[dict[str, object]] = {
+        "project": {
+            "name": "Nesting Dolls",
+            "milestones": [{"title": "Demo", "reviewers": ["Grace@example.com"]}],
+        }
+    }
 
 
-from debug_toolbar.toolbar import debug_toolbar_urls
+class CollectionTypesView(DemoView):
+    form_class = CollectionTypesForm
+    title = "Tuple and set"
+    description = "Sequence widgets with tuple and deduplicated set cleaned values."
+    initial: ClassVar[dict[str, object]] = {
+        "coordinates": (51.51, -0.13),
+        "tags": {"django", "forms"},
+    }
+
+
+from debug_toolbar.toolbar import debug_toolbar_urls  # type: ignore[import-not-found]
 
 urlpatterns = [
-    path("favicon.ico", favicon_serve, name="favicon"),
-    path("", index, name="index"),
+    path("favicon.ico", FaviconView.as_view(), name="favicon"),
+    path("", ListsView.as_view(), name="lists"),
+    path("mappings/", MappingsView.as_view(), name="mappings"),
+    path("list-of-mappings/", ListOfMappingsView.as_view(), name="list-of-mappings"),
+    path("deeply-nested/", DeeplyNestedView.as_view(), name="deeply-nested"),
+    path("collection-types/", CollectionTypesView.as_view(), name="collection-types"),
 ] + debug_toolbar_urls()
 
 if __name__ == "__main__":

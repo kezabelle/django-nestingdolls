@@ -1,49 +1,27 @@
-# Package Guide For Agents
+# Package guide for agents
 
-This file adds package-local guidance for work in `nestingdolls/`.
-It supplements the repo-root `AGENTS.md`.
+This guide applies to work in `nestingdolls/`. The repository guide also
+applies.
 
-## Package Purpose
+## Purpose
 
-This package implements Django mapping and sequence form fields.
-It supports fixed mapping shapes and variable-length collections.
-It keeps the server-side HTML useful without JavaScript.
-It adds JavaScript only for progressive enhancement.
+This package adds mapping and sequence fields to Django forms. It preserves
+normal Django behavior and uses JavaScript only for progressive enhancement.
 
-## Public API Map
+## Public API
 
-The generally used exports are:
+- `DictField` is the primary field for a fixed mapping. `MappingField`,
+  `FormField`, and `Subform` are aliases.
+- `ListField` is the primary field for an ordered sequence. `SequenceField` is
+  its implementation name.
+- `TupleField`, `SetField`, and `FrozenSetField` return other collection types.
+- Mapping and sequence widgets and bound fields are advanced integration hooks.
+- `InvalidInitialValueError` reports an invalid initial value.
 
-- `DictField = MappingField`
-- `FormField = MappingField`
-- `Subform = MappingField`
-- `ListField = SequenceField`
-- `TupleField = FrozenSequenceField`
-- `SetField`
-- `FrozenSetField`
+## Generated method reference
 
-Additional exports which are infrequently necessary:
-
-- `MappingWidget`
-- `MappingBoundField`
-- `SequenceWidget`
-- `SequenceBoundField`
-- `InvalidInitialValueError`
-
-Relationship notes:
-
-- `MappingField` validates one mapping with a child Form class.
-- `MappingWidget` renders the child Form.
-- `MappingBoundField` keeps child errors inside the nested Form.
-- `SequenceField` validates a sequence or non-mapping collection of a homogenous type.
-- `ListField` is the main user entry point `SequenceField` 
-- `TupleField` changes the cleaned result to a tuple.
-- `SetField` changes the cleaned result to a deduplicated set-like value.
-- `FrozenSetField` is the immutable set variant.
-- `SequenceWidget` is the composite widget for repeated rows.
-- `SequenceBoundField` customizes bound data, row errors, and row deletion state.
-
-## Generated Field Method Reference
+Do not edit the text between the generated markers. Change the source or the
+generator, and then run `make agents`.
 
 <!-- BEGIN GENERATED FIELD METHODS -->
 
@@ -120,57 +98,61 @@ It inherits `SetField` behavior.
 
 <!-- END GENERATED FIELD METHODS -->
 
-## Checks
+## Verification
 
-Run these checks after behavior-sensitive changes:
+- After an implementation change, run `make check`. This target can fix Python
+  files and update the generated method reference.
+- After a TypeScript change, run `make js` before `make check`. Keep the
+  generated `sequence.js` file committed.
+- After a change to normalization, change detection, or collection semantics,
+  also run `make crosshair`.
+- For a prose-only change, do not run runtime checks unless executable examples
+  changed.
 
-- `make check` updates docs and runs `tscheck`, `ruff`, `mypy`, and `test`
+## Invariants
 
-Also run this when changes touch normalization, change detection, or collection semantics:
+### Input handling
 
-- `make crosshair`
-
-## Documented User Guarantees
-
-Current source and tests document these behaviors:
-
-- direct and flattened mapping input is supported
-- child Form clean hooks and non-field errors are preserved
-- mapping and sequence fields can be nested together
-- child validation errors stay inline at the failing row
-- normal server HTML works without JavaScript
-- JavaScript adds row add/remove controls from inert templates
-- nested sequence children are supported
-- file child fields are supported
-- compound child widgets are supported
-- `has_changed()` uses child-field semantics
-- `SetField` and `FrozenSetField` ignore row order for semantic equality
-- set cardinality is checked after deduplication
-
-## Do Not Regress
-
-- Preserve direct, dash, dot, and bracket input support.
-- Preserve these spellings through mapping and sequence nesting.
+- Preserve direct, dash, dot, and bracket input forms.
+- Preserve direct-value priority over flat input names.
+- Preserve all input forms through mapping and sequence nesting.
+- Retain original keys and canonical keys during normalization.
 - Keep mapping `data` and `files` separate through nested widgets.
-- Preserve both original keys and canonical keys during normalization.
-- Keep child errors inline.
+
+### Django behavior
+
+- Preserve child form clean hooks and non-field errors.
+- Delegate value extraction, preparation, bound data, and change detection to
+  child widgets and fields.
+- Preserve file fields, compound widgets, multipart forms, and widget media.
+- Keep child errors inline. Do not duplicate them as outer field errors.
+
+### HTML and JavaScript
+
 - Keep server-rendered HTML useful without JavaScript.
-- Keep add/remove controls in inert `<template>` nodes.
-- Treat `static/nestingdolls/sequence.ts` as the source of truth for progressive enhancement.
-  - Keep `sequence.js` committed as compiled output.
-- Preserve child-field semantics in `prepare_value()`, `bound_data()`, and `has_changed()`.
-- Preserve semantic set comparison and deduplication behavior.
+- Create add and remove controls from inert `<template>` elements.
+- Treat `static/nestingdolls/sequence.ts` as the JavaScript source.
+- Keep the compiled `static/nestingdolls/sequence.js` file committed.
 
-## Primary Source Files
+### Collection semantics
 
-- `nestingdolls/__init__.py`
-- `nestingdolls/sequences.py`
-- `nestingdolls/mappings.py`
-- `nestingdolls/static/nestingdolls/sequence.ts`
-- `nestingdolls/templates/django/forms/widgets/sequence.html`
-- `test_listfield.py`
-- `test_dictfield.py`
+- Preserve set deduplication and order-independent set comparison.
+- Check set length limits after deduplication.
 
-## Notes for documentation, comments, docstrings
+## Source map
 
-ONLY use ASD-STE100 Simplified Technical English (STE).
+- Public exports: `nestingdolls/__init__.py`
+- Mapping fields: `nestingdolls/mappings.py`,
+  `nestingdolls/templates/django/forms/widgets/dictwidget.html`,
+  `test_dictfield.py`, and `proof_dictfield.py`
+- Sequence fields: `nestingdolls/sequences.py`,
+  `nestingdolls/templates/django/forms/widgets/sequence.html`,
+  `test_listfield.py`, and `proof_listfield.py`
+- Sequence JavaScript: `nestingdolls/static/nestingdolls/sequence.ts` and its
+  compiled `sequence.js` file
+- Generated reference: `scripts/update_package_agents.py`
+
+## Documentation language
+
+Use ASD-STE100 Simplified Technical English in documentation, comments, and
+docstrings.

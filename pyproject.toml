@@ -13,6 +13,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "crosshair-tool",
+    "django-debug-toolbar",
     "hypothesis",
     "ruff",
     "mypy",

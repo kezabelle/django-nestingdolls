@@ -1659,11 +1659,26 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             '<input type="number" name="values-1" id="id_values_1">',
             html,
         )
+        self.assertIn('id="id_values_widget"', html)
+        self.assertIn('id="id_values_rows"', html)
+        self.assertIn('data-sequence-field="values"', html)
+        self.assertIn('id="id_values_row_0"', html)
+        self.assertIn('id="id_values_0_DELETE"', html)
+        self.assertIn('id="id_values_row_1"', html)
+        self.assertIn('id="id_values_1_DELETE"', html)
         self.assertIn("data-sequence-empty-row", html)
+        self.assertIn('id="id_values_row___prefix__"', html)
+        self.assertIn('id="id_values___prefix___DELETE"', html)
         self.assertIn("data-sequence-add-button", html)
+        self.assertInHTML(
+            '<button type="button" data-sequence-add data-sequence-field="values" id="id_values_add">Add another</button>',
+            html,
+        )
         self.assertIn("data-sequence-remove-button", html)
-        self.assertEqual(html.count("data-sequence-add>"), 1)
-        self.assertEqual(html.count("data-sequence-remove>"), 1)
+        self.assertInHTML(
+            '<button type="button" data-sequence-remove data-sequence-field="values" id="id_values_remove">Remove</button>',
+            html,
+        )
         self.assertIn("nestingdolls/sequence.js", str(form.media))
 
     def test_widget_hides_add_button_when_initial_reaches_maximum(self):
@@ -1675,7 +1690,10 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         html = Form(initial={"values": [1, 2]}).as_p()
 
         self.assertIn("data-sequence-add-button", html)
-        self.assertEqual(html.count("data-sequence-add>"), 1)
+        self.assertInHTML(
+            '<button type="button" data-sequence-add data-sequence-field="values" id="id_values_add">Add another</button>',
+            html,
+        )
 
     def test_widget_hides_add_button_when_initial_exceeds_maximum(self):
         """It keeps only the add template when initial rows exceed the limit."""
@@ -1686,7 +1704,10 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         html = Form(initial={"values": [1, 2, 3]}).as_p()
 
         self.assertIn("data-sequence-add-button", html)
-        self.assertEqual(html.count("data-sequence-add>"), 1)
+        self.assertInHTML(
+            '<button type="button" data-sequence-add data-sequence-field="values" id="id_values_add">Add another</button>',
+            html,
+        )
 
 
 class PublicApiTestCase(SimpleTestCase):

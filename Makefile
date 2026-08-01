@@ -21,13 +21,13 @@ tscheck: ## Check TypeScript. Do not write files.
 	$(TSC) -p tsconfig.json --noEmit
 
 format: ## Run Ruff formatter on maintained Python files.
-	$(RUFF) format nestingdolls test_dictfield.py test_listfield.py test_settings.py proof_dictfield.py proof_listfield.py scripts/update_package_agents.py
+	$(RUFF) format demo.py nestingdolls test_dictfield.py test_listfield.py test_settings.py proof_dictfield.py proof_listfield.py scripts/update_package_agents.py
 
 ruff: ## Run Ruff with auto-fixes on kept Python files.
-	$(RUFF) check --fix nestingdolls test_dictfield.py test_listfield.py test_settings.py proof_dictfield.py proof_listfield.py scripts/update_package_agents.py
+	$(RUFF) check --fix demo.py nestingdolls test_dictfield.py test_listfield.py test_settings.py proof_dictfield.py proof_listfield.py scripts/update_package_agents.py
 
 mypy: ## Run mypy with strict checks.
-	$(MYPY) nestingdolls/__init__.py nestingdolls/errors.py nestingdolls/mappings.py nestingdolls/sequences.py
+	$(MYPY) demo.py nestingdolls/__init__.py nestingdolls/errors.py nestingdolls/mappings.py nestingdolls/sequences.py
 
 test: ## Run the Django test files.
 	$(PYTHON) -m unittest test_listfield test_dictfield
