@@ -997,6 +997,29 @@ class _HypothesisTestCase(SimpleTestCase):
 
 
 class SequenceFieldPropertyTestCase(_HypothesisTestCase):
+    @staticmethod
+    def _public_outcome(form, name):
+        try:
+            if form.is_valid():
+                validation = ("ok", form.cleaned_data[name])
+            else:
+                validation = (
+                    "error",
+                    tuple(
+                        (error.code, (error.params or {}).get("child_code"))
+                        for error in form.errors.as_data()[name]
+                    ),
+                )
+        except Exception as exc:
+            validation = ("validation_exception", type(exc).__name__)
+        try:
+            str(form[name])
+        except Exception as exc:
+            render = ("render_exception", type(exc).__name__)
+        else:
+            render = ("render_ok", None)
+        return (validation, render)
+
     @HYPOTHESIS_SETTINGS
     @example(values=[{"answer": 42}])
     @given(values=st.lists(JSON_VALUES, max_size=4))
@@ -1182,6 +1205,138 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
         self.assertEqual(
             cleaned_results, [values] * len(self._multiwidget_spelling_names)
         )
+
+    @HYPOTHESIS_SETTINGS
+    @example(
+        cases=(
+            (
+                "scalar-row-only",
+                {
+                    "direct": {"values": ["1"]},
+                    "dash": {"values-0": "1"},
+                    "dot": {"values.0": "1"},
+                    "bracket": {"values[0]": "1"},
+                },
+            ),
+        )
+    )
+    @example(
+        cases=(
+            (
+                "scalar-row-plus-leaf",
+                {
+                    "direct": {"values": ["1"]},
+                    "dash": {"values-0": "1", "values-0[a]": "2"},
+                    "dot": {"values.0": "1", "values.0[a]": "2"},
+                    "bracket": {"values[0]": "1", "values[0][a]": "2"},
+                },
+            ),
+        )
+    )
+    @given(
+        cases=st.lists(
+            st.sampled_from(
+                (
+                    (
+                        "scalar-row-only",
+                        {
+                            "direct": {"values": ["1"]},
+                            "dash": {"values-0": "1"},
+                            "dot": {"values.0": "1"},
+                            "bracket": {"values[0]": "1"},
+                        },
+                    ),
+                    (
+                        "scalar-row-plus-leaf",
+                        {
+                            "direct": {"values": ["1"]},
+                            "dash": {"values-0": "1", "values-0[a]": "2"},
+                            "dot": {"values.0": "1", "values.0[a]": "2"},
+                            "bracket": {"values[0]": "1", "values[0][a]": "2"},
+                        },
+                    ),
+                    (
+                        "malformed-row-suffix",
+                        {
+                            "dash": {"values-0junk": "1"},
+                            "dot": {"values.0junk": "1"},
+                            "bracket": {"values[0]junk": "1"},
+                        },
+                    ),
+                    (
+                        "nested-repeat-into-row",
+                        {
+                            "dash": {"values-0-0": "1"},
+                            "dot": {"values.0.0": "1"},
+                            "bracket": {"values[0][0]": "1"},
+                        },
+                    ),
+                    (
+                        "second-row-plus-leaf",
+                        {
+                            "dash": {"values-1": "1", "values-1[a]": "2"},
+                            "dot": {"values.1": "1", "values.1[a]": "2"},
+                            "bracket": {"values[1]": "1", "values[1][a]": "2"},
+                        },
+                    ),
+                )
+            ),
+            min_size=1,
+            max_size=1,
+            unique_by=lambda item: item[0],
+        )
+    )
+    def test_mapping_row_hostile_cases_match_public_outcomes_across_spellings(
+        self, cases
+    ):
+        """Hostile row-shape spellings should agree on validation and rendering."""
+
+        class PointForm(forms.Form):
+            a = forms.IntegerField()
+            label = forms.CharField(required=False)
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.MappingField(PointForm),
+                required=False,
+            )
+
+        spellings = {style: {} for style in self._row_spelling_names}
+        for _, family in cases:
+            for style, payload in family.items():
+                spellings[style].update(payload)
+        populated_styles = [
+            style for style in self._row_spelling_names if style in spellings and spellings[style]
+        ]
+        if not populated_styles:
+            populated_styles = ["direct"]
+        outcomes = [self._public_outcome(Form(spellings[style]), "values") for style in populated_styles]
+        self.assertEqual(outcomes, [outcomes[0]] * len(outcomes))
+
+    @HYPOTHESIS_SETTINGS
+    @given(
+        data=st.sampled_from(
+            (
+                {"values0": "1"},
+                {"values_0": "1"},
+                {"valuesx[0]": "1"},
+                {"values[0]junk": "1"},
+                {"values[a]": "1"},
+            )
+        )
+    )
+    def test_unrelated_sequence_prefixes_and_suffixes_do_not_satisfy_the_field(
+        self, data
+    ):
+        """Keys outside the exact indexed row prefix cannot satisfy a required field."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        form = Form(data)
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(form.errors.as_data()["values"][0].code, "required")
 
 class SetFieldPropertyTestCase(_HypothesisTestCase):
     @HYPOTHESIS_SETTINGS

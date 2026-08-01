@@ -10,7 +10,7 @@ from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.http import QueryDict
 from django.test import SimpleTestCase
-from hypothesis import HealthCheck, given
+from hypothesis import HealthCheck, example, given
 from hypothesis import settings as hypothesis_settings
 from hypothesis import strategies as st
 
@@ -747,6 +747,29 @@ class DictFieldPropertyTestCase(SimpleTestCase):
             ),
         )
 
+    @staticmethod
+    def _public_outcome(form, name):
+        try:
+            if form.is_valid():
+                validation = ("ok", form.cleaned_data[name])
+            else:
+                validation = (
+                    "error",
+                    tuple(
+                        (error.code, (error.params or {}).get("child_code"))
+                        for error in form.errors.as_data()[name]
+                    ),
+                )
+        except Exception as exc:
+            validation = ("validation_exception", type(exc).__name__)
+        try:
+            str(form[name])
+        except Exception as exc:
+            render = ("render_exception", type(exc).__name__)
+        else:
+            render = ("render_ok", None)
+        return (validation, render)
+
     @HYPOTHESIS_SETTINGS
     @given(value=RAW_INTEGER_VALUES)
     def test_all_mapping_spellings_have_the_same_public_outcome(self, value):
@@ -905,6 +928,155 @@ class DictFieldPropertyTestCase(SimpleTestCase):
             point = nestingdolls.MappingField(PointForm)
 
         form = Form({f"pointer{suffix}": str(value)})
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(form.errors.as_data()["point"][0].code, "required")
+
+    @HYPOTHESIS_SETTINGS
+    @example(
+        family=(
+            "mapping-child-scalar-plus-leaf",
+            {
+                "dash": {"payload-point": "1", "payload-point[a]": "2"},
+                "dot": {"payload.point": "1", "payload.point[a]": "2"},
+                "bracket": {"payload[point]": "1", "payload[point][a]": "2"},
+            },
+        )
+    )
+    @given(
+        family=st.sampled_from(
+            (
+                (
+                    "mapping-child-scalar-plus-leaf",
+                    {
+                        "dash": {"payload-point": "1", "payload-point[a]": "2"},
+                        "dot": {"payload.point": "1", "payload.point[a]": "2"},
+                        "bracket": {"payload[point]": "1", "payload[point][a]": "2"},
+                    },
+                ),
+                (
+                    "mapping-child-malformed-suffix",
+                    {
+                        "dash": {"payload-point[a]junk": "2"},
+                        "dot": {"payload.point[a]junk": "2"},
+                        "bracket": {"payload[point][a]junk": "2"},
+                    },
+                ),
+                (
+                    "mapping-child-direct-collision",
+                    {
+                        "dash": {"payload": {"point": "1"}, "payload-point[a]": "2"},
+                        "dot": {"payload": {"point": "1"}, "payload.point[a]": "2"},
+                        "bracket": {
+                            "payload": {"point": "1"},
+                            "payload[point][a]": "2",
+                        },
+                    },
+                ),
+            )
+        )
+    )
+    def test_mapping_child_hostile_cases_match_public_outcomes_across_spellings(
+        self, family
+    ):
+        """Hostile mapping-child aliases should agree on validation and rendering."""
+
+        class ChildForm(forms.Form):
+            point = nestingdolls.MappingField(PointForm, required=False)
+
+        class Form(forms.Form):
+            payload = nestingdolls.MappingField(ChildForm, required=False)
+
+        _, spellings = family
+        outcomes = [
+            self._public_outcome(Form(spellings[style]), "payload")
+            for style in PATH_STYLES
+        ]
+        self.assertEqual(outcomes, [outcomes[0]] * len(outcomes))
+
+    @HYPOTHESIS_SETTINGS
+    @example(
+        family=(
+            "sequence-child-scalar-plus-row",
+            {
+                "dash": {"payload-rows": "1", "payload-rows[0]": "2"},
+                "dot": {"payload.rows": "1", "payload.rows[0]": "2"},
+                "bracket": {"payload[rows]": "1", "payload[rows][0]": "2"},
+            },
+        )
+    )
+    @given(
+        family=st.sampled_from(
+            (
+                (
+                    "sequence-child-scalar-plus-row",
+                    {
+                        "dash": {"payload-rows": "1", "payload-rows[0]": "2"},
+                        "dot": {"payload.rows": "1", "payload.rows[0]": "2"},
+                        "bracket": {"payload[rows]": "1", "payload[rows][0]": "2"},
+                    },
+                ),
+                (
+                    "sequence-child-direct-collision",
+                    {
+                        "dash": {"payload": {"rows": "1"}, "payload-rows[0]": "2"},
+                        "dot": {"payload": {"rows": "1"}, "payload.rows[0]": "2"},
+                        "bracket": {
+                            "payload": {"rows": "1"},
+                            "payload[rows][0]": "2",
+                        },
+                    },
+                ),
+                (
+                    "sequence-child-malformed-suffix",
+                    {
+                        "dash": {"payload-rows[0]junk": "2"},
+                        "dot": {"payload.rows[0]junk": "2"},
+                        "bracket": {"payload[rows][0]junk": "2"},
+                    },
+                ),
+            )
+        )
+    )
+    def test_sequence_child_hostile_cases_match_public_outcomes_across_spellings(
+        self, family
+    ):
+        """Hostile sequence-child aliases should agree on validation and rendering."""
+
+        class ChildForm(forms.Form):
+            rows = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        class Form(forms.Form):
+            payload = nestingdolls.MappingField(ChildForm, required=False)
+
+        _, spellings = family
+        outcomes = [
+            self._public_outcome(Form(spellings[style]), "payload")
+            for style in PATH_STYLES
+        ]
+        self.assertEqual(outcomes, [outcomes[0]] * len(outcomes))
+
+    @HYPOTHESIS_SETTINGS
+    @given(
+        data=st.sampled_from(
+            (
+                {"point[a]junk": "1"},
+                {"point[0]junk": "1"},
+                {"point[0": "1"},
+                {"pointer[0]": "1"},
+                {"pointx[a]": "1"},
+            )
+        )
+    )
+    def test_malformed_mapping_prefixes_and_suffixes_do_not_satisfy_the_field(
+        self, data
+    ):
+        """Malformed mapping aliases cannot satisfy a required field."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm)
+
+        form = Form(data)
 
         self.assertFalse(form.is_valid())
         self.assertEqual(form.errors.as_data()["point"][0].code, "required")
