@@ -120,6 +120,22 @@ class SequenceFieldTestCase(SimpleTestCase):
                 self.assertTrue(form.is_valid(), form.errors)
                 self.assertEqual(form.cleaned_data["values"], [1, 2, 3])
 
+    def test_sparse_high_index_dot_and_bracket_rows_are_accepted_without_management_data(self):
+        """It accepts sparse dot and bracket spellings without explicit management rows."""
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        data_shapes = (
+            {"values.2": "3"},
+            {"values[2]": "3"},
+        )
+
+        for data in data_shapes:
+            with self.subTest(data=data):
+                form = Form(data)
+                self.assertTrue(form.is_valid(), form.errors)
+                self.assertEqual(form.cleaned_data["values"], [3])
+
     def test_json_null_row_is_rejected_consistently_across_supported_spellings(self):
         """It rejects JSON null rows consistently across all supported spellings."""
 
@@ -266,6 +282,8 @@ class SequenceFieldTestCase(SimpleTestCase):
             ({"values-1": "2", "values.1": "3"}, [3], "later canonical row wins"),
             ({"values": ["1"], "values-0": "2"}, [1], "direct value wins over indexed convenience"),
             ({"values-01": "2", "values-1": "3"}, [3], "later normalized index wins"),
+            ({"values-0": "2", "values[00]": "3"}, [3], "later bracket alias wins"),
+            ({"values.0": "2", "values[00]": "3"}, [3], "later bracket canonical alias wins"),
         )
         for data, expected, label in cases:
             with self.subTest(label=label, data=data):
@@ -410,6 +428,19 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertEqual(
             initial_missing.errors.as_data()["values"][0].params["index"], 0
         )
+
+    def test_explicit_management_data_skips_omitted_extra_rows(self):
+        """It skips omitted extra rows while keeping submitted initial rows."""
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        form = Form(
+            sequence_data("values", ["10", None, "30"], initial_forms=1),
+            initial={"values": [10]},
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["values"], [10, 30])
 
     def test_leading_zero_indexes_normalize_once(self):
         """It normalizes leading-zero indexes to one row key."""
