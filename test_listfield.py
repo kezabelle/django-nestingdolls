@@ -997,29 +997,6 @@ class _HypothesisTestCase(SimpleTestCase):
 
 
 class SequenceFieldPropertyTestCase(_HypothesisTestCase):
-    @staticmethod
-    def _public_outcome(form, name):
-        try:
-            if form.is_valid():
-                validation = ("ok", form.cleaned_data[name])
-            else:
-                validation = (
-                    "error",
-                    tuple(
-                        (error.code, (error.params or {}).get("child_code"))
-                        for error in form.errors.as_data()[name]
-                    ),
-                )
-        except Exception as exc:
-            validation = ("validation_exception", type(exc).__name__)
-        try:
-            str(form[name])
-        except Exception as exc:
-            render = ("render_exception", type(exc).__name__)
-        else:
-            render = ("render_ok", None)
-        return (validation, render)
-
     @HYPOTHESIS_SETTINGS
     @example(values=[{"answer": 42}])
     @given(values=st.lists(JSON_VALUES, max_size=4))
@@ -1306,12 +1283,39 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
             for style, payload in family.items():
                 spellings[style].update(payload)
         populated_styles = [
-            style for style in self._row_spelling_names if style in spellings and spellings[style]
+            style for style in self._row_spelling_names if spellings.get(style)
         ]
         if not populated_styles:
             populated_styles = ["direct"]
-        outcomes = [self._public_outcome(Form(spellings[style]), "values") for style in populated_styles]
-        self.assertEqual(outcomes, [outcomes[0]] * len(outcomes))
+        is_valid_results = []
+        error_results = []
+        render_results = []
+        value_results = []
+        for style in populated_styles:
+            form = Form(spellings[style])
+            is_valid_results.append(form.is_valid())
+            error_results.append(
+                tuple(
+                    (error.code, (error.params or {}).get("child_code"))
+                    for error in form.errors.as_data().get("values", [])
+                )
+            )
+            try:
+                str(form["values"])
+            except Exception as exc:  # noqa: BLE001 - crashes are the property outcome
+                render_results.append(type(exc).__name__)
+            else:
+                render_results.append(None)
+            try:
+                form["values"].value()
+            except Exception as exc:  # noqa: BLE001 - crashes are the property outcome
+                value_results.append(type(exc).__name__)
+            else:
+                value_results.append(None)
+        self.assertEqual(is_valid_results, [is_valid_results[0]] * len(is_valid_results))
+        self.assertEqual(error_results, [error_results[0]] * len(error_results))
+        self.assertEqual(render_results, [render_results[0]] * len(render_results))
+        self.assertEqual(value_results, [value_results[0]] * len(value_results))
 
     @HYPOTHESIS_SETTINGS
     @given(
@@ -1628,7 +1632,6 @@ class NestedParserRegressionTestCase(SimpleTestCase):
                     ("invalid", "item_invalid"),
                 )
 
-    @unittest.expectedFailure
     def test_mapping_row_shape_errors_render_without_raising(self):
         """Invalid mapping rows should render as inline field errors, not 500s."""
 
@@ -1653,9 +1656,9 @@ class NestedParserRegressionTestCase(SimpleTestCase):
                 form = Form(data)
                 self.assertFalse(form.is_valid())
                 rendered = str(form["values"])
+                self.assertEqual(form["values"].value(), ["1"])
                 self.assertIn("Enter a mapping of values.", rendered)
 
-    @unittest.expectedFailure
     def test_mixed_scalar_and_nested_mapping_rows_render_without_raising(self):
         """Scalar row aliases plus nested child aliases should remain renderable."""
 
@@ -1673,9 +1676,9 @@ class NestedParserRegressionTestCase(SimpleTestCase):
 
         self.assertFalse(form.is_valid())
         rendered = str(form["values"])
+        self.assertEqual(form["values"].value(), ["1"])
         self.assertIn("Enter a mapping of values.", rendered)
 
-    @unittest.expectedFailure
     def test_nested_mapping_row_shape_errors_render_without_raising(self):
         """Repeated sequence-to-mapping boundaries should keep invalid rows renderable."""
 
@@ -1696,7 +1699,79 @@ class NestedParserRegressionTestCase(SimpleTestCase):
 
         self.assertFalse(form.is_valid())
         rendered = str(form["values"])
+        self.assertEqual(form["values"].value(), [["1"]])
         self.assertIn("Enter a mapping of values.", rendered)
+
+    def test_custom_child_rebinding_uses_django_field_fallbacks(self):
+        """A custom child widget receives hostile input without type assumptions."""
+
+        class CustomWidget(forms.TextInput):
+            pass
+
+        class RejectingField(forms.CharField):
+            widget = CustomWidget
+
+            def bound_data(self, data, initial):
+                raise ValidationError("Cannot bind this value.")
+
+            def prepare_value(self, value):
+                raise nestingdolls.InvalidInitialValueError(
+                    "Cannot prepare this value."
+                )
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(RejectingField(), required=False)
+
+        form = Form({"values[0]": "hostile"})
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form["values"].value(), ["hostile"])
+        self.assertIn('value="hostile"', str(form["values"]))
+
+    def test_numeric_mapping_child_names_remain_valid_below_a_list(self):
+        """A mapping child named ``0`` still accepts ``values[0][0]`` spellings."""
+
+        NumericChildForm = type(
+            "NumericChildForm",
+            (forms.Form,),
+            {"0": forms.IntegerField()},
+        )
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.MappingField(NumericChildForm),
+                required=False,
+            )
+
+        cases = (
+            {"values[0][0]": "1"},
+            {"values.0.0": "1"},
+            {"values-0-0": "1"},
+        )
+        for data in cases:
+            with self.subTest(data=data):
+                form = Form(data)
+                self.assertTrue(form.is_valid(), form.errors)
+                self.assertEqual(form.cleaned_data["values"], [{"0": 1}])
+                self.assertEqual(form["values"].value(), [{"0": "1"}])
+                str(form["values"])
+
+    def test_text_list_indexes_do_not_bind(self):
+        """Text segments cannot name sequence rows."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        cases = (
+            {"values[text]": "1"},
+            {"values.text": "1"},
+            {"values[text][a]": "1"},
+        )
+        for data in cases:
+            with self.subTest(data=data):
+                form = Form(data)
+                self.assertFalse(form.is_valid())
+                self.assertEqual(form.errors.as_data()["values"][0].code, "required")
 
 
 class WidgetIntegrationTestCase(SimpleTestCase):
@@ -1835,6 +1910,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         kept = Form(sequence_data("values", [None]), initial={"values": [initial]})
         self.assertTrue(kept.is_valid(), kept.errors)
         self.assertIs(kept.cleaned_data["values"][0], initial)
+        self.assertIs(kept["values"].value()[0], initial)
 
         clear_data = sequence_data("values", [None])
         clear_data["values-0-clear"] = "on"

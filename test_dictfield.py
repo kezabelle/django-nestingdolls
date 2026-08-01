@@ -747,29 +747,6 @@ class DictFieldPropertyTestCase(SimpleTestCase):
             ),
         )
 
-    @staticmethod
-    def _public_outcome(form, name):
-        try:
-            if form.is_valid():
-                validation = ("ok", form.cleaned_data[name])
-            else:
-                validation = (
-                    "error",
-                    tuple(
-                        (error.code, (error.params or {}).get("child_code"))
-                        for error in form.errors.as_data()[name]
-                    ),
-                )
-        except Exception as exc:
-            validation = ("validation_exception", type(exc).__name__)
-        try:
-            str(form[name])
-        except Exception as exc:
-            render = ("render_exception", type(exc).__name__)
-        else:
-            render = ("render_ok", None)
-        return (validation, render)
-
     @HYPOTHESIS_SETTINGS
     @given(value=RAW_INTEGER_VALUES)
     def test_all_mapping_spellings_have_the_same_public_outcome(self, value):
@@ -988,11 +965,35 @@ class DictFieldPropertyTestCase(SimpleTestCase):
             payload = nestingdolls.MappingField(ChildForm, required=False)
 
         _, spellings = family
-        outcomes = [
-            self._public_outcome(Form(spellings[style]), "payload")
-            for style in PATH_STYLES
-        ]
-        self.assertEqual(outcomes, [outcomes[0]] * len(outcomes))
+        is_valid_results = []
+        error_results = []
+        render_results = []
+        value_results = []
+        for style in PATH_STYLES:
+            form = Form(spellings[style])
+            is_valid_results.append(form.is_valid())
+            error_results.append(
+                tuple(
+                    (error.code, (error.params or {}).get("child_code"))
+                    for error in form.errors.as_data().get("payload", [])
+                )
+            )
+            try:
+                str(form["payload"])
+            except Exception as exc:  # noqa: BLE001 - crashes are the property outcome
+                render_results.append(type(exc).__name__)
+            else:
+                render_results.append(None)
+            try:
+                form["payload"].value()
+            except Exception as exc:  # noqa: BLE001 - crashes are the property outcome
+                value_results.append(type(exc).__name__)
+            else:
+                value_results.append(None)
+        self.assertEqual(is_valid_results, [is_valid_results[0]] * len(is_valid_results))
+        self.assertEqual(error_results, [error_results[0]] * len(error_results))
+        self.assertEqual(render_results, [render_results[0]] * len(render_results))
+        self.assertEqual(value_results, [value_results[0]] * len(value_results))
 
     @HYPOTHESIS_SETTINGS
     @example(
@@ -1050,11 +1051,35 @@ class DictFieldPropertyTestCase(SimpleTestCase):
             payload = nestingdolls.MappingField(ChildForm, required=False)
 
         _, spellings = family
-        outcomes = [
-            self._public_outcome(Form(spellings[style]), "payload")
-            for style in PATH_STYLES
-        ]
-        self.assertEqual(outcomes, [outcomes[0]] * len(outcomes))
+        is_valid_results = []
+        error_results = []
+        render_results = []
+        value_results = []
+        for style in PATH_STYLES:
+            form = Form(spellings[style])
+            is_valid_results.append(form.is_valid())
+            error_results.append(
+                tuple(
+                    (error.code, (error.params or {}).get("child_code"))
+                    for error in form.errors.as_data().get("payload", [])
+                )
+            )
+            try:
+                str(form["payload"])
+            except Exception as exc:  # noqa: BLE001 - crashes are the property outcome
+                render_results.append(type(exc).__name__)
+            else:
+                render_results.append(None)
+            try:
+                form["payload"].value()
+            except Exception as exc:  # noqa: BLE001 - crashes are the property outcome
+                value_results.append(type(exc).__name__)
+            else:
+                value_results.append(None)
+        self.assertEqual(is_valid_results, [is_valid_results[0]] * len(is_valid_results))
+        self.assertEqual(error_results, [error_results[0]] * len(error_results))
+        self.assertEqual(render_results, [render_results[0]] * len(render_results))
+        self.assertEqual(value_results, [value_results[0]] * len(value_results))
 
     @HYPOTHESIS_SETTINGS
     @given(

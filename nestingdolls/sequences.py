@@ -596,12 +596,20 @@ class SequenceField(Field):
         if self.disabled:
             return self._initial_values(initial)
         initial = self._initial_values(initial)
-        return [
-            self.child_field.bound_data(
-                value, initial[index] if index < len(initial) else None
-            )
-            for index, value in enumerate(self.to_python(data))
-        ]
+        values = []
+        for index, value in enumerate(self.to_python(data)):
+            initial_value = initial[index] if index < len(initial) else None
+            try:
+                value = self.child_field.bound_data(value, initial_value)
+            except (InvalidInitialValueError, ValidationError):
+                # BoundField.value() calls this while rendering. Composite children
+                # may reject a hostile row shape here after cleaning has already
+                # recorded a form error. Django's base contract for an enabled field
+                # is to redisplay the submitted value; prepare_value() mirrors this
+                # fallback so no widget-specific replacement value is needed.
+                value = super().bound_data(value, initial_value)
+            values.append(value)
+        return values
 
     def prepare_value(self, value: object) -> list[object]:
         """Prepare each row for widget rendering.
@@ -609,10 +617,14 @@ class SequenceField(Field):
         post[]: isinstance(__return__, list)
         post[]: len(__return__) == len(self._initial_values(value))
         """
-        return [
-            self.child_field.prepare_value(value)
-            for value in self._initial_values(value)
-        ]
+        values = []
+        for row in self._initial_values(value):
+            try:
+                row = self.child_field.prepare_value(row)
+            except (InvalidInitialValueError, ValidationError):
+                row = super().prepare_value(row)
+            values.append(row)
+        return values
 
     def has_changed(self, initial: object, data: object) -> bool:
         """Compare submitted rows using child-field change semantics.
