@@ -22,7 +22,7 @@
         return Array.from(root.querySelectorAll("[data-sequence-row]")).filter((row) => !row.hidden);
     }
     function ensureRemoveButton(row) {
-        const root = row.closest("[data-sequence-widget]");
+        const root = row.closest('[data-widget="sequence"]');
         if (!root) {
             return;
         }
@@ -55,7 +55,7 @@
         }
     }
     function removeRow(row) {
-        const root = row.closest("[data-sequence-widget]");
+        const root = row.closest('[data-widget="sequence"]');
         if (!root) {
             return;
         }
@@ -123,7 +123,7 @@
     }
     function start() {
         document
-            .querySelectorAll("[data-sequence-widget]")
+            .querySelectorAll('[data-widget="sequence"]')
             .forEach(enhanceWidget);
     }
     if (document.readyState === "loading") {

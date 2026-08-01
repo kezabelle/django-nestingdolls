@@ -1713,6 +1713,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         )
         self.assertIn('id="id_values_widget"', html)
         self.assertIn('id="id_values_rows"', html)
+        self.assertIn('data-widget="sequence"', html)
         self.assertIn('data-sequence-field="values"', html)
         self.assertIn('id="id_values_row_0"', html)
         self.assertIn('id="id_values_0_DELETE"', html)

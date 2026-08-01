@@ -33,7 +33,7 @@
   }
 
   function ensureRemoveButton(row: HTMLElement): void {
-    const root = row.closest<HTMLElement>("[data-sequence-widget]");
+    const root = row.closest<HTMLElement>('[data-widget="sequence"]');
     if (!root) {
       return;
     }
@@ -89,7 +89,7 @@
   }
 
   function removeRow(row: HTMLElement): void {
-    const root = row.closest<HTMLElement>("[data-sequence-widget]");
+    const root = row.closest<HTMLElement>('[data-widget="sequence"]');
     if (!root) {
       return;
     }
@@ -184,7 +184,7 @@
 
   function start(): void {
     document
-      .querySelectorAll<HTMLElement>("[data-sequence-widget]")
+      .querySelectorAll<HTMLElement>('[data-widget="sequence"]')
       .forEach(enhanceWidget);
   }
 

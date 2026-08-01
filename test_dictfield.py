@@ -439,7 +439,7 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
 
         html = Form().as_p()
 
-        self.assertIn('data-mapping-widget', html)
+        self.assertIn('data-widget="mapping"', html)
         self.assertIn('data-mapping-field="filters"', html)
         self.assertIn('id="id_filters_widget"', html)
         self.assertInHTML(
