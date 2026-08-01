@@ -1183,7 +1183,6 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
             cleaned_results, [values] * len(self._multiwidget_spelling_names)
         )
 
-
 class SetFieldPropertyTestCase(_HypothesisTestCase):
     @HYPOTHESIS_SETTINGS
     @example(values=[1, 1])
@@ -1443,6 +1442,106 @@ class NestedSequencePropertyTestCase(_HypothesisTestCase):
             initial={"values": initial_rows},
         )
         self.assertTrue(form.has_changed())
+
+
+class NestedParserRegressionTestCase(SimpleTestCase):
+    def test_mapping_row_shape_errors_stay_in_the_validation_channel(self):
+        """Invalid mapping-shaped rows should become normal form errors."""
+
+        class PointForm(forms.Form):
+            a = forms.IntegerField()
+            label = forms.CharField(required=False)
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.MappingField(PointForm),
+                required=False,
+            )
+
+        cases = (
+            ("direct", {"values": ["1"]}),
+            ("dash", {"values-0": "1"}),
+            ("dot", {"values.0": "1"}),
+            ("bracket", {"values[0]": "1"}),
+        )
+        for label, data in cases:
+            with self.subTest(style=label):
+                form = Form(data)
+                self.assertFalse(form.is_valid())
+                self.assertIn(
+                    form.errors.as_data()["values"][0].code,
+                    ("invalid", "item_invalid"),
+                )
+
+    @unittest.expectedFailure
+    def test_mapping_row_shape_errors_render_without_raising(self):
+        """Invalid mapping rows should render as inline field errors, not 500s."""
+
+        class PointForm(forms.Form):
+            a = forms.IntegerField()
+            label = forms.CharField(required=False)
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.MappingField(PointForm),
+                required=False,
+            )
+
+        cases = (
+            ("direct", {"values": ["1"]}),
+            ("dash", {"values-0": "1"}),
+            ("dot", {"values.0": "1"}),
+            ("bracket", {"values[0]": "1"}),
+        )
+        for label, data in cases:
+            with self.subTest(style=label):
+                form = Form(data)
+                self.assertFalse(form.is_valid())
+                rendered = str(form["values"])
+                self.assertIn("Enter a mapping of values.", rendered)
+
+    @unittest.expectedFailure
+    def test_mixed_scalar_and_nested_mapping_rows_render_without_raising(self):
+        """Scalar row aliases plus nested child aliases should remain renderable."""
+
+        class PointForm(forms.Form):
+            a = forms.IntegerField()
+            label = forms.CharField(required=False)
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.MappingField(PointForm),
+                required=False,
+            )
+
+        form = Form({"values[0]": "1", "values[0][a]": "2"})
+
+        self.assertFalse(form.is_valid())
+        rendered = str(form["values"])
+        self.assertIn("Enter a mapping of values.", rendered)
+
+    @unittest.expectedFailure
+    def test_nested_mapping_row_shape_errors_render_without_raising(self):
+        """Repeated sequence-to-mapping boundaries should keep invalid rows renderable."""
+
+        class PointForm(forms.Form):
+            a = forms.IntegerField()
+            label = forms.CharField(required=False)
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.ListField(
+                    nestingdolls.MappingField(PointForm),
+                    required=False,
+                ),
+                required=False,
+            )
+
+        form = Form({"values[0][0]": "1"})
+
+        self.assertFalse(form.is_valid())
+        rendered = str(form["values"])
+        self.assertIn("Enter a mapping of values.", rendered)
 
 
 class WidgetIntegrationTestCase(SimpleTestCase):

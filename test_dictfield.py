@@ -909,6 +909,76 @@ class DictFieldPropertyTestCase(SimpleTestCase):
         self.assertFalse(form.is_valid())
         self.assertEqual(form.errors.as_data()["point"][0].code, "required")
 
+class DictFieldRegressionTestCase(SimpleTestCase):
+    def test_scalar_and_nested_mapping_aliases_do_not_crash_rendering(self):
+        """A scalar alias plus a nested alias stays a form error, not a render crash."""
+
+        class ChildForm(forms.Form):
+            point = nestingdolls.MappingField(PointForm, required=False)
+
+        class Form(forms.Form):
+            payload = nestingdolls.MappingField(ChildForm, required=False)
+
+        cases = (
+            ("dash", {"payload-point": "1", "payload-point[a]": "2"}),
+            ("dot", {"payload.point": "1", "payload.point[a]": "2"}),
+            ("bracket", {"payload[point]": "1", "payload[point][a]": "2"}),
+        )
+        for label, data in cases:
+            with self.subTest(style=label):
+                form = Form(data)
+                self.assertFalse(form.is_valid())
+                self.assertIn(
+                    form.errors.as_data()["payload"][0].code,
+                    ("invalid", "item_invalid"),
+                )
+                rendered = str(form["payload"])
+                self.assertIn("Enter a mapping of values.", rendered)
+
+    def test_scalar_and_nested_sequence_aliases_inside_mapping_do_not_crash(self):
+        """A direct row alias mixed with nested sequence input remains renderable."""
+
+        class ChildForm(forms.Form):
+            rows = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        class Form(forms.Form):
+            payload = nestingdolls.MappingField(ChildForm, required=False)
+
+        cases = (
+            ("dash", {"payload-rows": "1", "payload-rows[0]": "2"}),
+            ("dot", {"payload.rows": "1", "payload.rows[0]": "2"}),
+            ("bracket", {"payload[rows]": "1", "payload[rows][0]": "2"}),
+        )
+        for label, data in cases:
+            with self.subTest(style=label):
+                form = Form(data)
+                self.assertTrue(form.is_valid(), (label, form.errors))
+                self.assertEqual(form.cleaned_data["payload"]["rows"], [1])
+                rendered = str(form["payload"])
+                self.assertIn("name=", rendered)
+
+    def test_numeric_child_names_accept_bracket_and_dot_spellings(self):
+        """Numeric child names currently behave as child keys, not row indexes."""
+
+        NumericChildForm = type(
+            "NumericChildForm",
+            (forms.Form,),
+            {"0": forms.IntegerField()},
+        )
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(NumericChildForm, required=False)
+
+        for style in ("dot", "bracket"):
+            with self.subTest(style=style):
+                if style == "dot":
+                    data = {"point.0": "1"}
+                else:
+                    data = {"point[0]": "1"}
+                form = Form(data)
+                self.assertTrue(form.is_valid(), form.errors)
+                self.assertEqual(form.cleaned_data["point"], {"0": 1})
+
 
 class PublicApiTestCase(SimpleTestCase):
     def test_mapping_family_is_exported(self):
