@@ -306,6 +306,7 @@ class SequenceField(Field):
         *,
         min_length: int = DEFAULT_MIN_NUM,
         max_length: int = DEFAULT_MAX_NUM,
+        absolute_max: int | None = None,
         required: bool = True,
         widget: SequenceWidget | type[SequenceWidget] | None = None,
         label: str | Promise | None = None,
@@ -327,6 +328,10 @@ class SequenceField(Field):
             )
         if min_length < 0 or max_length < min_length:
             raise ValueError("min_length and max_length must be non-negative integers")
+        if absolute_max is None:
+            absolute_max = max_length + DEFAULT_MAX_NUM
+        if max_length > absolute_max:
+            raise ValueError("'absolute_max' must be greater or equal to 'max_length'.")
         if (
             initial is not None
             and not callable(initial)
@@ -339,7 +344,7 @@ class SequenceField(Field):
         self.child_field = copy.deepcopy(child_field)
         self.min_length = min_length
         self.max_length = max_length
-        self.absolute_max = max_length + DEFAULT_MAX_NUM
+        self.absolute_max = absolute_max
         self.child_field.localize = localize
 
         widget = SequenceWidget if widget is None else widget
@@ -424,6 +429,12 @@ class SequenceField(Field):
         omitted_indexes: frozenset[int] = frozenset(),
     ) -> list[object]:
         """Clean each submitted row and return the cleaned row list."""
+        if len(values) > self.absolute_max:
+            raise ValidationError(
+                self.error_messages["too_many_forms"],
+                code="too_many_forms",
+                params={"num": self.max_length},
+            )
         cleaned_data: list[object] = []
         errors = []
         for index, value in enumerate(values):
@@ -566,6 +577,8 @@ class SequenceField(Field):
         """
         if self.disabled:
             return self._initial_values(initial)
+        if isinstance(data, list) and len(data) > self.absolute_max:
+            return []
         initial = self._initial_values(initial)
         values = []
         for index, value in enumerate(self.to_python(data)):
@@ -602,6 +615,8 @@ class SequenceField(Field):
 
         post[]: isinstance(__return__, bool)
         """
+        if isinstance(data, list) and len(data) > self.absolute_max:
+            return True
         if not super().has_changed(initial, data):
             return False
         try:
@@ -673,6 +688,8 @@ class SetField(SequenceField):
         field's own ``has_changed()`` semantics, then matches those semantic
         members without caring about row order.
         """
+        if isinstance(data, list) and len(data) > self.absolute_max:
+            return True
         if not super().has_changed(initial, data):
             return False
         try:
@@ -787,7 +804,7 @@ class SequenceWidget(Widget):
             if name not in source:
                 return None
             value = source.get(name)
-            return value if isinstance(value, list) else []
+            return value[: self.absolute_max + 1] if isinstance(value, list) else []
 
         def submitted_total_forms(source: MultiValueDict[str, object]) -> int | None:
             value = source.get(f"{name}-{TOTAL_FORM_COUNT}")
@@ -869,19 +886,21 @@ class SequenceWidget(Widget):
                     continue
                 suffix = key.removeprefix(prefix)
                 index_end = 0
-                while index_end < len(suffix) and suffix[index_end].isdigit():
+                index = 0
+                while index_end < len(suffix) and "0" <= suffix[index_end] <= "9":
+                    digit = ord(suffix[index_end]) - ord("0")
+                    index = min(self.absolute_max, index * 10 + digit)
                     index_end += 1
                 if not index_end:
                     return None
-                index = int(suffix[:index_end])
                 if separator == "[":
                     if index_end == len(suffix) or suffix[index_end] != "]":
                         return None
                     suffix = suffix[index_end + 1 :]
                 else:
                     suffix = suffix[index_end:]
-                    if suffix and suffix[0] not in "_-.[":
-                        return None
+                if suffix and suffix[0] not in "_-.[":
+                    return None
                 return (f"{name}-{index}{suffix}", index)
             return None
 
@@ -904,8 +923,9 @@ class SequenceWidget(Widget):
                 continue
             row_name, index = row_key
             largest_index = max(largest_index, index)
-            normalized.setlist(row_name, values_for(key))
-        if normalized and not has_management_data:
+            if index < self.absolute_max:
+                normalized.setlist(row_name, values_for(key))
+        if (normalized or largest_index >= 0) and not has_management_data:
             total_forms = (
                 len(direct_value) if direct_value is not None else largest_index + 1
             )

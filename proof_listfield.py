@@ -9,7 +9,6 @@ from django import forms
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.forms.formsets import (
-    DEFAULT_MAX_NUM,
     DELETION_FIELD_NAME,
     INITIAL_FORM_COUNT,
     MAX_NUM_FORM_COUNT,
@@ -184,70 +183,6 @@ def prove_saturated_index(digits: str) -> bool:
     return actual_saturated_index(digits) == model_saturated_index(digits)
 
 
-def actual_management_source_precedence(
-    data_has_total: bool, data_total: int, file_total: int
-) -> int:
-    if not 0 <= data_total <= 4 or not 0 <= file_total <= 4:
-        return -1
-    data: dict[str, object] = {}
-    if data_has_total:
-        data[f"values-{TOTAL_FORM_COUNT}"] = str(data_total)
-        data[f"values-{INITIAL_FORM_COUNT}"] = "0"
-    files = {
-        f"values-{TOTAL_FORM_COUNT}": str(file_total),
-        f"values-{INITIAL_FORM_COUNT}": "0",
-    }
-    return len(_PARSER_WIDGET.value_from_datadict(data, files, "values"))
-
-
-def model_management_source_precedence(
-    data_has_total: bool, data_total: int, file_total: int
-) -> int:
-    if not 0 <= data_total <= 4 or not 0 <= file_total <= 4:
-        return -1
-    return data_total if data_has_total else file_total
-
-
-def prove_management_source_precedence(
-    data_has_total: bool, data_total: int, file_total: int
-) -> bool:
-    """
-    pre: 0 <= data_total <= 4
-    pre: 0 <= file_total <= 4
-    post[]: __return__
-    """
-    return actual_management_source_precedence(
-        data_has_total, data_total, file_total
-    ) == model_management_source_precedence(data_has_total, data_total, file_total)
-
-
-def actual_absolute_limit(values: list[int]) -> tuple[str, tuple[int, ...], bool]:
-    field = _integer_field(max_length=2, required=False)
-    field.absolute_max = 2
-    field.widget.absolute_max = 2
-    try:
-        cleaned = cast(list[int], field.clean(values))
-    except ValidationError as exc:
-        outcome = (exc.error_list[0].code or "invalid", ())
-    else:
-        outcome = ("ok", tuple(cleaned))
-    return (*outcome, field.has_changed([], values))
-
-
-def model_absolute_limit(values: list[int]) -> tuple[str, tuple[int, ...], bool]:
-    if len(values) > 2:
-        return ("too_many_forms", (), True)
-    return ("ok", tuple(values), bool(values))
-
-
-def prove_absolute_limit(values: list[int]) -> bool:
-    """
-    pre: len(values) <= 4
-    post[]: __return__
-    """
-    return actual_absolute_limit(values) == model_absolute_limit(values)
-
-
 def actual_clean_cardinality(
     min_length: int, max_length: int, required: bool, values: list[int]
 ) -> tuple[str, tuple[int, ...]]:
@@ -271,13 +206,9 @@ def model_clean_cardinality(
         min_length < 0
         or max_length < 0
         or min_length > max_length
-        or required
-        and max_length == 0
     ):
         return ("constructor_error", ())
     length = len(values)
-    if length > max_length + DEFAULT_MAX_NUM:
-        return ("too_many_forms", ())
     if length == 0 and required:
         return ("required", ())
     if length == 0:

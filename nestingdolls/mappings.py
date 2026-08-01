@@ -86,6 +86,20 @@ class MappingWidget(Widget):
             if not isinstance(value, Mapping):
                 return {name: value}
             source = value
+            child_names = self.form_class().fields
+            if hasattr(source, "getlist"):
+                normalized = MultiValueDict[str, object]()
+                for child_name in child_names:
+                    if child_name in source:
+                        normalized.setlist(
+                            f"{name}-{child_name}", source.getlist(child_name)
+                        )
+                return normalized
+            return {
+                f"{name}-{child_name}": source[child_name]
+                for child_name in child_names
+                if child_name in source
+            }
 
         def output_key(key: object) -> str | None:
             if not direct:

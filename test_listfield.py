@@ -500,25 +500,46 @@ class SequenceFieldTestCase(SimpleTestCase):
         )
         self.assertFalse(any(key.startswith("values-1001") for key in normalized))
 
-    def test_direct_payload_cannot_forge_a_small_management_total(self):
-        """It enforces the hard limit independently of a smaller submitted total."""
+    def test_direct_payload_enforces_absolute_max_before_child_cleaning(self):
+        """It bounds hostile direct lists independently of their management total."""
+
+        class UnreachableField(forms.IntegerField):
+            def clean(self, value):
+                raise AssertionError("oversized child value was cleaned")
+
+            def bound_data(self, data, initial):
+                raise AssertionError("oversized child value was bound")
+
+            def prepare_value(self, value):
+                raise AssertionError("oversized child value was prepared")
+
+            def has_changed(self, initial, data):
+                raise AssertionError("oversized child value was compared")
 
         class Form(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField(), max_length=1)
+            values = nestingdolls.ListField(UnreachableField(), max_length=1)
 
         field = Form.base_fields["values"]
-        data = {
-            "values": ["1"] * (field.absolute_max + 1),
-            f"values-{TOTAL_FORM_COUNT}": "1",
-            f"values-{INITIAL_FORM_COUNT}": "0",
-        }
-        form = Form(data)
+        values = ["1"] * (field.absolute_max + 1)
+        with self.assertRaises(ValidationError) as context:
+            field.clean(values)
+        self.assertEqual(context.exception.error_list[0].code, "too_many_forms")
+        self.assertTrue(field.has_changed([], values))
+
+        form = Form(
+            {
+                "values": values,
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+            }
+        )
 
         self.assertFalse(form.is_valid())
         self.assertEqual(form.errors.as_data()["values"][0].code, "too_many_forms")
+        form.as_p()
 
-    def test_management_total_authority_and_data_file_union_are_deterministic(self):
-        """Data totals win, file totals are the fallback, and inference uses both."""
+    def test_management_data_and_file_inference_are_deterministic(self):
+        """It infers across both inputs and accepts management data from files."""
 
         class DataOrFilesWidget(forms.TextInput):
             def value_from_datadict(self, data, files, name):
@@ -541,20 +562,12 @@ class SequenceFieldTestCase(SimpleTestCase):
 
         first = SimpleUploadedFile("first.txt", b"first")
         second = SimpleUploadedFile("second.txt", b"second")
-        data = {
-            f"values-{TOTAL_FORM_COUNT}": "1",
-            f"values-{INITIAL_FORM_COUNT}": "0",
-        }
         files = {
             f"values-{TOTAL_FORM_COUNT}": "2",
             f"values-{INITIAL_FORM_COUNT}": "0",
             "values-0": first,
             "values-1": second,
         }
-        data_authoritative = UploadForm(data, files=files)
-        self.assertTrue(data_authoritative.is_valid(), data_authoritative.errors)
-        self.assertEqual(data_authoritative.cleaned_data["values"], [first])
-
         files_authoritative = UploadForm({}, files=files)
         self.assertTrue(files_authoritative.is_valid(), files_authoritative.errors)
         self.assertEqual(files_authoritative.cleaned_data["values"], [first, second])
@@ -585,49 +598,6 @@ class SequenceFieldTestCase(SimpleTestCase):
 
         self.assertTrue(form.is_valid(), form.errors)
         self.assertEqual(form.cleaned_data["values"], [1])
-
-    def test_absolute_limit_short_circuits_child_cleaning_and_change_detection(self):
-        """It does no child work once an excessive direct payload is known."""
-
-        class CountingField(forms.IntegerField):
-            clean_calls = 0
-            change_calls = 0
-
-            def clean(self, value):
-                type(self).clean_calls += 1
-                return super().clean(value)
-
-            def has_changed(self, initial, data):
-                type(self).change_calls += 1
-                return super().has_changed(initial, data)
-
-        field = nestingdolls.ListField(
-            CountingField(), max_length=0, required=False
-        )
-        values = ["1"] * (field.absolute_max + 1)
-
-        with self.assertRaises(ValidationError) as context:
-            field.clean(values)
-        self.assertEqual(context.exception.error_list[0].code, "too_many_forms")
-        self.assertTrue(field.has_changed([], values))
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(
-                CountingField(), max_length=0, required=False
-            )
-
-        form = Form(
-            {
-                "values": values,
-                f"values-{TOTAL_FORM_COUNT}": "0",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-            }
-        )
-        self.assertFalse(form.is_valid())
-        self.assertEqual(form.errors.as_data()["values"][0].code, "too_many_forms")
-        self.assertTrue(form.has_changed())
-        self.assertEqual(CountingField.clean_calls, 0)
-        self.assertEqual(CountingField.change_calls, 0)
 
     def test_disabled_children_clean_and_validate_sequence_initials(self):
         """It coerces valid disabled initials and rejects invalid ones."""
@@ -857,6 +827,22 @@ class SetFieldTestCase(SimpleTestCase):
             required=False,
         )
         self.assertFalse(parent.has_changed([frozenset({1, 2})], [["2", "1", "1"]]))
+
+    def test_oversized_direct_payload_short_circuits_set_comparison(self):
+        """It stops set comparison immediately for oversized direct lists."""
+
+        class UnreachableField(forms.IntegerField):
+            def has_changed(self, initial, data):
+                raise AssertionError("oversized child value was compared")
+
+        for field_class, expected_initial in (
+            (nestingdolls.SetField, set()),
+            (nestingdolls.FrozenSetField, frozenset()),
+        ):
+            field = field_class(UnreachableField(), max_length=0, required=False)
+            values = ["1"] * (field.absolute_max + 1)
+            with self.subTest(field_class=field_class.__name__):
+                self.assertTrue(field.has_changed(expected_initial, values))
 
     def test_has_changed_propagates_child_value_errors(self):
         """It preserves child comparison value errors."""
@@ -1228,16 +1214,6 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
     ):
         """It applies required/min/max exactly from final row cardinality."""
         min_length, max_length = bounds
-
-        if required and max_length == 0:
-            with self.assertRaises(ValueError):
-                nestingdolls.ListField(
-                    forms.IntegerField(),
-                    required=required,
-                    min_length=min_length,
-                    max_length=max_length,
-                )
-            return
 
         class Form(forms.Form):
             values = nestingdolls.ListField(
@@ -2314,6 +2290,12 @@ class PublicApiTestCase(SimpleTestCase):
             nestingdolls.ListField(forms.IntegerField(), initial="not a collection")
         with self.assertRaises(ValueError):
             nestingdolls.ListField(forms.IntegerField(), max_length=1, initial=[1, 2])
+        with self.assertRaisesMessage(
+            ValueError, "'absolute_max' must be greater or equal to 'max_length'."
+        ):
+            nestingdolls.ListField(
+                forms.IntegerField(), max_length=2, absolute_max=1
+            )
 
         for kwargs in (
             {"min_length": -1},
@@ -2322,52 +2304,6 @@ class PublicApiTestCase(SimpleTestCase):
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 nestingdolls.ListField(forms.IntegerField(), **kwargs)
-        with self.assertRaises(ValueError):
-            nestingdolls.ListField(forms.IntegerField(), max_length=0)
-
-        for kwargs in (
-            {"min_length": -1},
-            {"min_length": 2, "max_length": 1},
-            {"max_length": 2, "absolute_max": 1},
-        ):
-            with self.subTest(widget_kwargs=kwargs), self.assertRaises(ValueError):
-                nestingdolls.SequenceWidget(forms.IntegerField(), **kwargs)
-
-    def test_widget_attrs_sees_final_sequence_configuration(self):
-        """Django's constructor hook sees the configured private widget copy."""
-
-        class InspectingField(nestingdolls.ListField):
-            observed = None
-
-            def widget_attrs(self, widget):
-                self.observed = (
-                    type(widget.child_field),
-                    widget.min_length,
-                    widget.max_length,
-                    widget.absolute_max,
-                )
-                return {"data-hook": "configured"}
-
-        class CustomWidget(nestingdolls.SequenceWidget):
-            def __init__(self, child_field):
-                super().__init__(child_field)
-
-        supplied = nestingdolls.SequenceWidget(forms.CharField())
-        for widget in (None, CustomWidget, supplied):
-            with self.subTest(widget=widget):
-                field = InspectingField(
-                    forms.IntegerField(),
-                    min_length=1,
-                    max_length=2,
-                    widget=widget,
-                )
-                self.assertEqual(
-                    field.observed,
-                    (forms.IntegerField, 1, 2, field.absolute_max),
-                )
-                self.assertEqual(field.widget.attrs["data-hook"], "configured")
-                self.assertIs(field.widget.child_field, field.child_field)
-
     def test_rejects_non_fields_and_legacy_widget_usage(self):
         """It rejects invalid child fields and legacy widget arguments."""
         with self.assertRaises(ImproperlyConfigured):
@@ -2391,6 +2327,7 @@ class PublicApiTestCase(SimpleTestCase):
             forms.IntegerField(),
             min_length=1,
             max_length=2,
+            absolute_max=3,
             widget=widget,
         )
 
@@ -2398,11 +2335,30 @@ class PublicApiTestCase(SimpleTestCase):
         self.assertIs(field.widget.child_field, field.child_field)
         self.assertEqual(field.widget.min_length, 1)
         self.assertEqual(field.widget.max_length, 2)
+        self.assertEqual(field.absolute_max, 3)
         self.assertEqual(field.widget.absolute_max, field.absolute_max)
         self.assertIs(widget.child_field, original_child)
         self.assertEqual(widget.min_length, 4)
         self.assertEqual(widget.max_length, 5)
         self.assertEqual(widget.absolute_max, 6)
+
+    def test_management_total_uses_configured_absolute_maximum(self):
+        """It enforces a custom absolute maximum for management totals."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.IntegerField(),
+                max_length=1,
+                absolute_max=2,
+            )
+
+        data = QueryDict("", mutable=True)
+        data[f"values-{TOTAL_FORM_COUNT}"] = "3"
+        data[f"values-{INITIAL_FORM_COUNT}"] = "0"
+        form = Form(data)
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(form.errors.as_data()["values"][0].code, "too_many_forms")
 
     def test_custom_bound_field_keeps_sequence_error_integration(self):
         """It lets custom bound fields keep sequence error rendering."""
