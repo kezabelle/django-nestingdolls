@@ -676,17 +676,17 @@ def prove_frozenset_child_delegation(initial: list[int], data: list[int]) -> boo
     ) == model_frozenset_child_delegation(initial, data)
 
 
-def actual_management_names(name: str) -> tuple[str, str, str, str]:
+def actual_management_names(name: str) -> set[str]:
     return nestingdolls.SequenceWidget.management_names(name)
 
 
-def model_management_names(name: str) -> tuple[str, str, str, str]:
-    return (
+def model_management_names(name: str) -> set[str]:
+    return {
         f"{name}-{TOTAL_FORM_COUNT}",
         f"{name}-{INITIAL_FORM_COUNT}",
         f"{name}-{MIN_NUM_FORM_COUNT}",
         f"{name}-{MAX_NUM_FORM_COUNT}",
-    )
+    }
 
 
 def prove_management_names(name: str) -> bool:

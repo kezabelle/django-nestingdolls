@@ -2446,7 +2446,7 @@ class SequenceParserPropertyTestCase(SimpleTestCase):
         renormalized = PARSER_WIDGET._normalize_mapping(normalized, "values")
         self.assertEqual(renormalized, normalized)
 
-        management_names = set(PARSER_WIDGET.management_names("values"))
+        management_names = PARSER_WIDGET.management_names("values")
         for key in normalized:
             if key == "values" or key in management_names:
                 continue

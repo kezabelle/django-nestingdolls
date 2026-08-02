@@ -155,8 +155,7 @@ class SequenceBoundField(BoundField):
     def _management_form(self) -> ManagementForm | None:
         """Build a management form from normalized sequence inputs."""
         management_data: MultiValueDict[str, object] = MultiValueDict()
-        management_names = self.field.widget.management_names(self.html_name)
-        for name in management_names:
+        for name in self.field.widget.management_names(self.html_name):
             if name in self._data_input:
                 management_data[name] = self._data_input[name]
         if not management_data:
@@ -840,21 +839,21 @@ class SequenceWidget(Widget):
         )
 
     @staticmethod
-    def management_names(name: str) -> tuple[str, str, str, str]:
+    def management_names(name: str) -> set[str]:
         """Return the management keys for a sequence field name.
 
         post[]: len(__return__) == 4
-        post[]: __return__[0] == f"{name}-{TOTAL_FORM_COUNT}"
-        post[]: __return__[1] == f"{name}-{INITIAL_FORM_COUNT}"
-        post[]: __return__[2] == f"{name}-{MIN_NUM_FORM_COUNT}"
-        post[]: __return__[3] == f"{name}-{MAX_NUM_FORM_COUNT}"
+        post[]: f"{name}-{TOTAL_FORM_COUNT}" in __return__
+        post[]: f"{name}-{INITIAL_FORM_COUNT}" in __return__
+        post[]: f"{name}-{MIN_NUM_FORM_COUNT}" in __return__
+        post[]: f"{name}-{MAX_NUM_FORM_COUNT}" in __return__
         """
-        return (
+        return {
             f"{name}-{TOTAL_FORM_COUNT}",
             f"{name}-{INITIAL_FORM_COUNT}",
             f"{name}-{MIN_NUM_FORM_COUNT}",
             f"{name}-{MAX_NUM_FORM_COUNT}",
-        )
+        }
 
     def _normalized_row_key(self, key: object, name: str) -> tuple[str, int] | None:
         """Normalize one supported row key into its canonical name and index."""
@@ -901,7 +900,7 @@ class SequenceWidget(Widget):
                 value = data.get(key)
                 return value if isinstance(value, list) else [value]
 
-        management_names = set(self.management_names(name))
+        management_names = self.management_names(name)
         has_management_data = False
         direct_value: list[object] | None = None
         overflowed_index = False
