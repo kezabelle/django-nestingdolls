@@ -293,7 +293,7 @@ class CollectionTypesView(DemoView):
     }
 
 
-from debug_toolbar.toolbar import debug_toolbar_urls  # type: ignore[import-not-found]
+from debug_toolbar.toolbar import debug_toolbar_urls
 
 urlpatterns = [
     path("favicon.ico", FaviconView.as_view(), name="favicon"),

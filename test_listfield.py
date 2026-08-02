@@ -321,6 +321,22 @@ class SequenceFieldTestCase(SimpleTestCase):
             "values-TOTAL_FORMS",
         )
 
+    def test_duplicate_management_data_uses_last_submitted_value(self):
+        """It matches Django formsets by using the last management value."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        form = Form(
+            QueryDict(
+                "values-TOTAL_FORMS=1&values-TOTAL_FORMS=2&values-INITIAL_FORMS=0"
+                "&values-0=1&values-1=2"
+            )
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["values"], [1, 2])
+
     def test_overlapping_spellings_use_normal_overwrite_semantics(self):
         """It lets later overlapping spellings overwrite earlier ones."""
 

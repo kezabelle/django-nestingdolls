@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
+from django.core.files.uploadedfile import UploadedFile
 from django.forms import BaseForm, Field, FileField
 from django.forms.boundfield import BoundField
 from django.forms.utils import ErrorList
@@ -241,11 +242,14 @@ class MappingBoundField(BoundField):
         return self.field.widget._normalize_mapping(self.form.data, self.html_name)
 
     @cached_property
-    def _file_input(self) -> Mapping[str, object]:
+    def _file_input(self) -> MultiValueDict[str, UploadedFile]:
         """Cache normalized submitted files for this field."""
         if not self.form.files:
-            return {}
-        return self.field.widget._normalize_mapping(self.form.files, self.html_name)
+            return MultiValueDict()
+        return cast(
+            MultiValueDict[str, UploadedFile],
+            self.field.widget._normalize_mapping(self.form.files, self.html_name),
+        )
 
     @cached_property
     def data(self) -> object:
@@ -308,19 +312,28 @@ class MappingBoundField(BoundField):
     @cached_property
     def subform(self) -> BaseForm:
         """Return the child Form used for bound cleaning and rendering."""
-        kwargs: dict[str, object] = {
-            "initial": self.initial,
-            "prefix": self.html_name,
-            "auto_id": self.form.auto_id,
-            "use_required_attribute": (
-                self.field.required and self.form.use_required_attribute
-            ),
-            "renderer": self.form.renderer,
-        }
         if self._is_bound_subform:
-            kwargs["data"] = self._data_input
-            kwargs["files"] = self._file_input
-        subform = self.field.form_class(**kwargs)
+            subform = self.field.form_class(
+                data=self._data_input,
+                files=self._file_input,
+                initial=self.initial,
+                prefix=self.html_name,
+                auto_id=self.form.auto_id,
+                use_required_attribute=(
+                    self.field.required and self.form.use_required_attribute
+                ),
+                renderer=self.form.renderer,
+            )
+        else:
+            subform = self.field.form_class(
+                initial=self.initial,
+                prefix=self.html_name,
+                auto_id=self.form.auto_id,
+                use_required_attribute=(
+                    self.field.required and self.form.use_required_attribute
+                ),
+                renderer=self.form.renderer,
+            )
         if self.field.disabled:
             for field in subform.fields.values():
                 field.disabled = True
@@ -537,10 +550,10 @@ class MappingField(Field):
         """Bind submitted members with their matching initial values."""
         if self.disabled:
             return self._initial_value(initial)
-        initial_value = self._initial_value(initial)
-        data_value = self.to_python(data)
+        initial = self._initial_value(initial)
+        data = self.to_python(data)
         return {
-            name: field.bound_data(data_value.get(name), initial_value.get(name))
+            name: field.bound_data(data.get(name), initial.get(name))
             for name, field in self.form_class().fields.items()
         }
 
@@ -549,11 +562,11 @@ class MappingField(Field):
 
         post[]: isinstance(__return__, dict)
         """
-        values = self._initial_value(value)
+        value = self._initial_value(value)
         return {
-            name: field.prepare_value(values[name])
+            name: field.prepare_value(value[name])
             for name, field in self.form_class().fields.items()
-            if name in values
+            if name in value
         }
 
     def has_changed(self, initial: object, data: object) -> bool:
@@ -564,13 +577,13 @@ class MappingField(Field):
         if not super().has_changed(initial, data):
             return False
         try:
-            initial_value = self._initial_value(initial)
-            data_value = self.to_python(data)
+            initial = self._initial_value(initial)
+            data = self.to_python(data)
         except (InvalidInitialValueError, ValidationError):
             return True
         for name, field in self.form_class().fields.items():
             try:
-                if field.has_changed(initial_value.get(name), data_value.get(name)):
+                if field.has_changed(initial.get(name), data.get(name)):
                     return True
             except ValidationError:
                 return True

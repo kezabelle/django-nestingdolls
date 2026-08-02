@@ -7,6 +7,7 @@ from datetime import datetime, time
 from typing import Any, Protocol, Self, cast
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
+from django.core.files.uploadedfile import UploadedFile
 from django.forms import BaseForm, Field
 from django.forms.boundfield import BoundField
 from django.forms.fields import BooleanField, FileField, MultiValueField
@@ -141,27 +142,23 @@ class SequenceBoundField(BoundField):
         return self.field.widget._normalize_mapping(self.form.data, self.html_name)
 
     @cached_property
-    def _file_input(self) -> MultiValueDict[str, object]:
+    def _file_input(self) -> MultiValueDict[str, UploadedFile]:
         """Cache normalized submitted files for this field."""
         if not self.form.files:
             return MultiValueDict()
-        return self.field.widget._normalize_mapping(self.form.files, self.html_name)
+        return cast(
+            MultiValueDict[str, UploadedFile],
+            self.field.widget._normalize_mapping(self.form.files, self.html_name),
+        )
 
     @cached_property
     def _management_form(self) -> ManagementForm | None:
         """Build a management form from normalized sequence inputs."""
         management_data: MultiValueDict[str, object] = MultiValueDict()
         management_names = self.field.widget.management_names(self.html_name)
-        data_input = self._data_input
-        file_input = self._file_input
-        normalized_source = (
-            data_input
-            if any(name in data_input for name in management_names)
-            else file_input
-        )
         for name in management_names:
-            if name in normalized_source:
-                management_data.setlist(name, normalized_source.getlist(name))
+            if name in self._data_input:
+                management_data[name] = self._data_input[name]
         if not management_data:
             return None
         management_form = ManagementForm(management_data, prefix=self.html_name)
@@ -336,10 +333,9 @@ class SequenceField(Field):
             initial is not None
             and not callable(initial)
             and not isinstance(initial, Mapping)
+            and len(self._initial_values(initial)) > max_length
         ):
-            initial_values = self._initial_values(initial)
-            if len(initial_values) > max_length:
-                raise ValueError("initial must not contain more than max_length values")
+            raise ValueError("initial must not contain more than max_length values")
 
         self.child_field = copy.deepcopy(child_field)
         self.min_length = min_length
@@ -486,15 +482,15 @@ class SequenceField(Field):
         implements Django's upload, clear, and contradiction semantics. Ordinary
         child fields continue to use their normal one-value ``clean()`` API.
         """
-        sequence_bound_field = cast(SequenceBoundField, bound_field)
+        assert isinstance(bound_field, SequenceBoundField)
         if self.disabled:
             return cast(
                 Collection[object],
-                super()._clean_bound_field(sequence_bound_field),  # type: ignore[misc]
+                super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
-        management_form = sequence_bound_field._management_form
-        deleted_indexes = sequence_bound_field._deleted_indexes
-        omitted_indexes = sequence_bound_field._omitted_indexes
+        management_form = bound_field._management_form
+        deleted_indexes = bound_field._deleted_indexes
+        omitted_indexes = bound_field._omitted_indexes
         if (
             management_form is None
             and not deleted_indexes
@@ -503,7 +499,7 @@ class SequenceField(Field):
         ):
             return cast(
                 Collection[object],
-                super()._clean_bound_field(sequence_bound_field),  # type: ignore[misc]
+                super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
 
         if management_form is not None:
@@ -532,8 +528,8 @@ class SequenceField(Field):
 
         result = self.compress(
             self._clean_values(
-                self.to_python(sequence_bound_field.data),
-                self._initial_values(sequence_bound_field.initial),
+                self.to_python(bound_field.data),
+                self._initial_values(bound_field.initial),
                 deleted_indexes,
                 omitted_indexes,
             )
@@ -787,8 +783,8 @@ class SequenceWidget(Widget):
 
     def _value_from_normalized_data(
         self,
-        data: MultiValueDict[str, object],
-        files: MultiValueDict[str, object],
+        data: Mapping[str, object],
+        files: Mapping[str, object],
         name: str,
     ) -> list[object]:
         """Extract row values from canonicalized data and files.
@@ -799,14 +795,14 @@ class SequenceWidget(Widget):
         """
 
         def direct_sequence_value(
-            source: MultiValueDict[str, object],
+            source: Mapping[str, object],
         ) -> list[object] | None:
             if name not in source:
                 return None
             value = source.get(name)
             return value[: self.absolute_max + 1] if isinstance(value, list) else []
 
-        def submitted_total_forms(source: MultiValueDict[str, object]) -> int | None:
+        def submitted_total_forms(source: Mapping[str, object]) -> int | None:
             value = source.get(f"{name}-{TOTAL_FORM_COUNT}")
             if value is None or not isinstance(value, (str, int)):
                 return None
@@ -914,11 +910,11 @@ class SequenceWidget(Widget):
         for key in data:
             if key == name:
                 direct_value = values_for(key)
-                normalized.setlist(name, [direct_value])
+                normalized[name] = direct_value
                 continue
             if key in management_names:
                 has_management_data = True
-                normalized.setlist(key, values_for(key))
+                normalized[key] = data.get(key)
                 continue
             row_key = self._normalized_row_key(key, name)
             if row_key is None:
@@ -931,8 +927,8 @@ class SequenceWidget(Widget):
 
         if direct_value is not None:
             if not has_management_data:
-                normalized.setlist(f"{name}-{TOTAL_FORM_COUNT}", [str(len(direct_value))])
-                normalized.setlist(f"{name}-{INITIAL_FORM_COUNT}", ["0"])
+                normalized[f"{name}-{TOTAL_FORM_COUNT}"] = str(len(direct_value))
+                normalized[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
             return normalized
 
         if has_management_data:
@@ -961,8 +957,8 @@ class SequenceWidget(Widget):
             total_forms = self.absolute_max + 1
         else:
             total_forms = max(remapped_indexes.values(), default=-1) + 1
-        normalized.setlist(f"{name}-{TOTAL_FORM_COUNT}", [str(total_forms)])
-        normalized.setlist(f"{name}-{INITIAL_FORM_COUNT}", ["0"])
+        normalized[f"{name}-{TOTAL_FORM_COUNT}"] = str(total_forms)
+        normalized[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
         return normalized
 
     def get_context(
