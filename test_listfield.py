@@ -479,7 +479,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertEqual(form.errors.as_data()["values"][0].code, "too_many_forms")
 
     def test_indexes_are_ascii_only_and_do_not_use_unbounded_integer_parsing(self):
-        """It ignores Unicode digits and safely saturates extremely long indexes."""
+        """It ignores Unicode digits, densifies sparse rows, and bounds overflow."""
 
         class Form(forms.Form):
             values = nestingdolls.ListField(
@@ -490,6 +490,24 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertTrue(unicode_digits.is_valid(), unicode_digits.errors)
         self.assertEqual(unicode_digits.cleaned_data["values"], [])
 
+        class SparseForm(forms.Form):
+            values = nestingdolls.ListField(forms.BooleanField(required=False))
+
+        for style, data in (
+            ("dash", {"values-1999": "on"}),
+            ("dot", {"values.1999": "on"}),
+            ("bracket", {"values[1999]": "on"}),
+        ):
+            with self.subTest(style=style):
+                form = SparseForm(data)
+                self.assertTrue(form.is_valid(), form.errors)
+                self.assertEqual(form.cleaned_data["values"], [False, True])
+                normalized = form.fields["values"].widget._normalize_mapping(
+                    form.data, "values"
+                )
+                self.assertEqual(normalized[f"values-{TOTAL_FORM_COUNT}"], "2")
+                self.assertIn("values-1", normalized)
+
         long_index = Form({f"values-{'9' * 5000}": "1"})
         self.assertFalse(long_index.is_valid())
         self.assertEqual(
@@ -499,6 +517,20 @@ class SequenceFieldTestCase(SimpleTestCase):
             long_index.data, "values"
         )
         self.assertFalse(any(key.startswith("values-1001") for key in normalized))
+
+    def test_sparse_unmanaged_indexes_do_not_expand_rendering(self):
+        """A sparse flat index renders as one dense row when management data is absent."""
+
+        class Form(forms.Form):
+            other = forms.IntegerField()
+            values = nestingdolls.ListField(forms.BooleanField(required=False))
+
+        form = Form({"other": "bad", "values-1999": "on"})
+
+        self.assertFalse(form.is_valid())
+        html = form.as_p()
+        self.assertIn('name="values-1"', html)
+        self.assertNotIn('name="values-1999"', html)
 
     def test_direct_payload_enforces_absolute_max_before_child_cleaning(self):
         """It bounds hostile direct lists independently of their management total."""

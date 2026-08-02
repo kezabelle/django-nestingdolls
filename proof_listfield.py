@@ -133,7 +133,9 @@ def model_arbitrary_key_normalization(key: str) -> tuple[str, ...]:
     canonical, index = row_key
     keys = [f"values-{TOTAL_FORM_COUNT}", f"values-{INITIAL_FORM_COUNT}"]
     if index < 4:
-        keys.append(canonical)
+        original_prefix = f"values-{index}"
+        mapped_index = min(index, 1)
+        keys.append(f"values-{mapped_index}{canonical.removeprefix(original_prefix)}")
     return tuple(sorted(keys))
 
 
@@ -171,7 +173,9 @@ def model_saturated_index(digits: str) -> tuple[str, bool]:
     for digit in digits:
         if index < 4:
             index = min(4, index * 10 + ord(digit) - ord("0"))
-    return (str(index + 1), index < 4)
+    if index >= 4:
+        return ("5", False)
+    return (str(min(index, 1) + 1), True)
 
 
 def prove_saturated_index(digits: str) -> bool:

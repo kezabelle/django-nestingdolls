@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.forms import BaseForm, Field
+from django.forms import BaseForm, Field, FileField
 from django.forms.boundfield import BoundField
 from django.forms.utils import ErrorList
 from django.forms.widgets import Media as WidgetMedia
@@ -273,6 +273,39 @@ class MappingBoundField(BoundField):
         return self.field._initial_value(value)
 
     @cached_property
+    def _should_bind_omitted_file_initial(self) -> bool:
+        """Bind omitted file-only subforms so child FileFields can preserve initial."""
+        if not self.form.is_bound:
+            return False
+        if self.field.disabled:
+            return False
+        if self._data_input:
+            return False
+        if self._file_input:
+            return False
+        if not self.initial:
+            return False
+        child_fields = tuple(self.field.form_class().fields.values())
+        if not child_fields:
+            return False
+        return all(isinstance(field, FileField) for field in child_fields)
+
+    @cached_property
+    def _is_bound_subform(self) -> bool:
+        """Return whether the child form should bind submitted data/files."""
+        if not self.form.is_bound:
+            return False
+        if self.field.disabled:
+            return False
+        if not isinstance(self.data, Mapping):
+            return False
+        if self._data_input:
+            return True
+        if self._file_input:
+            return True
+        return self._should_bind_omitted_file_initial
+
+    @cached_property
     def subform(self) -> BaseForm:
         """Return the child Form used for bound cleaning and rendering."""
         kwargs: dict[str, object] = {
@@ -284,14 +317,10 @@ class MappingBoundField(BoundField):
             ),
             "renderer": self.form.renderer,
         }
-        if (
-            self.form.is_bound
-            and not self.field.disabled
-            and isinstance(self.data, Mapping)
-            and bool(self._data_input or self._file_input)
-        ):
-            kwargs.update(data=self._data_input, files=self._file_input)
-        subform = self.field.form_class(**cast(Any, kwargs))
+        if self._is_bound_subform:
+            kwargs["data"] = self._data_input
+            kwargs["files"] = self._file_input
+        subform = self.field.form_class(**kwargs)
         if self.field.disabled:
             for field in subform.fields.values():
                 field.disabled = True
@@ -484,20 +513,25 @@ class MappingField(Field):
         )
 
     def _clean_bound_field(self, bound_field: BoundField) -> dict[str, object]:
-        """Clean the prefixed child Form when raw bound input is available."""
-        dict_bound_field = cast(MappingBoundField, bound_field)
+        """Clean the prefixed child Form when bound input or file-only initials apply."""
+        assert isinstance(bound_field, MappingBoundField)
         if self.disabled:
             return cast(
                 dict[str, object],
-                super()._clean_bound_field(dict_bound_field),  # type: ignore[misc]
+                super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
-        value = dict_bound_field.data
-        if not isinstance(value, Mapping) or not value:
+        value = bound_field.data
+        if not isinstance(value, Mapping):
             return cast(
                 dict[str, object],
-                super()._clean_bound_field(dict_bound_field),  # type: ignore[misc]
+                super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
-        return self._clean_form(dict_bound_field.subform)
+        if not value and not bound_field._should_bind_omitted_file_initial:
+            return cast(
+                dict[str, object],
+                super()._clean_bound_field(bound_field),  # type: ignore[misc]
+            )
+        return self._clean_form(bound_field.subform)
 
     def bound_data(self, data: object, initial: object) -> dict[str, object]:
         """Bind submitted members with their matching initial values."""

@@ -860,8 +860,36 @@ class SequenceWidget(Widget):
             f"{name}-{MAX_NUM_FORM_COUNT}",
         )
 
+    def _normalized_row_key(self, key: object, name: str) -> tuple[str, int] | None:
+        """Normalize one supported row key into its canonical name and index."""
+        if not isinstance(key, str):
+            return None
+        for separator in ("-", ".", "["):
+            prefix = f"{name}{separator}"
+            if not key.startswith(prefix):
+                continue
+            suffix = key.removeprefix(prefix)
+            index_end = 0
+            index = 0
+            while index_end < len(suffix) and "0" <= suffix[index_end] <= "9":
+                digit = ord(suffix[index_end]) - ord("0")
+                index = min(self.absolute_max, index * 10 + digit)
+                index_end += 1
+            if not index_end:
+                return None
+            if separator == "[":
+                if index_end == len(suffix) or suffix[index_end] != "]":
+                    return None
+                suffix = suffix[index_end + 1 :]
+            else:
+                suffix = suffix[index_end:]
+            if suffix and suffix[0] not in "_-.[":
+                return None
+            return (f"{name}-{index}{suffix}", index)
+        return None
+
     def _normalize_mapping(self, data: Any, name: str) -> MultiValueDict[str, object]:
-        """Canonicalize accepted row spellings into Django-style keys.
+        """Canonicalize accepted row spellings into Django-style keys and dense rows.
 
         post[]: (not data) implies not __return__
         post[]: (data and name in data) implies name in __return__
@@ -872,42 +900,16 @@ class SequenceWidget(Widget):
 
         def values_for(key: str) -> list[object]:
             try:
-                return cast(list[object], data.getlist(key))
+                return list(data.getlist(key))
             except AttributeError:
                 value = data.get(key)
                 return value if isinstance(value, list) else [value]
 
-        def normalized_row_key(key: object) -> tuple[str, int] | None:
-            if not isinstance(key, str):
-                return None
-            for separator in ("-", ".", "["):
-                prefix = f"{name}{separator}"
-                if not key.startswith(prefix):
-                    continue
-                suffix = key.removeprefix(prefix)
-                index_end = 0
-                index = 0
-                while index_end < len(suffix) and "0" <= suffix[index_end] <= "9":
-                    digit = ord(suffix[index_end]) - ord("0")
-                    index = min(self.absolute_max, index * 10 + digit)
-                    index_end += 1
-                if not index_end:
-                    return None
-                if separator == "[":
-                    if index_end == len(suffix) or suffix[index_end] != "]":
-                        return None
-                    suffix = suffix[index_end + 1 :]
-                else:
-                    suffix = suffix[index_end:]
-                if suffix and suffix[0] not in "_-.[":
-                    return None
-                return (f"{name}-{index}{suffix}", index)
-            return None
-
         management_names = set(self.management_names(name))
         has_management_data = False
         direct_value: list[object] | None = None
-        largest_index = -1
+        overflowed_index = False
+        row_inputs: list[tuple[int, str, list[object]]] = []
 
         for key in data:
             if key == name:
@@ -918,19 +920,49 @@ class SequenceWidget(Widget):
                 has_management_data = True
                 normalized.setlist(key, values_for(key))
                 continue
-            row_key = normalized_row_key(key)
+            row_key = self._normalized_row_key(key, name)
             if row_key is None:
                 continue
             row_name, index = row_key
-            largest_index = max(largest_index, index)
-            if index < self.absolute_max:
-                normalized.setlist(row_name, values_for(key))
-        if (normalized or largest_index >= 0) and not has_management_data:
-            total_forms = (
-                len(direct_value) if direct_value is not None else largest_index + 1
+            if index >= self.absolute_max:
+                overflowed_index = True
+                continue
+            row_inputs.append((index, row_name, values_for(key)))
+
+        if direct_value is not None:
+            if not has_management_data:
+                normalized.setlist(f"{name}-{TOTAL_FORM_COUNT}", [str(len(direct_value))])
+                normalized.setlist(f"{name}-{INITIAL_FORM_COUNT}", ["0"])
+            return normalized
+
+        if has_management_data:
+            for _, row_name, values in row_inputs:
+                normalized.setlist(row_name, values)
+            return normalized
+
+        if not row_inputs and not overflowed_index:
+            return normalized
+
+        row_indexes = sorted({index for index, _, _ in row_inputs})
+        remapped_indexes = {
+            original_index: min(original_index, dense_index + 1)
+            for dense_index, original_index in enumerate(row_indexes)
+        }
+        for original_index, row_name, values in row_inputs:
+            mapped_index = remapped_indexes[original_index]
+            original_prefix = f"{name}-{original_index}"
+            mapped_prefix = f"{name}-{mapped_index}"
+            normalized.setlist(
+                mapped_prefix + row_name.removeprefix(original_prefix),
+                values,
             )
-            normalized.setlist(f"{name}-{TOTAL_FORM_COUNT}", [str(total_forms)])
-            normalized.setlist(f"{name}-{INITIAL_FORM_COUNT}", ["0"])
+
+        if overflowed_index:
+            total_forms = self.absolute_max + 1
+        else:
+            total_forms = max(remapped_indexes.values(), default=-1) + 1
+        normalized.setlist(f"{name}-{TOTAL_FORM_COUNT}", [str(total_forms)])
+        normalized.setlist(f"{name}-{INITIAL_FORM_COUNT}", ["0"])
         return normalized
 
     def get_context(

@@ -615,6 +615,28 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
             "contradiction",
         )
 
+    def test_file_only_subforms_keep_initial_uploads_when_untouched(self):
+        """Untouched file-only mappings preserve child FileField initials."""
+
+        class ChildForm(forms.Form):
+            upload = forms.FileField()
+
+        initial_upload = SimpleUploadedFile("old.txt", b"old")
+        initial = {"asset": {"upload": initial_upload}}
+
+        for required in (False, True):
+            Form = type(
+                "Form",
+                (forms.Form,),
+                {"asset": nestingdolls.MappingField(ChildForm, required=required)},
+            )
+
+            form = Form({}, initial=initial)
+
+            with self.subTest(required=required):
+                self.assertTrue(form.is_valid(), form.errors)
+                self.assertIs(form.cleaned_data["asset"]["upload"], initial_upload)
+
 
 class NestedDictFieldTestCase(SimpleTestCase):
     def test_dict_field_accepts_nested_dict_children(self):
