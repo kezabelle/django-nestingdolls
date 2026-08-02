@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.core.files.uploadedfile import UploadedFile
@@ -17,6 +17,7 @@ from django.utils.safestring import SafeString
 from django.utils.translation import gettext_lazy as _
 
 from nestingdolls.errors import InvalidInitialValueError
+from nestingdolls.rendering import FormLayout
 
 __all__ = [
     "DictField",
@@ -36,10 +37,16 @@ class _ValueBoundField(BoundField):
         return self.form.data.get(self.name)
 
 
+class RenderableWidget(Protocol):
+    def _render(
+        self, template_name: str, context: Mapping[str, object], renderer: object
+    ) -> str: ...
+
+
 class MappingWidget(Widget):
     """Render one child Form as a mapping-shaped widget."""
 
-    template_name = "django/forms/widgets/dictwidget.html"
+    template_name = "django/forms/widgets/mapping_div.html"
     use_fieldset = True
     input_type: str | None = None
 
@@ -162,6 +169,7 @@ class MappingWidget(Widget):
     ) -> dict[str, Any]:
         """Build widget context with a prefixed child Form."""
         context = super().get_context(name, value, attrs)
+        layout = FormLayout.current()
         subform = (
             value
             if isinstance(value, BaseForm)
@@ -171,7 +179,15 @@ class MappingWidget(Widget):
                 use_required_attribute=self.is_required,
             )
         )
-        context["widget"]["subform"] = subform
+        context["widget"].update(
+            {
+                "layout": layout.value,
+                "subform": subform,
+                "visible_fields": subform.visible_fields(),
+                "hidden_fields": subform.hidden_fields(),
+                "non_field_errors": subform.non_field_errors(),
+            }
+        )
         return context
 
     def use_required_attribute(self, initial: object) -> bool:
@@ -201,6 +217,26 @@ class MappingWidget(Widget):
     def media(self) -> WidgetMedia:
         """Return the child Form widget media."""
         return self.form_class().media
+
+    def render(
+        self,
+        name: str,
+        value: object,
+        attrs: dict[str, Any] | None = None,
+        renderer: object | None = None,
+    ) -> SafeString:
+        """Render with a template that matches the active form helper."""
+        layout = FormLayout.current()
+        template_name = f"django/forms/widgets/mapping/{layout.value}.html"
+        context = self.get_context(name, value, attrs)
+        return cast(
+            SafeString,
+            cast(RenderableWidget, self)._render(
+                template_name,
+                context,
+                renderer,
+            ),
+        )
 
 
 class MappingBoundField(BoundField):

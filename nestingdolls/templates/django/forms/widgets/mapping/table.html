@@ -1,0 +1,40 @@
+{% spaceless %}
+{% if widget.is_hidden %}
+  {% for field in widget.hidden_fields %}{{ field }}{% endfor %}
+{% else %}
+<div
+  class=""
+  data-widget="mapping"
+  data-mapping-field="{{ widget.name }}"
+  {% if widget.attrs.id %}id="{{ widget.attrs.id }}_widget"{% endif %}
+>
+  {{ widget.non_field_errors }}
+  {% for field in widget.hidden_fields %}{{ field }}{% endfor %}
+  <table>
+    <tbody>
+      {% for field in widget.visible_fields %}
+        <tr>
+          <th>
+            {% if field.label %}
+              {% if field.use_fieldset %}
+                <span>{{ field.label }}</span>
+              {% else %}
+                {{ field.label_tag }}
+              {% endif %}
+            {% endif %}
+          </th>
+          <td>
+            {{ field.errors }}
+            {{ field }}
+            {% if field.help_text %}
+              <br>
+              <span class="helptext"{% if field.auto_id %} id="{{ field.auto_id }}_helptext"{% endif %}>{{ field.help_text|safe }}</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endspaceless %}

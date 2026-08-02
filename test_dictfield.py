@@ -7,6 +7,7 @@ import django
 from django import forms
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
+from django.forms import BaseForm
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.http import QueryDict
 from django.test import SimpleTestCase
@@ -15,6 +16,8 @@ from hypothesis import settings as hypothesis_settings
 from hypothesis import strategies as st
 
 import nestingdolls
+from nestingdolls.patches import install_form_rendering_patch
+from nestingdolls.rendering import FormLayout
 
 if not settings.configured:
     settings.configure(
@@ -427,6 +430,47 @@ class DictFieldTestCase(SimpleTestCase):
 
 
 class DictFieldRenderingTestCase(SimpleTestCase):
+    def _without_form_rendering_patch(self):
+        class NoPatchContext:
+            def __enter__(inner_self):
+                inner_self.original_render = BaseForm.render
+                inner_self.original_flag = bool(
+                    getattr(BaseForm, "nestingdolls_render_patch_installed", False)
+                )
+                BaseForm.render = getattr(BaseForm, "nestingdolls_original_render")
+                setattr(BaseForm, "nestingdolls_render_patch_installed", False)
+
+            def __exit__(inner_self, exc_type, exc, tb):
+                BaseForm.render = inner_self.original_render
+                setattr(
+                    BaseForm,
+                    "nestingdolls_render_patch_installed",
+                    inner_self.original_flag,
+                )
+
+        return NoPatchContext()
+
+    def test_form_rendering_patch_is_idempotent(self):
+        original_render = getattr(BaseForm, "nestingdolls_original_render")
+
+        install_form_rendering_patch()
+        install_form_rendering_patch()
+
+        self.assertTrue(getattr(BaseForm, "nestingdolls_render_patch_installed"))
+        self.assertIs(getattr(BaseForm, "nestingdolls_original_render"), original_render)
+
+    def test_form_rendering_patch_resets_layout_after_render_error(self):
+        class ExplodingWidget(forms.TextInput):
+            def render(self, *args: object, **kwargs: object) -> str:
+                raise RuntimeError("boom")
+
+        class Form(forms.Form):
+            value = forms.CharField(widget=ExplodingWidget)
+
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            Form().as_p()
+        self.assertEqual(FormLayout.current(), FormLayout.div)
+
     def test_child_errors_render_once_and_not_as_outer_errors(self):
         """The child Form renders its error without an outer duplicate."""
 
@@ -454,6 +498,48 @@ class DictFieldRenderingTestCase(SimpleTestCase):
                 html = renderer()
                 self.assertIn('name="point-a"', html)
                 self.assertIn('name="point-label"', html)
+
+    def test_widget_uses_helper_specific_wrapper_markup(self):
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm)
+
+        form = Form(initial={"point": {"a": 9, "label": "layout"}})
+
+        self.assertIn('data-widget="mapping"', form.as_div())
+        self.assertIn("<table>", form.as_table())
+        self.assertIn("<ul>", form.as_ul())
+        p_html = form.as_p()
+        self.assertIn('data-widget="mapping"', p_html)
+        self.assertIn("<span", p_html)
+
+    def test_widget_switches_layout_between_sequential_renders(self):
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm)
+
+        form = Form(initial={"point": {"a": 9, "label": "layout"}})
+
+        table_html = form.as_table()
+        p_html = form.as_p()
+        ul_html = form.as_ul()
+
+        self.assertIn("<table>", table_html)
+        self.assertIn('data-widget="mapping"', p_html)
+        self.assertIn("<span", p_html)
+        self.assertIn("<ul>", ul_html)
+
+    def test_widget_still_renders_without_form_rendering_patch(self):
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm)
+
+        form = Form(initial={"point": {"a": 9, "label": "layout"}})
+
+        with self._without_form_rendering_patch():
+            html = form.as_p()
+
+        self.assertIn('data-widget="mapping"', html)
+        self.assertIn("<div", html)
+        self.assertIn('name="point-a"', html)
+        self.assertIn('name="point-label"', html)
 
     def test_widget_exposes_child_media_and_multipart_requirement(self):
         """The outer widget reports child widget integration requirements."""

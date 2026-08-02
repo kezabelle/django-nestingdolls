@@ -1,0 +1,87 @@
+{% load i18n %}
+{% spaceless %}
+<div
+  class=""
+  data-widget="sequence"
+  data-sequence-field="{{ widget.name }}"
+  data-sequence-maximum="{{ widget.maximum_forms }}"
+  data-sequence-absolute-maximum="{{ widget.absolute_maximum_forms }}"
+  {% if widget.attrs.id %}id="{{ widget.attrs.id }}_widget"{% endif %}
+>
+  {% for management_field in widget.management_form.hidden_fields %}
+    {{ management_field }}
+  {% endfor %}
+  <ul
+    data-sequence-rows
+    data-sequence-field="{{ widget.name }}"
+    {% if widget.attrs.id %}id="{{ widget.attrs.id }}_rows"{% endif %}
+  >
+    {% for row in widget.rows %}
+      <li
+        data-sequence-row
+        data-sequence-field="{{ widget.name }}"
+        data-sequence-index="{{ row.index }}"
+        {% if widget.attrs.id %}id="{{ widget.attrs.id }}_row_{{ row.index }}"{% endif %}
+      >
+        <input
+          type="hidden"
+          name="{{ row.delete_name }}"
+          value=""
+          data-sequence-delete
+          data-sequence-field="{{ widget.name }}"
+          {% if widget.attrs.id %}id="{{ widget.attrs.id }}_{{ row.index }}_DELETE"{% endif %}
+          {% if widget.disabled %} disabled{% endif %}
+        >
+        {% include row.subwidget.template_name with widget=row.subwidget only %}
+        {% if row.errors %}<ul class="errorlist">{% for error in row.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+  {% for row in widget.deleted_rows %}
+    <input
+      type="hidden"
+      name="{{ row.delete_name }}"
+      value="1"
+      data-sequence-deleted-row
+      data-sequence-field="{{ widget.name }}"
+      {% if widget.disabled %} disabled{% endif %}
+    >
+  {% endfor %}
+  <template data-sequence-empty-row data-sequence-field="{{ widget.name }}">
+    <li
+      data-sequence-row
+      data-sequence-field="{{ widget.name }}"
+      data-sequence-index="{{ widget.empty_row.index }}"
+      {% if widget.attrs.id %}id="{{ widget.attrs.id }}_row_{{ widget.empty_row.index }}"{% endif %}
+    >
+      <input
+        type="hidden"
+        name="{{ widget.empty_row.delete_name }}"
+        value=""
+        data-sequence-delete
+        data-sequence-field="{{ widget.name }}"
+        {% if widget.attrs.id %}id="{{ widget.attrs.id }}_{{ widget.empty_row.index }}_DELETE"{% endif %}
+      >
+      {% include widget.empty_row.subwidget.template_name with widget=widget.empty_row.subwidget only %}
+    </li>
+  </template>
+  <template data-sequence-remove-button data-sequence-field="{{ widget.name }}">
+    <button
+      type="button"
+      data-sequence-remove
+      data-sequence-field="{{ widget.name }}"
+      {% if widget.attrs.id %}id="{{ widget.attrs.id }}_remove"{% endif %}
+      {% if widget.disabled %} disabled{% endif %}
+    >{% translate "Remove" %}</button>
+  </template>
+  <template data-sequence-add-button data-sequence-field="{{ widget.name }}">
+    <button
+      type="button"
+      data-sequence-add
+      data-sequence-field="{{ widget.name }}"
+      {% if widget.attrs.id %}id="{{ widget.attrs.id }}_add"{% endif %}
+      {% if widget.disabled %} disabled{% endif %}
+    >{% translate "Add another" %}</button>
+  </template>
+</div>
+{% endspaceless %}

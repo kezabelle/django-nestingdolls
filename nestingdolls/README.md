@@ -106,6 +106,22 @@ elements until JavaScript starts.
 The widget includes its JavaScript in Django form media. Render `form.media`
 when you want the add and remove controls.
 
+### Optional helper-aware rendering patch
+
+`ListField` and `DictField` work without this patch.
+
+This patch exists because Django does not tell a widget which helper method
+rendered the parent form. If the parent form uses `as_p()`, `as_table()`,
+`as_ul()`, or `as_div()`, the widget does not know that by default.
+
+Without the patch, each composite widget uses its default inner layout.
+
+With the patch, each composite widget can detect the active Django helper and
+choose a matching inner template.
+
+Use this patch when you want the composite field's own wrapper markup to follow
+the parent helper more closely.
+
 ### Safety notes
 
 `ListField` uses the same row count pattern that Django formsets use.
@@ -134,6 +150,9 @@ field keeps its normal conversion and validation rules.
 Both fields support file uploads, compound widgets, multipart forms, and
 widget media. Each validation error stays near the child value that caused
 the error.
+
+The optional helper-aware rendering patch only changes package-owned wrapper
+markup. It does not rewrite Django child widgets or third-party child widgets.
 
 ### Empty values
 

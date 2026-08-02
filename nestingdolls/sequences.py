@@ -43,6 +43,7 @@ __all__ = [
 ]
 
 from nestingdolls.errors import InvalidInitialValueError
+from nestingdolls.rendering import FormLayout
 
 
 class _RenderableWidget(Protocol):
@@ -741,7 +742,7 @@ class FrozenSetField(SetField):
 class SequenceWidget(Widget):
     """Render dynamic homogeneous rows while delegating each row to one widget."""
 
-    template_name = "django/forms/widgets/sequence.html"
+    template_name = "django/forms/widgets/sequence_div.html"
     use_fieldset = True
     deletion_field = BooleanField(required=False)
 
@@ -749,6 +750,30 @@ class SequenceWidget(Widget):
         """Load the client-side row add/remove controller."""
 
         js = ("nestingdolls/sequence.js",)
+
+    def render(
+        self,
+        name: str,
+        value: object,
+        attrs: dict[str, Any] | None = None,
+        renderer: object | None = None,
+    ) -> SafeString:
+        """Render with a template that matches the active form helper."""
+        layout = FormLayout.current()
+        template_name = f"django/forms/widgets/sequence/{layout.value}.html"
+        context = self.get_context(
+            name,
+            cast(Sequence[Any] | None, value),
+            attrs,
+        )
+        return cast(
+            SafeString,
+            cast(_RenderableWidget, self)._render(
+                template_name,
+                context,
+                renderer,
+            ),
+        )
 
     def __init__(
         self,

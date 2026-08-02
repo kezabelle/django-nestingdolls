@@ -9,6 +9,7 @@ from django import forms
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.forms import BaseForm
 from django.forms.formsets import (
     DEFAULT_MAX_NUM,
     DELETION_FIELD_NAME,
@@ -2002,6 +2003,26 @@ class NestedParserRegressionTestCase(SimpleTestCase):
 
 
 class WidgetIntegrationTestCase(SimpleTestCase):
+    def _without_form_rendering_patch(self):
+        class NoPatchContext:
+            def __enter__(inner_self):
+                inner_self.original_render = BaseForm.render
+                inner_self.original_flag = bool(
+                    getattr(BaseForm, "nestingdolls_render_patch_installed", False)
+                )
+                BaseForm.render = getattr(BaseForm, "nestingdolls_original_render")
+                setattr(BaseForm, "nestingdolls_render_patch_installed", False)
+
+            def __exit__(inner_self, exc_type, exc, tb):
+                BaseForm.render = inner_self.original_render
+                setattr(
+                    BaseForm,
+                    "nestingdolls_render_patch_installed",
+                    inner_self.original_flag,
+                )
+
+        return NoPatchContext()
+
     def test_custom_child_choices_are_rendered(self):
         """It renders child choice widgets normally."""
 
@@ -2308,6 +2329,48 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             html,
         )
         self.assertIn("nestingdolls/sequence.js", str(form.media))
+
+    def test_widget_uses_helper_specific_wrapper_markup(self):
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), min_length=2)
+
+        form = Form()
+
+        self.assertIn('data-widget="sequence"', form.as_div())
+        self.assertIn("<tbody", form.as_table())
+        self.assertIn("<ul", form.as_ul())
+        p_html = form.as_p()
+        self.assertIn('data-widget="sequence"', p_html)
+        self.assertIn("<span", p_html)
+
+    def test_widget_switches_layout_between_sequential_renders(self):
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), min_length=2)
+
+        form = Form()
+
+        table_html = form.as_table()
+        p_html = form.as_p()
+        ul_html = form.as_ul()
+
+        self.assertIn("<tbody", table_html)
+        self.assertIn('data-widget="sequence"', p_html)
+        self.assertIn("<span", p_html)
+        self.assertIn("<ul", ul_html)
+
+    def test_widget_still_renders_without_form_rendering_patch(self):
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), min_length=2)
+
+        form = Form()
+
+        with self._without_form_rendering_patch():
+            html = form.as_p()
+
+        self.assertIn('data-widget="sequence"', html)
+        self.assertIn("<div", html)
+        self.assertIn('name="values-0"', html)
+        self.assertIn('name="values-1"', html)
 
     def test_widget_hides_add_button_when_initial_reaches_maximum(self):
         """It keeps only the add template when initial rows fill the limit."""
