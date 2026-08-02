@@ -50,6 +50,11 @@ The child form runs its normal `clean_<field>()` methods and its `clean()`
 method. The widget displays the child form inside the parent field. A
 non-field error stays inside the child form.
 
+### Safety notes
+
+If a child widget needs repeated values, `DictField` keeps the same repeated
+value behavior that Django already uses for request data.
+
 ### Related names
 
 `MappingField`, `FormField`, and `Subform` are aliases for `DictField`. All four
@@ -100,6 +105,13 @@ elements until JavaScript starts.
 
 The widget includes its JavaScript in Django form media. Render `form.media`
 when you want the add and remove controls.
+
+### Safety notes
+
+`ListField` uses the same row count pattern that Django formsets use.
+
+If row count fields are present, Django validates them. `ListField` also
+rejects a submitted row count above its hard upper bound.
 
 ### Related types
 
@@ -190,3 +202,12 @@ cleaned_data = {
     ],
 }
 ```
+
+### Safety notes
+
+Nested fields still use the normal child form and child field validation that
+Django already provides.
+
+The fields still respect Django request and upload limits such as
+`DATA_UPLOAD_MAX_MEMORY_SIZE`, `DATA_UPLOAD_MAX_NUMBER_FIELDS`,
+`DATA_UPLOAD_MAX_NUMBER_FILES`, and `FILE_UPLOAD_MAX_MEMORY_SIZE`.
