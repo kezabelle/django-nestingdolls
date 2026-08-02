@@ -901,19 +901,27 @@ class SequenceWidget(Widget):
                 return value if isinstance(value, list) else [value]
 
         management_names = self.management_names(name)
+        if name in data:
+            direct_value = values_for(name)
+            normalized[name] = direct_value
+            has_management_data = False
+            for key in management_names:
+                if key in data:
+                    has_management_data = True
+                    normalized.setlist(key, values_for(key))
+            if not has_management_data:
+                normalized[f"{name}-{TOTAL_FORM_COUNT}"] = str(len(direct_value))
+                normalized[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
+            return normalized
+
         has_management_data = False
-        direct_value: list[object] | None = None
         overflowed_index = False
         row_inputs: list[tuple[int, str, list[object]]] = []
 
         for key in data:
-            if key == name:
-                direct_value = values_for(key)
-                normalized[name] = direct_value
-                continue
             if key in management_names:
                 has_management_data = True
-                normalized[key] = data.get(key)
+                normalized.setlist(key, values_for(key))
                 continue
             row_key = self._normalized_row_key(key, name)
             if row_key is None:
@@ -923,12 +931,6 @@ class SequenceWidget(Widget):
                 overflowed_index = True
                 continue
             row_inputs.append((index, row_name, values_for(key)))
-
-        if direct_value is not None:
-            if not has_management_data:
-                normalized[f"{name}-{TOTAL_FORM_COUNT}"] = str(len(direct_value))
-                normalized[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
-            return normalized
 
         if has_management_data:
             for _, row_name, values in row_inputs:

@@ -2048,6 +2048,24 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         self.assertTrue(form.is_valid(), form.errors)
         self.assertEqual(form.cleaned_data["values"], [False, True])
 
+    def test_plain_mapping_list_management_values_use_the_last_submitted_value(self):
+        """It accepts dict-of-lists management data the same way QueryDict does."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        form = Form(
+            {
+                f"values-{TOTAL_FORM_COUNT}": ["1", "2"],
+                f"values-{INITIAL_FORM_COUNT}": ["0"],
+                "values-0": ["1"],
+                "values-1": ["2"],
+            }
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["values"], [1, 2])
+
     def test_multiwidget_child_uses_indexed_row_name(self):
         """It passes indexed row names into child multiwidgets."""
 

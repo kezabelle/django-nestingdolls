@@ -81,45 +81,30 @@ class MappingWidget(Widget):
             return f"{name}-{child_name}{suffix}"
 
         source = data
-        direct = name in data
-        if direct:
+        normalize_key = normalized_key
+        if name in data:
             value = data.get(name)
             if not isinstance(value, Mapping):
                 return {name: value}
             source = value
             child_names = self.form_class().fields
-            if hasattr(source, "getlist"):
-                normalized = MultiValueDict[str, object]()
-                for child_name in child_names:
-                    if child_name in source:
-                        normalized.setlist(
-                            f"{name}-{child_name}", source.getlist(child_name)
-                        )
-                return normalized
-            return {
-                f"{name}-{child_name}": source[child_name]
-                for child_name in child_names
-                if child_name in source
-            }
 
-        def output_key(key: object) -> str | None:
-            if not direct:
-                return normalized_key(key)
-            if not isinstance(key, str) or not key:
-                return None
-            return f"{name}-{key}"
+            def normalize_key(key: object) -> str | None:
+                if not isinstance(key, str) or key not in child_names:
+                    return None
+                return f"{name}-{key}"
 
         if hasattr(source, "getlist"):
             normalized = MultiValueDict[str, object]()
             for source_key in source:
-                key = output_key(source_key)
+                key = normalize_key(source_key)
                 if key is not None:
                     normalized.setlist(key, source.getlist(source_key))
             return normalized
 
         normalized_dict: dict[str, object] = {}
         for source_key, value in source.items():
-            key = output_key(source_key)
+            key = normalize_key(source_key)
             if key is not None:
                 normalized_dict[key] = value
         return normalized_dict
