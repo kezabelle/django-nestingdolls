@@ -64,6 +64,7 @@ class MappingWidget(Widget):
         bracket_prefix = f"{name}["
 
         def normalized_key(key: object) -> str | None:
+            # Convert each supported input spelling to one child key format.
             if not isinstance(key, str):
                 return None
             for prefix in flat_prefixes:
@@ -80,31 +81,39 @@ class MappingWidget(Widget):
                 return None
             return f"{name}-{child_name}{suffix}"
 
-        source = data
-        normalize_key = normalized_key
         if name in data:
+            # Use the direct mapping value when both shapes are present.
             value = data.get(name)
             if not isinstance(value, Mapping):
                 return {name: value}
-            source = value
             child_names = self.form_class().fields
+            if hasattr(value, "getlist"):
+                # Keep repeated child values for widgets that read all values.
+                normalized = MultiValueDict[str, object]()
+                for child_name in child_names:
+                    if child_name in value:
+                        normalized.setlist(f"{name}-{child_name}", value.getlist(child_name))
+                return normalized
+            # Ignore keys that are not declared on the child form.
+            return {
+                f"{name}-{child_name}": value[child_name]
+                for child_name in child_names
+                if child_name in value
+            }
 
-            def normalize_key(key: object) -> str | None:
-                if not isinstance(key, str) or key not in child_names:
-                    return None
-                return f"{name}-{key}"
-
-        if hasattr(source, "getlist"):
+        if hasattr(data, "getlist"):
+            # Keep repeated flat input values in Django's multi-value shape.
             normalized = MultiValueDict[str, object]()
-            for source_key in source:
-                key = normalize_key(source_key)
+            for source_key in data:
+                key = normalized_key(source_key)
                 if key is not None:
-                    normalized.setlist(key, source.getlist(source_key))
+                    normalized.setlist(key, data.getlist(source_key))
             return normalized
 
+        # Plain mappings keep one value for each child key.
         normalized_dict: dict[str, object] = {}
-        for source_key, value in source.items():
-            key = normalize_key(source_key)
+        for source_key, value in data.items():
+            key = normalized_key(source_key)
             if key is not None:
                 normalized_dict[key] = value
         return normalized_dict

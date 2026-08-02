@@ -894,45 +894,48 @@ class SequenceWidget(Widget):
             return normalized
 
         def values_for(key: str) -> list[object]:
+            # Treat repeated input the same way Django request data does.
             try:
                 return list(data.getlist(key))
             except AttributeError:
                 value = data.get(key)
                 return value if isinstance(value, list) else [value]
 
-        management_names = self.management_names(name)
+        # Keep formset control fields in the repeated-value shape Django expects.
+        management_keys = {key for key in self.management_names(name) if key in data}
         if name in data:
+            # Use the direct list value when both shapes are present.
             direct_value = values_for(name)
             normalized[name] = direct_value
-            has_management_data = False
-            for key in management_names:
-                if key in data:
-                    has_management_data = True
-                    normalized.setlist(key, values_for(key))
-            if not has_management_data:
+            if not management_keys:
+                # Build missing control fields for a direct Python list.
                 normalized[f"{name}-{TOTAL_FORM_COUNT}"] = str(len(direct_value))
                 normalized[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
+                return normalized
+            for key in management_keys:
+                normalized.setlist(key, values_for(key))
             return normalized
 
-        has_management_data = False
         overflowed_index = False
         row_inputs: list[tuple[int, str, list[object]]] = []
+        for key in management_keys:
+            normalized.setlist(key, values_for(key))
 
         for key in data:
-            if key in management_names:
-                has_management_data = True
-                normalized.setlist(key, values_for(key))
+            if key in management_keys:
                 continue
             row_key = self._normalized_row_key(key, name)
             if row_key is None:
                 continue
             row_name, index = row_key
             if index >= self.absolute_max:
+                # Keep this overflow so Django rejects too many rows.
                 overflowed_index = True
                 continue
             row_inputs.append((index, row_name, values_for(key)))
 
-        if has_management_data:
+        if management_keys:
+            # Trust submitted row numbers when control fields are present.
             for _, row_name, values in row_inputs:
                 normalized.setlist(row_name, values)
             return normalized
@@ -940,24 +943,23 @@ class SequenceWidget(Widget):
         if not row_inputs and not overflowed_index:
             return normalized
 
+        # Renumber sparse rows so plain mappings bind like form input.
         row_indexes = sorted({index for index, _, _ in row_inputs})
         remapped_indexes = {
             original_index: min(original_index, dense_index + 1)
             for dense_index, original_index in enumerate(row_indexes)
         }
         for original_index, row_name, values in row_inputs:
-            mapped_index = remapped_indexes[original_index]
-            original_prefix = f"{name}-{original_index}"
-            mapped_prefix = f"{name}-{mapped_index}"
+            suffix = row_name.removeprefix(f"{name}-{original_index}")
             normalized.setlist(
-                mapped_prefix + row_name.removeprefix(original_prefix),
+                f"{name}-{remapped_indexes[original_index]}{suffix}",
                 values,
             )
 
+        total_forms = max(remapped_indexes.values(), default=-1) + 1
         if overflowed_index:
+            # Keep one extra row count so Django raises too_many_forms.
             total_forms = self.absolute_max + 1
-        else:
-            total_forms = max(remapped_indexes.values(), default=-1) + 1
         normalized[f"{name}-{TOTAL_FORM_COUNT}"] = str(total_forms)
         normalized[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
         return normalized
