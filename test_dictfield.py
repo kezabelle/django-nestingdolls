@@ -11,6 +11,7 @@ from django.forms import BaseForm
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.http import QueryDict
 from django.test import SimpleTestCase
+from django.test.utils import setup_test_environment, teardown_test_environment
 from hypothesis import HealthCheck, example, given
 from hypothesis import settings as hypothesis_settings
 from hypothesis import strategies as st
@@ -38,6 +39,16 @@ HYPOTHESIS_SETTINGS = hypothesis_settings(
     deadline=None,
     suppress_health_check=[HealthCheck.too_slow],
 )
+
+
+def setUpModule():
+    # `assertTemplateUsed()` relies on Django's instrumented template renderer.
+    setup_test_environment()
+
+
+def tearDownModule():
+    # Undo the global template instrumentation after these unittest-based tests.
+    teardown_test_environment()
 SMALL_INTEGERS = st.integers(min_value=-10, max_value=10)
 RAW_INTEGER_VALUES = st.one_of(
     st.none(),
@@ -505,10 +516,18 @@ class DictFieldRenderingTestCase(SimpleTestCase):
 
         form = Form(initial={"point": {"a": 9, "label": "layout"}})
 
-        self.assertIn('data-widget="mapping"', form.as_div())
-        self.assertIn("<table>", form.as_table())
-        self.assertIn("<ul>", form.as_ul())
-        p_html = form.as_p()
+        with self.assertTemplateUsed("django/forms/widgets/mapping/div.html"):
+            div_html = form.as_div()
+        with self.assertTemplateUsed("django/forms/widgets/mapping/table.html"):
+            table_html = form.as_table()
+        with self.assertTemplateUsed("django/forms/widgets/mapping/ul.html"):
+            ul_html = form.as_ul()
+        with self.assertTemplateUsed("django/forms/widgets/mapping/p.html"):
+            p_html = form.as_p()
+
+        self.assertIn('data-widget="mapping"', div_html)
+        self.assertIn("<table>", table_html)
+        self.assertIn("<ul>", ul_html)
         self.assertIn('data-widget="mapping"', p_html)
         self.assertIn("<span", p_html)
 

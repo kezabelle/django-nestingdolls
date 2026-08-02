@@ -130,10 +130,11 @@ class SequenceBoundField(BoundField):
                 {"delete_name": f"{self.html_name}-{index}-{DELETION_FIELD_NAME}"}
                 for index in sorted(deleted_indexes)
             ]
+        template_name = f"django/forms/widgets/sequence/{FormLayout.current().value}.html"
         return cast(
             SafeString,
             cast(_RenderableWidget, widget)._render(
-                widget.template_name, context, self.form.renderer
+                template_name, context, self.form.renderer
             ),
         )
 

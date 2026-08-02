@@ -20,6 +20,7 @@ from django.forms.formsets import (
 )
 from django.http import QueryDict
 from django.test import SimpleTestCase, override_settings
+from django.test.utils import setup_test_environment, teardown_test_environment
 from django.utils import translation
 from hypothesis import HealthCheck, assume, example, given
 from hypothesis import settings as hypothesis_settings
@@ -39,6 +40,16 @@ if not settings.configured:
         ],
     )
     django.setup()
+
+
+def setUpModule():
+    # `assertTemplateUsed()` relies on Django's instrumented template renderer.
+    setup_test_environment()
+
+
+def tearDownModule():
+    # Undo the global template instrumentation after these unittest-based tests.
+    teardown_test_environment()
 
 
 def sequence_data(name, values=(), *, deleted=(), initial_forms=0):
@@ -2336,10 +2347,18 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
         form = Form()
 
-        self.assertIn('data-widget="sequence"', form.as_div())
-        self.assertIn("<tbody", form.as_table())
-        self.assertIn("<ul", form.as_ul())
-        p_html = form.as_p()
+        with self.assertTemplateUsed("django/forms/widgets/sequence/div.html"):
+            div_html = form.as_div()
+        with self.assertTemplateUsed("django/forms/widgets/sequence/table.html"):
+            table_html = form.as_table()
+        with self.assertTemplateUsed("django/forms/widgets/sequence/ul.html"):
+            ul_html = form.as_ul()
+        with self.assertTemplateUsed("django/forms/widgets/sequence/p.html"):
+            p_html = form.as_p()
+
+        self.assertIn('data-widget="sequence"', div_html)
+        self.assertIn("<tbody", table_html)
+        self.assertIn("<ul", ul_html)
         self.assertIn('data-widget="sequence"', p_html)
         self.assertIn("<span", p_html)
 
@@ -2357,6 +2376,20 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         self.assertIn('data-widget="sequence"', p_html)
         self.assertIn("<span", p_html)
         self.assertIn("<ul", ul_html)
+
+    def test_invalid_widget_render_uses_active_helper_layout(self):
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), min_length=2)
+
+        form = Form({"values-0": "bad", "values-TOTAL_FORMS": "1", "values-INITIAL_FORMS": "0"})
+
+        self.assertFalse(form.is_valid())
+        with self.assertTemplateUsed("django/forms/widgets/sequence/p.html"):
+            html = form.as_p()
+
+        self.assertIn('data-widget="sequence"', html)
+        self.assertIn("<span", html)
+        self.assertIn("Enter a whole number.", html)
 
     def test_widget_still_renders_without_form_rendering_patch(self):
         class Form(forms.Form):
