@@ -341,6 +341,25 @@ class DictFieldTestCase(SimpleTestCase):
         self.assertEqual(form.errors.as_data()["point"][0].code, "no_two")
         self.assertFormError(form, "point", "No two.")
 
+    def test_outer_item_invalid_validator_error_stays_visible(self):
+        """A validator may use the child error code without becoming a child error."""
+
+        def reject_mapping(value):
+            raise ValidationError(
+                "Outer mapping error.",
+                code="item_invalid",
+                params={"key": 0, "message": "outer", "child_code": "outer"},
+            )
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm, validators=[reject_mapping])
+
+        form = Form({"point-a": "2"})
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(list(form["point"].errors), ["Outer mapping error."])
+        self.assertEqual(form.as_p().count("Outer mapping error."), 1)
+
     def test_form_prefix_is_preserved(self):
         """Nested child names include the normal parent Form prefix."""
 
@@ -422,12 +441,34 @@ class DictFieldTestCase(SimpleTestCase):
         self.assertTrue(bound.is_valid(), bound.errors)
         self.assertFalse(bound.has_changed())
 
+        malformed_initial = Form(
+            {
+                "point-a": "8",
+                "point-label": "saved",
+                "initial-point-a": "not-an-integer",
+                "initial-point-label": "saved",
+            },
+            initial=initial,
+        )
+        self.assertTrue(malformed_initial.has_changed())
+
     def test_has_changed_uses_child_field_semantics(self):
         """Equivalent raw and Python child values are unchanged."""
         field = nestingdolls.MappingField(PointForm, required=False)
 
         self.assertFalse(field.has_changed({"a": 2, "label": ""}, {"a": "2"}))
         self.assertTrue(field.has_changed({"a": 2, "label": ""}, {"a": "3"}))
+
+    def test_has_changed_always_consults_file_children(self):
+        """A submitted upload remains a change even when it is also the initial object."""
+
+        class ChildForm(forms.Form):
+            upload = forms.FileField(required=False)
+
+        upload = SimpleUploadedFile("same.txt", b"same")
+        field = nestingdolls.MappingField(ChildForm, required=False)
+
+        self.assertTrue(field.has_changed({"upload": upload}, {"upload": upload}))
 
     def test_rejects_wrong_form_widget_and_bound_field_types(self):
         """Constructor extension points require compatible Django types."""
@@ -714,6 +755,17 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
             cleaned["happened_at"].replace(tzinfo=None).isoformat(),
             "2026-08-01T10:30:00",
         )
+
+    def test_direct_clean_accepts_an_extracted_file_value(self):
+        """Direct mapping cleaning passes an upload through the bound field data."""
+
+        class ChildForm(forms.Form):
+            upload = forms.FileField()
+
+        upload = SimpleUploadedFile("direct.txt", b"direct")
+        field = nestingdolls.MappingField(ChildForm)
+
+        self.assertIs(field.clean({"upload": upload})["upload"], upload)
 
     def test_file_upload_keeps_data_and_files_separate(self):
         """File children receive uploads through the files mapping."""
@@ -1392,6 +1444,56 @@ class DictFieldPropertyTestCase(SimpleTestCase):
 
 
 class DictFieldRegressionTestCase(SimpleTestCase):
+    def test_show_hidden_initial_hostile_mappings_remain_renderable(self):
+        """Scalar and nested composite mapping input stays in the error channel."""
+
+        class NestedForm(forms.Form):
+            rows = nestingdolls.ListField(
+                nestingdolls.MappingField(PointForm), required=False
+            )
+
+        class Form(forms.Form):
+            payload = nestingdolls.MappingField(
+                NestedForm, required=False, show_hidden_initial=True
+            )
+
+        cases = (
+            {"payload": "hostile"},
+            {"payload": {"rows": ["hostile"]}},
+        )
+        initial = {"payload": {"rows": [{"a": 1, "label": "saved"}]}}
+        for data in cases:
+            with self.subTest(data=data):
+                form = Form(data, initial=initial)
+                self.assertFalse(form.is_valid())
+                self.assertIn("Enter a mapping of values.", form.as_p())
+
+    def test_child_rebinding_rejections_use_mapping_fallbacks(self):
+        """A child rejection returns a mapping through Django's base contract."""
+
+        class RejectingField(forms.CharField):
+            def bound_data(self, data, initial):
+                raise ValidationError("Cannot bind this value.")
+
+            def prepare_value(self, value):
+                raise nestingdolls.InvalidInitialValueError(
+                    "Cannot prepare this value."
+                )
+
+        class ChildForm(forms.Form):
+            value = RejectingField()
+
+        field = nestingdolls.MappingField(ChildForm)
+        value = {"value": "hostile"}
+
+        operations = (
+            ("bound_data", lambda: field.bound_data(value, {})),
+            ("prepare_value", lambda: field.prepare_value(value)),
+        )
+        for operation_name, operation in operations:
+            with self.subTest(operation=operation_name):
+                self.assertEqual(operation(), value)
+
     def test_scalar_file_alias_does_not_crash_rendering(self):
         """A hostile scalar file alias stays a form error during redisplay."""
 

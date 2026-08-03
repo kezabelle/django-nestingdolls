@@ -421,6 +421,27 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertNotInHTML("<li>Item 0: This field is required.</li>", html)
         self.assertInHTML("<li>This field is required.</li>", html)
 
+    def test_outer_item_invalid_validator_error_stays_visible(self):
+        """A validator collision with the child code remains a field-level error."""
+
+        def reject_sequence(value):
+            raise ValidationError(
+                "Outer sequence error.",
+                code="item_invalid",
+                params={"index": "0", "message": "outer", "child_code": "outer"},
+            )
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.IntegerField(), validators=[reject_sequence]
+            )
+
+        form = Form(sequence_data("values", ["1"]))
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(list(form["values"].errors), ["Outer sequence error."])
+        self.assertEqual(form.as_p().count("Outer sequence error."), 1)
+
     def test_deletion_preserves_initial_indices(self):
         """It deletes rows without renumbering initial items."""
 
@@ -738,6 +759,25 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertTrue(field.has_changed([True], ["1"]))
         self.assertFalse(set_field.has_changed({1, 2}, ["2", "1", "1"]))
 
+        upload = SimpleUploadedFile("same.txt", b"same")
+        file_field = nestingdolls.ListField(forms.FileField(required=False))
+        self.assertTrue(file_field.has_changed([upload], [upload]))
+
+    def test_disabled_oversized_sequences_are_unchanged(self):
+        """Disabled sequence fields never inspect or reject submitted rows as changes."""
+
+        class UnreachableField(forms.IntegerField):
+            def has_changed(self, initial, data):
+                raise AssertionError("disabled child value was compared")
+
+        for field_class in (nestingdolls.ListField, nestingdolls.SetField):
+            field = field_class(
+                UnreachableField(), max_length=0, required=False, disabled=True
+            )
+            values = ["1"] * (field.absolute_max + 1)
+            with self.subTest(field_class=field_class.__name__):
+                self.assertFalse(field.has_changed([], values))
+
     def test_has_changed_detects_added_and_removed_integer_rows(self):
         """It treats added and removed integer rows as changes."""
         field = nestingdolls.ListField(forms.IntegerField(), required=False)
@@ -829,6 +869,10 @@ class SequenceFieldTestCase(SimpleTestCase):
             form.as_p(),
         )
 
+        malformed_initial = sequence_data("values", ["1"])
+        malformed_initial.setlist("initial-values", ["not-an-integer"])
+        self.assertTrue(Form(malformed_initial).has_changed())
+
     def test_item_invalid_errors_preserve_child_codes(self):
         """It preserves child error codes inside item errors."""
 
@@ -918,6 +962,39 @@ class SetFieldTestCase(SimpleTestCase):
 
         with self.assertRaises(ValueError):
             form.has_changed()
+
+    def test_has_changed_uses_linear_comparisons_for_hashable_members(self):
+        """Reordered unique integer members use indexed child comparisons."""
+
+        class CountingIntegerField(forms.IntegerField):
+            comparisons = 0
+
+            def has_changed(self, initial, data):
+                self.comparisons += 1
+                return super().has_changed(initial, data)
+
+        size = 1001
+        field = nestingdolls.SetField(
+            CountingIntegerField(), max_length=size, required=False
+        )
+
+        self.assertFalse(
+            field.has_changed(
+                set(range(size)), [str(value) for value in reversed(range(size))]
+            )
+        )
+        self.assertLessEqual(field.child_field.comparisons, size * 3)
+
+    def test_has_changed_keeps_duplicate_blank_invalid_and_json_semantics(self):
+        """Indexed matching preserves the child field's semantic edge cases."""
+        integer_field = nestingdolls.SetField(
+            forms.IntegerField(required=False), required=False
+        )
+        json_field = nestingdolls.SetField(forms.JSONField(), required=False)
+
+        self.assertFalse(integer_field.has_changed({1}, ["1", "1", ""]))
+        self.assertTrue(integer_field.has_changed({1}, ["invalid"]))
+        self.assertTrue(json_field.has_changed({True}, ["1"]))
 
     def test_tuple_child_set_has_changed_ignores_order_for_equal_members(self):
         """It treats reordered tuple-set members as unchanged."""
@@ -1148,15 +1225,15 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
         )
         field = nestingdolls.ListField(child, required=False)
 
-        self.assertFalse(field.has_changed([[[2], [0]]], [[[2], [0]]]))
-        self.assertTrue(field.has_changed([[[2], [0]]], [[[2], [1]]]))
+        self.assertFalse(field.has_changed([[[[2], [0]]]], [[[[2], [0]]]]))
+        self.assertTrue(field.has_changed([[[[2], [0]]]], [[[[2], [1]]]]))
         self.assertEqual(
-            field.has_changed([[[2], [0]]], [[[2], [1]]]),
-            child.has_changed([[2], [0]], [[2], [1]]),
+            field.has_changed([[[[2], [0]]]], [[[[2], [1]]]]),
+            child.has_changed([[[2], [0]]], [[[2], [1]]]),
         )
         self.assertEqual(
-            field.has_changed([[[2], [0]]], [[[2], [0]]]),
-            child.has_changed([[2], [0]], [[2], [0]]),
+            field.has_changed([[[[2], [0]]]], [[[[2], [0]]]]),
+            child.has_changed([[[2], [0]]], [[[2], [0]]]),
         )
 
 
@@ -1846,6 +1923,18 @@ class NestedSequencePropertyTestCase(_HypothesisTestCase):
 
 
 class NestedParserRegressionTestCase(SimpleTestCase):
+    def test_unrecognized_mapping_initial_becomes_one_renderable_row(self):
+        """A mapping that is not flattened sequence data remains one raw row."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.CharField(), required=False)
+
+        value = {"unexpected": "saved"}
+        form = Form(initial={"values": value})
+
+        self.assertEqual(form["values"].initial, [value])
+        self.assertIn("unexpected", str(form["values"]))
+
     def test_mapping_row_shape_errors_stay_in_the_validation_channel(self):
         """Invalid mapping-shaped rows should become normal form errors."""
 
@@ -2207,6 +2296,36 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         deleted = Form(
             sequence_data("values", [None], deleted=[0]), initial={"values": [initial]}
         )
+        self.assertTrue(deleted.is_valid(), deleted.errors)
+        self.assertEqual(deleted.cleaned_data["values"], [])
+
+    def test_omitted_file_rows_keep_all_initial_values(self):
+        """An omitted sequence preserves every initial upload for either required mode."""
+        uploads = [
+            SimpleUploadedFile("first.txt", b"first"),
+            SimpleUploadedFile("second.txt", b"second"),
+        ]
+
+        for required in (False, True):
+            Form = type(
+                "Form",
+                (forms.Form,),
+                {
+                    "values": nestingdolls.ListField(
+                        forms.FileField(), required=required
+                    )
+                },
+            )
+            form = Form({}, initial={"values": uploads})
+
+            with self.subTest(required=required):
+                self.assertTrue(form.is_valid(), form.errors)
+                self.assertEqual(form.cleaned_data["values"], uploads)
+
+        class OptionalForm(forms.Form):
+            values = nestingdolls.ListField(forms.FileField(), required=False)
+
+        deleted = OptionalForm({"values": []}, initial={"values": uploads})
         self.assertTrue(deleted.is_valid(), deleted.errors)
         self.assertEqual(deleted.cleaned_data["values"], [])
 

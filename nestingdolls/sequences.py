@@ -4,13 +4,12 @@ import copy
 from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import datetime, time
-from typing import Any, Protocol, Self, cast
+from typing import Any, Self, cast
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.core.files.uploadedfile import UploadedFile
 from django.forms import BaseForm, Field
 from django.forms.boundfield import BoundField
-from django.forms.fields import BooleanField, FileField, MultiValueField
+from django.forms.fields import BooleanField, FileField
 from django.forms.formsets import (
     DEFAULT_MAX_NUM,
     DEFAULT_MIN_NUM,
@@ -46,14 +45,6 @@ from nestingdolls.errors import InvalidInitialValueError
 from nestingdolls.rendering import FormLayout
 
 
-class _RenderableWidget(Protocol):
-    template_name: str
-
-    def _render(
-        self, template_name: str, context: Mapping[str, object], renderer: object
-    ) -> str: ...
-
-
 class SequenceBoundField(BoundField):
     """Render indexed child errors without storing validation state on the field.
 
@@ -76,9 +67,16 @@ class SequenceBoundField(BoundField):
         errors = super().errors
         if not errors:
             return errors
-        field_errors = [
-            error for error in errors.as_data() if error.code != "item_invalid"
-        ]
+        field_errors = []
+        for error in errors.as_data():
+            params = error.params or {}
+            if (
+                error.code == "item_invalid"
+                and {"index", "message", "child_code"} <= params.keys()
+                and isinstance(params["index"], int)
+            ):
+                continue
+            field_errors.append(error)
         if len(field_errors) == len(errors):
             return errors
         return self.form.error_class(
@@ -100,9 +98,14 @@ class SequenceBoundField(BoundField):
         item_errors: dict[int, list[object]] = defaultdict(list)
         for error in super().errors.as_data():
             params = error.params or {}
-            if error.code == "item_invalid" and "index" in params:
+            index = params.get("index")
+            if (
+                error.code == "item_invalid"
+                and {"index", "message", "child_code"} <= params.keys()
+                and isinstance(index, int)
+            ):
                 message = params.get("message")
-                item_errors[cast(int, params["index"])].extend(
+                item_errors[index].extend(
                     [message] if message is not None else error.messages
                 )
         deleted_indexes = self._deleted_indexes
@@ -130,13 +133,10 @@ class SequenceBoundField(BoundField):
                 {"delete_name": f"{self.html_name}-{index}-{DELETION_FIELD_NAME}"}
                 for index in sorted(deleted_indexes)
             ]
-        return cast(
-            SafeString,
-            cast(_RenderableWidget, widget)._render(
-                f"django/forms/widgets/sequence/{FormLayout.current().value}.html",
-                context,
-                self.form.renderer,
-            ),
+        return widget._render(  # type: ignore[attr-defined, no-any-return]
+            f"django/forms/widgets/sequence/{FormLayout.current().value}.html",
+            context,
+            self.form.renderer,
         )
 
     @cached_property
@@ -145,14 +145,11 @@ class SequenceBoundField(BoundField):
         return self.field.widget._normalize_mapping(self.form.data, self.html_name)
 
     @cached_property
-    def _file_input(self) -> MultiValueDict[str, UploadedFile]:
+    def _file_input(self) -> MultiValueDict[str, object]:
         """Cache normalized submitted files for this field."""
         if not self.form.files:
             return MultiValueDict()
-        return cast(
-            MultiValueDict[str, UploadedFile],
-            self.field.widget._normalize_mapping(self.form.files, self.html_name),
-        )
+        return self.field.widget._normalize_mapping(self.form.files, self.html_name)
 
     @cached_property
     def _management_form(self) -> ManagementForm | None:
@@ -177,15 +174,7 @@ class SequenceBoundField(BoundField):
         )
 
     @cached_property
-    def initial(
-        self,
-    ) -> (
-        list[object]
-        | tuple[object, ...]
-        | set[object]
-        | frozenset[object]
-        | Mapping[str, object]
-    ):
+    def initial(self) -> list[object]:
         """Use Django's normal initial path unless flattened row keys need normalizing."""
         if self.form.initial and self.name not in self.form.initial:
             value = self._normalize_initial_mapping(self.form.initial)
@@ -195,9 +184,8 @@ class SequenceBoundField(BoundField):
             value = super().initial
         if isinstance(value, Mapping):
             normalized_value = self._normalize_initial_mapping(value)
-            if normalized_value is None:
-                return cast(Mapping[str, object], value)
-            value = normalized_value
+            if normalized_value is not None:
+                value = normalized_value
         try:
             value = self.field._initial_values(value)
         except InvalidInitialValueError:
@@ -261,7 +249,20 @@ class SequenceBoundField(BoundField):
 
     def _has_changed(self) -> bool:
         """Treat deleted initial rows as a real change."""
-        changed = cast(bool, super()._has_changed())  # type: ignore[misc]
+        if self.field.show_hidden_initial:
+            hidden_widget = self.field.hidden_widget()
+            try:
+                initial = self.field.to_python(
+                    hidden_widget.value_from_datadict(
+                        self.form.data, self.form.files, self.html_initial_name
+                    )
+                )
+                initial = [self.field.child_field.to_python(value) for value in initial]
+            except ValidationError:
+                return True
+            changed = self.field.has_changed(initial, self.data)
+        else:
+            changed = cast(bool, super()._has_changed())  # type: ignore[misc]
         if not isinstance(self.field.widget, SequenceWidget):
             return changed
         if changed or not self._deleted_indexes:
@@ -312,7 +313,7 @@ class SequenceField(Field):
         help_text: str | Promise = "",
         error_messages: Mapping[str, str | Promise] | None = None,
         show_hidden_initial: bool = False,
-        validators: Sequence[Callable[..., Any]] = (),
+        validators: Sequence[Callable[[Collection[object]], None]] = (),
         localize: bool = False,
         disabled: bool = False,
         label_suffix: str | None = None,
@@ -506,31 +507,36 @@ class SequenceField(Field):
         if management_form is not None:
             if not management_form.is_valid():
                 raise ValidationError(
-                    ValidationError(
-                        self.error_messages["missing_management_form"],
-                        code="missing_management_form",
-                        params={
-                            "field_names": ", ".join(
-                                management_form.add_prefix(field_name)
-                                for field_name in management_form.errors
-                            )
-                        },
-                    )
+                    self.error_messages["missing_management_form"],
+                    code="missing_management_form",
+                    params={
+                        "field_names": ", ".join(
+                            management_form.add_prefix(field_name)
+                            for field_name in management_form.errors
+                        )
+                    },
                 )
             submitted_total = management_form.cleaned_data[TOTAL_FORM_COUNT]
             if isinstance(submitted_total, int) and submitted_total > self.absolute_max:
                 raise ValidationError(
-                    ValidationError(
-                        self.error_messages["too_many_forms"],
-                        code="too_many_forms",
-                        params={"num": self.max_length},
-                    )
+                    self.error_messages["too_many_forms"],
+                    code="too_many_forms",
+                    params={"num": self.max_length},
                 )
 
+        initial = self._initial_values(bound_field.initial)
+        data = self.to_python(bound_field.data)
+        if (
+            management_form is None
+            and isinstance(self.child_field, FileField)
+            and not data
+            and initial
+        ):
+            data = [None] * len(initial)
         result = self.compress(
             self._clean_values(
-                self.to_python(bound_field.data),
-                self._initial_values(bound_field.initial),
+                data,
+                initial,
                 deleted_indexes,
                 omitted_indexes,
             )
@@ -612,10 +618,10 @@ class SequenceField(Field):
 
         post[]: isinstance(__return__, bool)
         """
+        if self.disabled:
+            return False
         if isinstance(data, list) and len(data) > self.absolute_max:
             return True
-        if not super().has_changed(initial, data):
-            return False
         try:
             initial = self._initial_values(initial)
         except InvalidInitialValueError:
@@ -681,57 +687,68 @@ class SetField(SequenceField):
         already cleaned Python values. A plain ``==`` comparison would therefore
         be wrong for child fields that coerce input or use compound widget data.
 
-        This method deduplicates submitted and initial members using the child
-        field's own ``has_changed()`` semantics, then matches those semantic
-        members without caring about row order.
+        This method indexes ordinary hashable members and falls back to semantic
+        scans for compound or custom child values.
         """
+        if self.disabled:
+            return False
         if isinstance(data, list) and len(data) > self.absolute_max:
             return True
-        if not super().has_changed(initial, data):
-            return False
         try:
-            initial = self._initial_values(initial)
-        except InvalidInitialValueError:
+            initial = list(self.compress(self._initial_values(initial)))
+        except (InvalidInitialValueError, ValidationError):
             return True
         try:
             data = self.to_python(data)
         except ValidationError:
             return True
 
-        def comparison_data(value: object) -> object:
-            if isinstance(self.child_field, MultiValueField):
-                return self.child_field.widget.decompress(value)
-            return self.child_field.prepare_value(value)
-
-        def unique(
-            values: list[object], same_value: Callable[[object, object], bool]
-        ) -> list[object]:
-            result: list[object] = []
-            for value in values:
-                if not any(same_value(existing, value) for existing in result):
-                    result.append(value)
-            return result
-
-        def submitted_equals(existing: object, value: object) -> bool:
-            return not self.child_field.has_changed(
-                self.child_field.to_python(existing), value
-            )
-
-        def initial_equals(existing: object, value: object) -> bool:
-            return not self.child_field.has_changed(existing, comparison_data(value))
-
         try:
-            unmatched = unique(data, submitted_equals)
-            for initial_value in unique(initial, initial_equals):
-                for index, data_value in enumerate(unmatched):
-                    if not self.child_field.has_changed(initial_value, data_value):
-                        unmatched.pop(index)
-                        break
-                else:
+            indexed: dict[object, list[int]] = defaultdict(list)
+            for index, value in enumerate(initial):
+                try:
+                    indexed[value].append(index)
+                except TypeError:
+                    pass
+
+            matched: set[int] = set()
+            all_indexes = range(len(initial))
+
+            def matching_index(
+                value: object, candidates: Collection[int]
+            ) -> int | None:
+                for indexes, already_matched in (
+                    (candidates, False),
+                    (all_indexes, False),
+                    (candidates, True),
+                    (all_indexes, True),
+                ):
+                    for index in indexes:
+                        if (index in matched) != already_matched:
+                            continue
+                        if not self.child_field.has_changed(initial[index], value):
+                            return index
+                return None
+
+            for data_value in data:
+                try:
+                    value = self.child_field.to_python(data_value)
+                except (TypeError, ValidationError):
                     return True
+                try:
+                    candidates = indexed.get(value, ())
+                except TypeError:
+                    candidates = ()
+
+                match = matching_index(data_value, candidates)
+                if match is None:
+                    if self.child_field.has_changed(None, data_value):
+                        return True
+                    continue
+                matched.add(match)
         except (TypeError, ValidationError):
             return True
-        return bool(unmatched)
+        return len(matched) != len(initial)
 
 
 class FrozenSetField(SetField):
@@ -743,7 +760,7 @@ class FrozenSetField(SetField):
 class SequenceWidget(Widget):
     """Render dynamic homogeneous rows while delegating each row to one widget."""
 
-    template_name = "django/forms/widgets/sequence/div.html"
+    _template_name = "django/forms/widgets/sequence/{layout}.html"
     use_fieldset = True
     deletion_field = BooleanField(required=False)
 
@@ -752,27 +769,13 @@ class SequenceWidget(Widget):
 
         js = ("nestingdolls/sequence.js",)
 
-    def render(
-        self,
-        name: str,
-        value: object,
-        attrs: dict[str, Any] | None = None,
-        renderer: object | None = None,
-    ) -> SafeString:
-        """Render with a template that matches the active form helper."""
-        context = self.get_context(
-            name,
-            cast(Sequence[Any] | None, value),
-            attrs,
-        )
-        return cast(
-            SafeString,
-            cast(_RenderableWidget, self)._render(
-                f"django/forms/widgets/sequence/{FormLayout.current().value}.html",
-                context,
-                renderer,
-            ),
-        )
+    @property
+    def template_name(self) -> str:
+        return self._template_name.format(layout=FormLayout.current().value)
+
+    @template_name.setter
+    def template_name(self, value: str) -> None:
+        self._template_name = value
 
     def __init__(
         self,
@@ -796,7 +799,12 @@ class SequenceWidget(Widget):
         """Disable HTML required handling for dynamic rows."""
         return False
 
-    def value_from_datadict(self, data: Any, files: Any, name: str) -> list[object]:
+    def value_from_datadict(
+        self,
+        data: Mapping[str, object],
+        files: Mapping[str, object],
+        name: str,
+    ) -> list[object]:
         """Extract a sequence value from raw submitted inputs."""
         return self._value_from_normalized_data(
             self._normalize_mapping(data, name),
@@ -856,7 +864,12 @@ class SequenceWidget(Widget):
             for index in range(form_count)
         ]
 
-    def value_omitted_from_data(self, data: Any, files: Any, name: str) -> bool:
+    def value_omitted_from_data(
+        self,
+        data: Mapping[str, object],
+        files: Mapping[str, object],
+        name: str,
+    ) -> bool:
         """Report whether the sequence is entirely absent from submission data."""
         return not (
             self._normalize_mapping(data, name) or self._normalize_mapping(files, name)
@@ -907,7 +920,9 @@ class SequenceWidget(Widget):
             return (f"{name}-{index}{suffix}", index)
         return None
 
-    def _normalize_mapping(self, data: Any, name: str) -> MultiValueDict[str, object]:
+    def _normalize_mapping(
+        self, data: Mapping[str, object], name: str
+    ) -> MultiValueDict[str, object]:
         """Canonicalize accepted row spellings into Django-style keys and dense rows.
 
         post[]: (not data) implies not __return__
@@ -919,11 +934,10 @@ class SequenceWidget(Widget):
 
         def values_for(key: str) -> list[object]:
             # Treat repeated input the same way Django request data does.
-            try:
+            if isinstance(data, MultiValueDict):
                 return list(data.getlist(key))
-            except AttributeError:
-                value = data.get(key)
-                return value if isinstance(value, list) else [value]
+            value = data.get(key)
+            return value if isinstance(value, list) else [value]
 
         # Keep formset control fields in the repeated-value shape Django expects.
         management_keys = {key for key in self.management_names(name) if key in data}
@@ -989,7 +1003,7 @@ class SequenceWidget(Widget):
         return normalized
 
     def get_context(
-        self, name: str, value: Sequence[Any] | None, attrs: dict[str, Any] | None
+        self, name: str, value: Sequence[object] | None, attrs: dict[str, Any] | None
     ) -> dict[str, Any]:
         """Build widget context for visible rows and the empty row template."""
         context = super().get_context(name, value, attrs)
@@ -1072,6 +1086,6 @@ class SequenceWidget(Widget):
     @property
     def media(self) -> WidgetMedia:
         """Return widget media including the sequence controller script."""
-        media = super().media + WidgetMedia(self.Media)
+        media: WidgetMedia = super().media + WidgetMedia(self.Media)
         media += self.child_field.widget.media
-        return cast(WidgetMedia, media)
+        return media

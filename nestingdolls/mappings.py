@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.core.files.uploadedfile import UploadedFile
 from django.forms import BaseForm, Field, FileField
 from django.forms.boundfield import BoundField
 from django.forms.utils import ErrorList
@@ -37,18 +36,20 @@ class _ValueBoundField(BoundField):
         return self.form.data.get(self.name)
 
 
-class RenderableWidget(Protocol):
-    def _render(
-        self, template_name: str, context: Mapping[str, object], renderer: object
-    ) -> str: ...
-
-
 class MappingWidget(Widget):
     """Render one child Form as a mapping-shaped widget."""
 
-    template_name = "django/forms/widgets/mapping/div.html"
+    _template_name = "django/forms/widgets/mapping/{layout}.html"
     use_fieldset = True
     input_type: str | None = None
+
+    @property
+    def template_name(self) -> str:
+        return self._template_name.format(layout=FormLayout.current().value)
+
+    @template_name.setter
+    def template_name(self, value: str) -> None:
+        self._template_name = value
 
     def __init__(
         self,
@@ -58,7 +59,9 @@ class MappingWidget(Widget):
         self.form_class = form_class
         super().__init__(dict(attrs) if attrs is not None else None)
 
-    def _normalize_mapping(self, data: Any, name: str) -> Mapping[str, object]:
+    def _normalize_mapping(
+        self, data: Mapping[str, object], name: str
+    ) -> Mapping[str, object]:
         """Canonicalize accepted child names while preserving source values.
 
         post[]: (not data) implies not __return__
@@ -94,7 +97,7 @@ class MappingWidget(Widget):
             if not isinstance(value, Mapping):
                 return {name: value}
             child_names = self.form_class().fields
-            if hasattr(value, "getlist"):
+            if isinstance(value, MultiValueDict):
                 # Keep repeated child values for widgets that read all values.
                 normalized = MultiValueDict[str, object]()
                 for child_name in child_names:
@@ -110,7 +113,7 @@ class MappingWidget(Widget):
                 if child_name in value
             }
 
-        if hasattr(data, "getlist"):
+        if isinstance(data, MultiValueDict):
             # Keep repeated flat input values in Django's multi-value shape.
             normalized = MultiValueDict[str, object]()
             for source_key in data:
@@ -151,7 +154,12 @@ class MappingWidget(Widget):
             )
         }
 
-    def value_from_datadict(self, data: Any, files: Any, name: str) -> object:
+    def value_from_datadict(
+        self,
+        data: Mapping[str, object],
+        files: Mapping[str, object],
+        name: str,
+    ) -> object:
         """Return the submitted mapping extracted by child widgets."""
         return self._value_from_normalized_data(
             self._normalize_mapping(data, name),
@@ -159,7 +167,12 @@ class MappingWidget(Widget):
             name,
         )
 
-    def value_omitted_from_data(self, data: Any, files: Any, name: str) -> bool:
+    def value_omitted_from_data(
+        self,
+        data: Mapping[str, object],
+        files: Mapping[str, object],
+        name: str,
+    ) -> bool:
         """Report whether all supported mapping inputs are absent."""
         return not (
             self._normalize_mapping(data, name) or self._normalize_mapping(files, name)
@@ -222,26 +235,6 @@ class MappingWidget(Widget):
         """Return the child Form widget media."""
         return self.form_class().media
 
-    def render(
-        self,
-        name: str,
-        value: object,
-        attrs: dict[str, Any] | None = None,
-        renderer: object | None = None,
-    ) -> SafeString:
-        """Render with a template that matches the active form helper."""
-        layout = FormLayout.current()
-        template_name = f"django/forms/widgets/mapping/{layout.value}.html"
-        context = self.get_context(name, value, attrs)
-        return cast(
-            SafeString,
-            cast(RenderableWidget, self)._render(
-                template_name,
-                context,
-                renderer,
-            ),
-        )
-
 
 class MappingBoundField(BoundField):
     """Render child Form errors without duplicating them on the parent field."""
@@ -259,9 +252,16 @@ class MappingBoundField(BoundField):
         errors = super().errors
         if not errors:
             return errors
-        field_errors = [
-            error for error in errors.as_data() if error.code != "item_invalid"
-        ]
+        field_errors = []
+        for error in errors.as_data():
+            params = error.params or {}
+            if (
+                error.code == "item_invalid"
+                and {"key", "message", "child_code"} <= params.keys()
+                and isinstance(params["key"], str)
+            ):
+                continue
+            field_errors.append(error)
         if len(field_errors) == len(errors):
             return errors
         return self.form.error_class(
@@ -276,14 +276,11 @@ class MappingBoundField(BoundField):
         return self.field.widget._normalize_mapping(self.form.data, self.html_name)
 
     @cached_property
-    def _file_input(self) -> MultiValueDict[str, UploadedFile]:
+    def _file_input(self) -> Mapping[str, object]:
         """Cache normalized submitted files for this field."""
         if not self.form.files:
-            return MultiValueDict()
-        return cast(
-            MultiValueDict[str, UploadedFile],
-            self.field.widget._normalize_mapping(self.form.files, self.html_name),
-        )
+            return {}
+        return self.field.widget._normalize_mapping(self.form.files, self.html_name)
 
     @cached_property
     def data(self) -> object:
@@ -310,24 +307,6 @@ class MappingBoundField(BoundField):
         return self.field._initial_value(super().initial)
 
     @cached_property
-    def _should_bind_omitted_file_initial(self) -> bool:
-        """Bind omitted subforms when any child FileField may need its initial."""
-        if not self.form.is_bound:
-            return False
-        if self.field.disabled:
-            return False
-        if self._data_input:
-            return False
-        if self._file_input:
-            return False
-        if not self.initial:
-            return False
-        child_fields = tuple(self.field.form_class().fields.values())
-        if not child_fields:
-            return False
-        return any(isinstance(field, FileField) for field in child_fields)
-
-    @cached_property
     def _is_bound_subform(self) -> bool:
         """Return whether the child form should bind submitted data/files."""
         if not self.form.is_bound:
@@ -336,11 +315,12 @@ class MappingBoundField(BoundField):
             return False
         if not isinstance(self.data, Mapping):
             return False
-        if self._data_input:
+        if self._data_input or self._file_input:
             return True
-        if self._file_input:
-            return True
-        return self._should_bind_omitted_file_initial
+        return bool(self.initial) and any(
+            isinstance(field, FileField)
+            for field in self.field.form_class().fields.values()
+        )
 
     @cached_property
     def subform(self) -> BaseForm:
@@ -348,7 +328,7 @@ class MappingBoundField(BoundField):
         if self._is_bound_subform:
             subform = self.field.form_class(
                 data=self._data_input,
-                files=self._file_input,
+                files=cast(Any, self._file_input),
                 initial=self.initial,
                 prefix=self.html_name,
                 auto_id=self.form.auto_id,
@@ -418,6 +398,9 @@ class MappingBoundField(BoundField):
         )
         try:
             initial_value = self.field.to_python(initial_value)
+            for name, field in self.field.form_class().fields.items():
+                if name in initial_value:
+                    initial_value[name] = field.to_python(initial_value[name])
         except ValidationError:
             return True
         return self.field.has_changed(initial_value, self.data)
@@ -444,7 +427,7 @@ class MappingField(Field):
         help_text: str | Promise = "",
         error_messages: Mapping[str, str | Promise] | None = None,
         show_hidden_initial: bool = False,
-        validators: Sequence[Callable[..., Any]] = (),
+        validators: Sequence[Callable[[dict[str, object]], None]] = (),
         localize: bool = False,
         disabled: bool = False,
         label_suffix: str | None = None,
@@ -549,7 +532,7 @@ class MappingField(Field):
         """Return child cleaned data or raise its leaf errors."""
         if not form.is_valid():
             raise ValidationError(self._form_errors(form))
-        result = cast(dict[str, object], form.cleaned_data)
+        result: dict[str, object] = form.cleaned_data
         self.validate(result)
         self.run_validators(result)
         return result
@@ -562,7 +545,6 @@ class MappingField(Field):
         return self._clean_form(
             self.form_class(
                 data=value,
-                files=cast(Any, value),
                 bound_field_class=_ValueBoundField,
             )
         )
@@ -576,12 +558,9 @@ class MappingField(Field):
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
         value = bound_field.data
-        if not isinstance(value, Mapping):
-            return cast(
-                dict[str, object],
-                super()._clean_bound_field(bound_field),  # type: ignore[misc]
-            )
-        if not value and not bound_field._should_bind_omitted_file_initial:
+        if not isinstance(value, Mapping) or (
+            not value and not bound_field._is_bound_subform
+        ):
             return cast(
                 dict[str, object],
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
@@ -590,19 +569,19 @@ class MappingField(Field):
 
     def bound_data(self, data: object, initial: object) -> object:
         """Bind submitted members with their matching initial values."""
-        if self.disabled:
-            return self._initial_value(initial)
-        initial = self._initial_value(initial)
         try:
+            initial = self._initial_value(initial)
+            if self.disabled:
+                return initial
             data = self.to_python(data)
-        except ValidationError:
+            return {
+                name: field.bound_data(data.get(name), initial.get(name))
+                for name, field in self.form_class().fields.items()
+            }
+        except (InvalidInitialValueError, ValidationError):
             # BoundField.value() calls this while rendering an invalid form.
-            # Keep hostile scalar input in Django's normal rendering channel.
+            # Keep hostile input in Django's normal rendering channel.
             return super().bound_data(data, initial)
-        return {
-            name: field.bound_data(data.get(name), initial.get(name))
-            for name, field in self.form_class().fields.items()
-        }
 
     def prepare_value(self, value: object) -> object:
         """Prepare each mapping member for widget rendering.
@@ -610,21 +589,21 @@ class MappingField(Field):
         post[]: isinstance(value, Mapping) implies isinstance(__return__, dict)
         """
         try:
-            value = self._initial_value(value)
-        except InvalidInitialValueError:
+            mapping = self._initial_value(value)
+            return {
+                name: field.prepare_value(mapping[name])
+                for name, field in self.form_class().fields.items()
+                if name in mapping
+            }
+        except (InvalidInitialValueError, ValidationError):
             return super().prepare_value(value)
-        return {
-            name: field.prepare_value(value[name])
-            for name, field in self.form_class().fields.items()
-            if name in value
-        }
 
     def has_changed(self, initial: object, data: object) -> bool:
         """Compare mapping members using child-field change semantics.
 
         post[]: isinstance(__return__, bool)
         """
-        if not super().has_changed(initial, data):
+        if self.disabled:
             return False
         try:
             initial = self._initial_value(initial)

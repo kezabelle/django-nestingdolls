@@ -12,6 +12,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "coverage",
     "crosshair-tool",
     "django-debug-toolbar",
     "hypothesis",
