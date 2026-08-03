@@ -1,0 +1,7 @@
+{% if field.label %}
+  {% if field.use_fieldset %}
+    <span>{{ field.label }}</span>
+  {% else %}
+    {{ field.label_tag }}
+  {% endif %}
+{% endif %}

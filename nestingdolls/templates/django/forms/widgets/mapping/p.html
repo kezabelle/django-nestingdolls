@@ -8,21 +8,13 @@
   data-mapping-field="{{ widget.name }}"
   {% if widget.attrs.id %}id="{{ widget.attrs.id }}_widget"{% endif %}
 >
-  {% for error in widget.non_field_errors %}<span class="errorlist">{{ error }}</span><br>{% endfor %}
+  {% include "django/forms/widgets/shared/errors.html" with errors=widget.non_field_errors inline=True line_break=True space_separated=False only %}
   {% for field in widget.hidden_fields %}{{ field }}{% endfor %}
   {% for field in widget.visible_fields %}
-    {% if field.label %}
-      {% if field.use_fieldset %}
-        <span>{{ field.label }}</span>
-      {% else %}
-        {{ field.label_tag }}
-      {% endif %}
-    {% endif %}
-    {% for error in field.errors %}<span class="errorlist">{{ error }}</span>{% endfor %}
+    {% include "django/forms/widgets/shared/field_label.html" with field=field only %}
+    {% include "django/forms/widgets/shared/errors.html" with errors=field.errors inline=True line_break=False space_separated=False only %}
     {{ field }}
-    {% if field.help_text %}
-      <span class="helptext"{% if field.auto_id %} id="{{ field.auto_id }}_helptext"{% endif %}>{{ field.help_text|safe }}</span>
-    {% endif %}
+    {% include "django/forms/widgets/shared/help_text.html" with field=field tag="span" only %}
     {% if not forloop.last %}<br>{% endif %}
   {% endfor %}
 </span>

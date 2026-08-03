@@ -8,25 +8,8 @@
   data-mapping-field="{{ widget.name }}"
   {% if widget.attrs.id %}id="{{ widget.attrs.id }}_widget"{% endif %}
 >
-  {{ widget.non_field_errors }}
-  {% for field in widget.hidden_fields %}{{ field }}{% endfor %}
   <ul>
-    {% for field in widget.visible_fields %}
-      <li>
-        {{ field.errors }}
-        {% if field.label %}
-          {% if field.use_fieldset %}
-            <span>{{ field.label }}</span>
-          {% else %}
-            {{ field.label_tag }}
-          {% endif %}
-        {% endif %}
-        {{ field }}
-        {% if field.help_text %}
-          <span class="helptext"{% if field.auto_id %} id="{{ field.auto_id }}_helptext"{% endif %}>{{ field.help_text|safe }}</span>
-        {% endif %}
-      </li>
-    {% endfor %}
+    {{ widget.subform.as_ul }}
   </ul>
 </div>
 {% endif %}

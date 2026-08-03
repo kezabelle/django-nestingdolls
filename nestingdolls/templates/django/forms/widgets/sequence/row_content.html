@@ -1,0 +1,17 @@
+<input
+  type="hidden"
+  name="{{ row.delete_name }}"
+  value=""
+  data-sequence-delete
+  data-sequence-field="{{ widget_name }}"
+  {% if delete_id %}id="{{ delete_id }}_{{ row.index }}_DELETE"{% endif %}
+  {% if delete_disabled %} disabled{% endif %}
+>
+{% include row.subwidget.template_name with widget=row.subwidget only %}
+{% if row.errors %}
+  {% if inline_errors %}
+    {% include "django/forms/widgets/shared/errors.html" with errors=row.errors inline=True line_break=False space_separated=True only %}
+  {% else %}
+    <ul class="errorlist">{% for error in row.errors %}<li>{{ error }}</li>{% endfor %}</ul>
+  {% endif %}
+{% endif %}

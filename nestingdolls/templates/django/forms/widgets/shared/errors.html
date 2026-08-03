@@ -1,0 +1,5 @@
+{% if inline %}
+  {% for error in errors %}<span class="errorlist">{{ error }}</span>{% if line_break %}<br>{% elif space_separated and not forloop.last %} {% endif %}{% endfor %}
+{% else %}
+  {{ errors }}
+{% endif %}
