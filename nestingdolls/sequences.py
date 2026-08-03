@@ -188,10 +188,9 @@ class SequenceBoundField(BoundField):
     ):
         """Use Django's normal initial path unless flattened row keys need normalizing."""
         if self.form.initial and self.name not in self.form.initial:
-            normalized_initial = self._normalize_initial_mapping(self.form.initial)
-            value = (
-                super().initial if normalized_initial is None else normalized_initial
-            )
+            value = self._normalize_initial_mapping(self.form.initial)
+            if value is None:
+                value = super().initial
         else:
             value = super().initial
         if isinstance(value, Mapping):

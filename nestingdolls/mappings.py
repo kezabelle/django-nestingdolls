@@ -171,28 +171,25 @@ class MappingWidget(Widget):
         """Build widget context with a prefixed child Form."""
         context = super().get_context(name, value, attrs)
         layout = FormLayout.current()
-        subform = (
-            value
-            if isinstance(value, BaseForm)
-            else self.form_class(
+        if not isinstance(value, BaseForm):
+            value = self.form_class(
                 initial=dict(value) if isinstance(value, Mapping) else {},
                 prefix=name,
                 use_required_attribute=self.is_required,
             )
-        )
         context["widget"].update(
             {
                 "layout": layout.value,
                 "template_name": f"django/forms/widgets/mapping/{layout.value}.html",
-                "subform": subform,
-                "visible_fields": subform.visible_fields(),
-                "hidden_fields": subform.hidden_fields(),
+                "subform": value,
+                "visible_fields": value.visible_fields(),
+                "hidden_fields": value.hidden_fields(),
                 "initial_hidden_fields": [
                     field.as_hidden(only_initial=True)
-                    for field in subform
+                    for field in value
                     if field.field.show_hidden_initial
                 ],
-                "non_field_errors": subform.non_field_errors(),
+                "non_field_errors": value.non_field_errors(),
             }
         )
         return context
@@ -300,18 +297,17 @@ class MappingBoundField(BoundField):
     @cached_property
     def initial(self) -> dict[str, object]:
         """Normalize direct and flattened mapping initial values."""
-        value: object = super().initial
         if self.form.initial and self.name not in self.form.initial:
             normalized = self.field.widget._normalize_mapping(
                 self.form.initial, self.name
             )
             if normalized:
-                candidate = self.field.widget._value_from_normalized_data(
+                value = self.field.widget._value_from_normalized_data(
                     normalized, {}, self.name
                 )
-                if isinstance(candidate, Mapping):
-                    value = candidate
-        return self.field._initial_value(value)
+                if isinstance(value, Mapping):
+                    return self.field._initial_value(value)
+        return self.field._initial_value(super().initial)
 
     @cached_property
     def _should_bind_omitted_file_initial(self) -> bool:
