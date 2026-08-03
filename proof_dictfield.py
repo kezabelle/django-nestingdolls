@@ -28,10 +28,6 @@ class _IntegerForm(forms.Form):
     a = forms.IntegerField()
 
 
-class _AjunkForm(forms.Form):
-    ajunk = forms.IntegerField()
-
-
 class _IntegerListForm(forms.Form):
     values = nestingdolls.ListField(forms.IntegerField(), required=False)
 
@@ -42,10 +38,6 @@ class _RequiredIntegerMappingForm(forms.Form):
 
 class _OptionalIntegerMappingForm(forms.Form):
     value = nestingdolls.MappingField(_IntegerForm, required=False)
-
-
-class _AjunkMappingForm(forms.Form):
-    value = nestingdolls.MappingField(_AjunkForm)
 
 
 class _NestedSequenceMappingForm(forms.Form):
@@ -63,6 +55,10 @@ def _integer_outcome(form: forms.Form) -> tuple[str, int]:
 def actual_alias_collision(
     first_style: int, first: int, second_style: int, second: int
 ) -> tuple[str, int]:
+    """
+    pre: 0 <= first_style <= 2
+    pre: 0 <= second_style <= 2
+    """
     if not 0 <= first_style <= 2 or not 0 <= second_style <= 2:
         return ("invalid_style", 0)
     keys = ("value-a", "value.a", "value[a]")
@@ -75,6 +71,10 @@ def actual_alias_collision(
 def model_alias_collision(
     first_style: int, first: int, second_style: int, second: int
 ) -> tuple[str, int]:
+    """
+    pre: 0 <= first_style <= 2
+    pre: 0 <= second_style <= 2
+    """
     if not 0 <= first_style <= 2 or not 0 <= second_style <= 2:
         return ("invalid_style", 0)
     del first_style, first, second_style
@@ -120,25 +120,6 @@ def prove_mapping_presence(required: bool, present: bool, value: int) -> bool:
     """post[]: __return__"""
     return actual_mapping_presence(required, present, value) == model_mapping_presence(
         required, present, value
-    )
-
-
-def actual_malformed_bracket_suffix(value: int) -> str:
-    form = _AjunkMappingForm({"value[a]junk": str(value)})
-    if form.is_valid():
-        return "ok"
-    return form.errors.as_data()["value"][0].code or "invalid"
-
-
-def model_malformed_bracket_suffix(value: int) -> str:
-    del value
-    return "required"
-
-
-def prove_malformed_bracket_suffix(value: int) -> bool:
-    """post[]: __return__"""
-    return actual_malformed_bracket_suffix(value) == model_malformed_bracket_suffix(
-        value
     )
 
 

@@ -33,8 +33,8 @@ generator, and then run `make agents`.
 - `to_python(self, value: 'object') -> 'dict[str, object]'`
 - `clean(self, value: 'object') -> 'dict[str, object]'`
 - `_clean_bound_field(self, bound_field: 'BoundField') -> 'dict[str, object]'`
-- `bound_data(self, data: 'object', initial: 'object') -> 'dict[str, object]'`
-- `prepare_value(self, value: 'object') -> 'dict[str, object]'`
+- `bound_data(self, data: 'object', initial: 'object') -> 'object'`
+- `prepare_value(self, value: 'object') -> 'object'`
 - `has_changed(self, initial: 'object', data: 'object') -> 'bool'`
 #### Methods introduced here
 

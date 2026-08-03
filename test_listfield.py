@@ -2436,6 +2436,18 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
 
 class PublicApiTestCase(SimpleTestCase):
+    def test_management_names_match_the_formset_contract(self):
+        """The widget uses Django's four formset management names."""
+        self.assertEqual(
+            nestingdolls.SequenceWidget.management_names("values"),
+            {
+                f"values-{TOTAL_FORM_COUNT}",
+                f"values-{INITIAL_FORM_COUNT}",
+                f"values-{MIN_NUM_FORM_COUNT}",
+                f"values-{MAX_NUM_FORM_COUNT}",
+            },
+        )
+
     def test_public_aliases_and_bounds(self):
         """It keeps the public aliases and constructor bounds intact."""
         self.assertIs(nestingdolls.SequenceField, nestingdolls.ListField)

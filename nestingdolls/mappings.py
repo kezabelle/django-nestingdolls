@@ -588,23 +588,31 @@ class MappingField(Field):
             )
         return self._clean_form(bound_field.subform)
 
-    def bound_data(self, data: object, initial: object) -> dict[str, object]:
+    def bound_data(self, data: object, initial: object) -> object:
         """Bind submitted members with their matching initial values."""
         if self.disabled:
             return self._initial_value(initial)
         initial = self._initial_value(initial)
-        data = self.to_python(data)
+        try:
+            data = self.to_python(data)
+        except ValidationError:
+            # BoundField.value() calls this while rendering an invalid form.
+            # Keep hostile scalar input in Django's normal rendering channel.
+            return super().bound_data(data, initial)
         return {
             name: field.bound_data(data.get(name), initial.get(name))
             for name, field in self.form_class().fields.items()
         }
 
-    def prepare_value(self, value: object) -> dict[str, object]:
+    def prepare_value(self, value: object) -> object:
         """Prepare each mapping member for widget rendering.
 
-        post[]: isinstance(__return__, dict)
+        post[]: isinstance(value, Mapping) implies isinstance(__return__, dict)
         """
-        value = self._initial_value(value)
+        try:
+            value = self._initial_value(value)
+        except InvalidInitialValueError:
+            return super().prepare_value(value)
         return {
             name: field.prepare_value(value[name])
             for name, field in self.form_class().fields.items()

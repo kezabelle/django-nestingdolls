@@ -39,6 +39,11 @@ HYPOTHESIS_SETTINGS = hypothesis_settings(
     deadline=None,
     suppress_health_check=[HealthCheck.too_slow],
 )
+PARSER_HYPOTHESIS_SETTINGS = hypothesis_settings(
+    max_examples=500,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
 
 
 def setUpModule():
@@ -72,6 +77,32 @@ DATETIMES = st.datetimes(timezones=st.none()).map(
 )
 MAPPING_STYLES = ("direct", "dash", "dot", "bracket")
 PATH_STYLES = ("dash", "dot", "bracket")
+PARSER_KEYS = st.one_of(
+    st.text(max_size=40),
+    st.just("point"),
+    st.builds(
+        lambda separator, child_name, suffix: (
+            f"point{separator}{child_name}{suffix}"
+            if separator != "["
+            else f"point[{child_name}]{suffix}"
+        ),
+        st.sampled_from(("-", ".", "[")),
+        st.text(max_size=30),
+        st.text(alphabet="]_-.[]junk", max_size=12),
+    ),
+)
+PARSER_LEAF_VALUES = st.one_of(
+    st.none(),
+    st.booleans(),
+    st.integers(),
+    st.text(max_size=20),
+    st.lists(st.text(max_size=10), max_size=5),
+)
+PARSER_VALUES = st.one_of(
+    PARSER_LEAF_VALUES,
+    st.dictionaries(st.text(max_size=12), PARSER_LEAF_VALUES, max_size=8),
+)
+PARSER_MAPPINGS = st.dictionaries(PARSER_KEYS, PARSER_VALUES, max_size=20)
 
 
 def mapping_data(name: str, values: dict[str, object], style: str):
@@ -432,6 +463,17 @@ class DictFieldTestCase(SimpleTestCase):
         self.assertIs(widget.form_class, OtherForm)
         self.assertIsInstance(class_field.widget, CustomWidget)
         self.assertIs(class_field.widget.form_class, PointForm)
+
+    def test_malformed_bracket_suffix_does_not_bind(self):
+        """A bracket alias with trailing text cannot satisfy the field."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm)
+
+        form = Form({"point[a]junk": "1"})
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(form.errors.as_data()["point"][0].code, "required")
 
     def test_custom_bound_field_keeps_mapping_error_integration(self):
         """Compatible custom bound fields remain supported."""
@@ -1305,8 +1347,64 @@ class DictFieldPropertyTestCase(SimpleTestCase):
         self.assertFalse(form.is_valid())
         self.assertEqual(form.errors.as_data()["point"][0].code, "required")
 
+    @PARSER_HYPOTHESIS_SETTINGS
+    @example(
+        data={f"point[{'x' * 5000}]junk": "1"},
+        files={},
+    )
+    @example(
+        data={"point[²]": "x", "point.١": ["y"]},
+        files={},
+    )
+    @example(
+        data={"point-a": "1", "point.a": "2", "point[a]": "3"},
+        files={},
+    )
+    @given(data=PARSER_MAPPINGS, files=PARSER_MAPPINGS)
+    def test_normalization_is_total_bounded_idempotent_and_prefix_local(
+        self, data, files
+    ):
+        """Arbitrary mapping keys stay canonical, bounded, and renderable."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm, required=False)
+
+        widget = Form.base_fields["point"].widget
+        child_count = len(PointForm.base_fields)
+        for source in (data, files):
+            normalized = widget._normalize_mapping(source, "point")
+            self.assertEqual(widget._normalize_mapping(normalized, "point"), normalized)
+            self.assertLessEqual(len(normalized), max(len(source), child_count))
+            for key in normalized:
+                self.assertTrue(key == "point" or key.startswith("point-"), key)
+
+            unrelated = {f"other:{key}": value for key, value in source.items()}
+            self.assertEqual(
+                widget._normalize_mapping(source | unrelated, "point"), normalized
+            )
+
+        widget.value_from_datadict(data, files, "point")
+        widget.value_omitted_from_data(data, files, "point")
+        form = Form(data=data, files=files)
+        form.is_valid()
+        form["point"].value()
+        str(form["point"])
+
 
 class DictFieldRegressionTestCase(SimpleTestCase):
+    def test_scalar_file_alias_does_not_crash_rendering(self):
+        """A hostile scalar file alias stays a form error during redisplay."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm, required=False)
+
+        form = Form(data={}, files={"point": False})
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(form.errors.as_data()["point"][0].code, "invalid")
+        self.assertIs(form["point"].value(), False)
+        str(form["point"])
+
     def test_scalar_and_nested_mapping_aliases_do_not_crash_rendering(self):
         """A scalar alias plus a nested alias stays a form error, not a render crash."""
 

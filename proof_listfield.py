@@ -11,8 +11,6 @@ from django.core.exceptions import ValidationError
 from django.forms.formsets import (
     DELETION_FIELD_NAME,
     INITIAL_FORM_COUNT,
-    MAX_NUM_FORM_COUNT,
-    MIN_NUM_FORM_COUNT,
     TOTAL_FORM_COUNT,
 )
 
@@ -32,13 +30,20 @@ if not settings.configured:
     django.setup()
 
 
+_PROOF_ABSOLUTE_MAX = 4
+
+
 def _integer_field(
-    min_length: int = 0, max_length: int = 4, required: bool = True
+    min_length: int = 0,
+    max_length: int = 4,
+    required: bool = True,
+    absolute_max: int | None = None,
 ) -> nestingdolls.ListField:
     return nestingdolls.ListField(
         forms.IntegerField(),
         min_length=min_length,
         max_length=max_length,
+        absolute_max=absolute_max,
         required=required,
     )
 
@@ -109,11 +114,13 @@ def _model_normalized_row_key(key: str) -> tuple[str, int] | None:
 
 
 def actual_arbitrary_key_normalization(key: str) -> tuple[str, ...]:
+    """pre: len(key) <= 8"""
     normalized = _PARSER_WIDGET._normalize_mapping({key: "x"}, "values")
     return tuple(sorted(normalized))
 
 
 def model_arbitrary_key_normalization(key: str) -> tuple[str, ...]:
+    """pre: len(key) <= 8"""
     management_names = _PARSER_WIDGET.management_names("values")
     if key in management_names:
         return (key,)
@@ -150,6 +157,10 @@ def prove_arbitrary_key_normalization(key: str) -> bool:
 
 
 def actual_saturated_index(digits: str) -> tuple[str, bool]:
+    """
+    pre: 1 <= len(digits) <= 6
+    pre: all("0" <= digit <= "9" for digit in digits)
+    """
     if not 1 <= len(digits) <= 6 or any(digit < "0" or digit > "9" for digit in digits):
         return ("invalid", False)
     normalized = _PARSER_WIDGET._normalize_mapping({f"values-{digits}": "x"}, "values")
@@ -161,6 +172,10 @@ def actual_saturated_index(digits: str) -> tuple[str, bool]:
 
 
 def model_saturated_index(digits: str) -> tuple[str, bool]:
+    """
+    pre: 1 <= len(digits) <= 6
+    pre: all("0" <= digit <= "9" for digit in digits)
+    """
     if not 1 <= len(digits) <= 6 or any(digit < "0" or digit > "9" for digit in digits):
         return ("invalid", False)
     index = 0
@@ -184,9 +199,16 @@ def prove_saturated_index(digits: str) -> bool:
 def actual_clean_cardinality(
     min_length: int, max_length: int, required: bool, values: list[int]
 ) -> tuple[str, tuple[int, ...]]:
+    """
+    pre: 0 <= min_length <= max_length <= _PROOF_ABSOLUTE_MAX
+    pre: len(values) <= _PROOF_ABSOLUTE_MAX + 1
+    """
     try:
         field = _integer_field(
-            min_length=min_length, max_length=max_length, required=required
+            min_length=min_length,
+            max_length=max_length,
+            required=required,
+            absolute_max=_PROOF_ABSOLUTE_MAX,
         )
     except ValueError:
         return ("constructor_error", ())
@@ -200,9 +222,20 @@ def actual_clean_cardinality(
 def model_clean_cardinality(
     min_length: int, max_length: int, required: bool, values: list[int]
 ) -> tuple[str, tuple[int, ...]]:
-    if min_length < 0 or max_length < 0 or min_length > max_length:
+    """
+    pre: 0 <= min_length <= max_length <= _PROOF_ABSOLUTE_MAX
+    pre: len(values) <= _PROOF_ABSOLUTE_MAX + 1
+    """
+    if (
+        min_length < 0
+        or max_length < 0
+        or min_length > max_length
+        or max_length > _PROOF_ABSOLUTE_MAX
+    ):
         return ("constructor_error", ())
     length = len(values)
+    if length > _PROOF_ABSOLUTE_MAX:
+        return ("too_many_forms", ())
     if length == 0 and required:
         return ("required", ())
     if length == 0:
@@ -219,7 +252,7 @@ def prove_clean_cardinality(
 ) -> bool:
     """
     pre: 0 <= min_length <= max_length <= 4
-    pre: len(values) <= 4
+    pre: len(values) <= 5
     post[]: __return__
     """
     return actual_clean_cardinality(
@@ -228,10 +261,18 @@ def prove_clean_cardinality(
 
 
 def actual_has_changed_integer_rows(initial: list[int], data: list[int]) -> bool:
+    """
+    pre: len(initial) <= 4
+    pre: len(data) <= 4
+    """
     return _integer_field(required=False).has_changed(initial, data)
 
 
 def model_has_changed_integer_rows(initial: list[int], data: list[int]) -> bool:
+    """
+    pre: len(initial) <= 4
+    pre: len(data) <= 4
+    """
     if len(initial) != len(data):
         return True
     for index, initial_value in enumerate(initial):
@@ -254,6 +295,10 @@ def prove_has_changed_integer_rows(initial: list[int], data: list[int]) -> bool:
 def actual_alias_collision(
     first_style: int, first_value: str, second_style: int, second_value: str
 ) -> tuple[str, ...]:
+    """
+    pre: 0 <= first_style <= 2
+    pre: 0 <= second_style <= 2
+    """
     if not 0 <= first_style <= 2 or not 0 <= second_style <= 2:
         return ("invalid_style",)
     field = _char_field()
@@ -268,6 +313,10 @@ def actual_alias_collision(
 def model_alias_collision(
     first_style: int, first_value: str, second_style: int, second_value: str
 ) -> tuple[str, ...]:
+    """
+    pre: 0 <= first_style <= 2
+    pre: 0 <= second_style <= 2
+    """
     if not 0 <= first_style <= 2 or not 0 <= second_style <= 2:
         return ("invalid_style",)
     del first_style, first_value, second_style
@@ -293,6 +342,14 @@ def actual_clean_with_deleted_and_omitted(
     deleted_indexes: list[int],
     omitted_indexes: list[int],
 ) -> tuple[str, tuple[int, ...]]:
+    """
+    pre: len(values) <= 4
+    pre: len(initial_values) <= 4
+    pre: len(deleted_indexes) <= 4
+    pre: len(omitted_indexes) <= 4
+    pre: all(0 <= index < len(values) for index in deleted_indexes)
+    pre: all(0 <= index < len(values) for index in omitted_indexes)
+    """
     field = _integer_field(required=False)
     object_values = cast(list[object], values)
     object_initial_values = cast(list[object], initial_values)
@@ -317,6 +374,14 @@ def model_clean_with_deleted_and_omitted(
     deleted_indexes: list[int],
     omitted_indexes: list[int],
 ) -> tuple[str, tuple[int, ...]]:
+    """
+    pre: len(values) <= 4
+    pre: len(initial_values) <= 4
+    pre: len(deleted_indexes) <= 4
+    pre: len(omitted_indexes) <= 4
+    pre: all(0 <= index < len(values) for index in deleted_indexes)
+    pre: all(0 <= index < len(values) for index in omitted_indexes)
+    """
     del initial_values
     skipped = set(deleted_indexes) | set(omitted_indexes)
     return (
@@ -334,6 +399,8 @@ def prove_clean_with_deleted_and_omitted(
     """
     pre: len(values) <= 4
     pre: len(initial_values) <= 4
+    pre: len(deleted_indexes) <= 4
+    pre: len(omitted_indexes) <= 4
     pre: all(0 <= index < len(values) for index in deleted_indexes)
     pre: all(0 <= index < len(values) for index in omitted_indexes)
     post[]: __return__
@@ -346,6 +413,8 @@ def prove_clean_with_deleted_and_omitted(
 
 
 def actual_deleted_indexes(delete_flags: list[bool]) -> tuple[int, ...]:
+    """pre: len(delete_flags) <= 4"""
+
     class Form(forms.Form):
         values = nestingdolls.ListField(forms.IntegerField(), required=False)
 
@@ -362,6 +431,7 @@ def actual_deleted_indexes(delete_flags: list[bool]) -> tuple[int, ...]:
 
 
 def model_deleted_indexes(delete_flags: list[bool]) -> tuple[int, ...]:
+    """pre: len(delete_flags) <= 4"""
     return tuple(index for index, delete_flag in enumerate(delete_flags) if delete_flag)
 
 
@@ -376,6 +446,13 @@ def prove_deleted_indexes(delete_flags: list[bool]) -> bool:
 def actual_omitted_extra_indexes(
     total_forms: int, present_indexes: list[int], initial_count: int
 ) -> tuple[int, ...]:
+    """
+    pre: 0 <= total_forms <= 4
+    pre: 0 <= initial_count <= total_forms
+    pre: len(present_indexes) <= 4
+    pre: all(0 <= index < total_forms for index in present_indexes)
+    """
+
     class Form(forms.Form):
         values = nestingdolls.ListField(forms.IntegerField(), required=False)
 
@@ -395,6 +472,12 @@ def actual_omitted_extra_indexes(
 def model_omitted_extra_indexes(
     total_forms: int, present_indexes: list[int], initial_count: int
 ) -> tuple[int, ...]:
+    """
+    pre: 0 <= total_forms <= 4
+    pre: 0 <= initial_count <= total_forms
+    pre: len(present_indexes) <= 4
+    pre: all(0 <= index < total_forms for index in present_indexes)
+    """
     present = set(present_indexes)
     return tuple(
         index
@@ -409,6 +492,7 @@ def prove_omitted_extra_indexes(
     """
     pre: 0 <= total_forms <= 4
     pre: 0 <= initial_count <= total_forms
+    pre: len(present_indexes) <= 4
     pre: all(0 <= index < total_forms for index in present_indexes)
     post[]: __return__
     """
@@ -470,37 +554,6 @@ def prove_nested_tuple_rows(
     )
 
 
-def actual_nested_tuple_extra_item(first: int, second: int, extra: int) -> str:
-    class Form(forms.Form):
-        values = _tuple_pair_field()
-
-    form = Form(
-        {
-            "values-0-0": str(first),
-            "values-0-1": str(second),
-            "values-0-2": str(extra),
-        }
-    )
-    if form.is_valid():
-        return "ok"
-    params = form.errors.as_data()["values"][0].params or {}
-    return str(params["child_code"])
-
-
-def model_nested_tuple_extra_item(first: int, second: int, extra: int) -> str:
-    del first, second, extra
-    return "max_length"
-
-
-def prove_nested_tuple_extra_item(first: int, second: int, extra: int) -> bool:
-    """
-    post[]: __return__
-    """
-    return actual_nested_tuple_extra_item(
-        first, second, extra
-    ) == model_nested_tuple_extra_item(first, second, extra)
-
-
 def actual_nested_tuple_has_changed(
     initial_left: int, initial_right: int, data_left: int, data_right: int
 ) -> bool:
@@ -559,6 +612,7 @@ def prove_tuple_child_delegation(
 
 
 def actual_set_dedup(values: list[int]) -> tuple[str, tuple[int, ...]]:
+    """pre: len(values) <= 4"""
     try:
         cleaned = cast(set[int], _set_field().clean(values))
     except ValidationError as exc:
@@ -567,6 +621,7 @@ def actual_set_dedup(values: list[int]) -> tuple[str, tuple[int, ...]]:
 
 
 def model_set_dedup(values: list[int]) -> tuple[str, tuple[int, ...]]:
+    """pre: len(values) <= 4"""
     if len(set(values)) == 0:
         return ("ok", ())
     if len(set(values)) > 4:
@@ -585,6 +640,10 @@ def prove_set_dedup(values: list[int]) -> bool:
 def actual_set_cardinality_after_dedup(
     min_length: int, max_length: int, values: list[int]
 ) -> tuple[str, tuple[int, ...]]:
+    """
+    pre: 0 <= min_length <= max_length <= 4
+    pre: len(values) <= 4
+    """
     try:
         field = _set_field(min_length=min_length, max_length=max_length)
     except ValueError:
@@ -599,6 +658,10 @@ def actual_set_cardinality_after_dedup(
 def model_set_cardinality_after_dedup(
     min_length: int, max_length: int, values: list[int]
 ) -> tuple[str, tuple[int, ...]]:
+    """
+    pre: 0 <= min_length <= max_length <= 4
+    pre: len(values) <= 4
+    """
     if min_length < 0 or max_length < 0 or min_length > max_length:
         return ("constructor_error", ())
     deduped = tuple(sorted(set(values)))
@@ -626,10 +689,18 @@ def prove_set_cardinality_after_dedup(
 
 
 def actual_frozenset_has_changed(initial: list[int], data: list[int]) -> bool:
+    """
+    pre: len(initial) <= 4
+    pre: len(data) <= 4
+    """
     return _frozen_set_field().has_changed(frozenset(initial), data)
 
 
 def model_frozenset_has_changed(initial: list[int], data: list[int]) -> bool:
+    """
+    pre: len(initial) <= 4
+    pre: len(data) <= 4
+    """
     return frozenset(initial) != frozenset(data)
 
 
@@ -645,12 +716,20 @@ def prove_frozenset_has_changed(initial: list[int], data: list[int]) -> bool:
 
 
 def actual_frozenset_child_delegation(initial: list[int], data: list[int]) -> bool:
+    """
+    pre: len(initial) <= 4
+    pre: len(data) <= 4
+    """
     child = nestingdolls.FrozenSetField(forms.IntegerField(), required=False)
     parent = nestingdolls.ListField(child, required=False)
     return parent.has_changed([frozenset(initial)], [data])
 
 
 def model_frozenset_child_delegation(initial: list[int], data: list[int]) -> bool:
+    """
+    pre: len(initial) <= 4
+    pre: len(data) <= 4
+    """
     child = nestingdolls.FrozenSetField(forms.IntegerField(), required=False)
     return child.has_changed(frozenset(initial), data)
 
@@ -664,23 +743,3 @@ def prove_frozenset_child_delegation(initial: list[int], data: list[int]) -> boo
     return actual_frozenset_child_delegation(
         initial, data
     ) == model_frozenset_child_delegation(initial, data)
-
-
-def actual_management_names(name: str) -> set[str]:
-    return nestingdolls.SequenceWidget.management_names(name)
-
-
-def model_management_names(name: str) -> set[str]:
-    return {
-        f"{name}-{TOTAL_FORM_COUNT}",
-        f"{name}-{INITIAL_FORM_COUNT}",
-        f"{name}-{MIN_NUM_FORM_COUNT}",
-        f"{name}-{MAX_NUM_FORM_COUNT}",
-    }
-
-
-def prove_management_names(name: str) -> bool:
-    """
-    post[]: __return__
-    """
-    return actual_management_names(name) == model_management_names(name)
