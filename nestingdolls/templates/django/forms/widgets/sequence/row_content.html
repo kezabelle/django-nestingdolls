@@ -9,9 +9,5 @@
 >
 {% include row.subwidget.template_name with widget=row.subwidget only %}
 {% if row.errors %}
-  {% if inline_errors %}
-    {% include "django/forms/widgets/shared/errors.html" with errors=row.errors inline=True line_break=False space_separated=True only %}
-  {% else %}
-    <ul class="errorlist">{% for error in row.errors %}<li>{{ error }}</li>{% endfor %}</ul>
-  {% endif %}
+  <ul class="errorlist">{% for error in row.errors %}<li>{{ error }}</li>{% endfor %}</ul>
 {% endif %}

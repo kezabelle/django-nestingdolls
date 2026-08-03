@@ -36,7 +36,7 @@ agents: ## Update the generated field method reference in nestingdolls/AGENTS.md
 	$(PYTHON) scripts/update_package_agents.py
 
 check: ## Update generated docs and run all fast checks.
-check: tscheck ruff mypy test agents
+check: tscheck ruff format mypy test agents
 
 crosshair: ## Run CrossHair checks.
 	$(CROSSHAIR) check proof_listfield.prove_arbitrary_key_normalization proof_listfield.prove_saturated_index proof_listfield.prove_clean_cardinality proof_listfield.prove_clean_with_deleted_and_omitted proof_listfield.prove_nested_tuple_rows proof_listfield.prove_set_cardinality_after_dedup proof_dictfield.prove_mapping_presence proof_dictfield.prove_nested_sequence

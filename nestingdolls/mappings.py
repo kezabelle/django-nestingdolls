@@ -46,7 +46,7 @@ class RenderableWidget(Protocol):
 class MappingWidget(Widget):
     """Render one child Form as a mapping-shaped widget."""
 
-    template_name = "django/forms/widgets/mapping_div.html"
+    template_name = "django/forms/widgets/mapping/div.html"
     use_fieldset = True
     input_type: str | None = None
 
@@ -99,7 +99,9 @@ class MappingWidget(Widget):
                 normalized = MultiValueDict[str, object]()
                 for child_name in child_names:
                     if child_name in value:
-                        normalized.setlist(f"{name}-{child_name}", value.getlist(child_name))
+                        normalized.setlist(
+                            f"{name}-{child_name}", value.getlist(child_name)
+                        )
                 return normalized
             # Ignore keys that are not declared on the child form.
             return {
@@ -160,8 +162,7 @@ class MappingWidget(Widget):
     def value_omitted_from_data(self, data: Any, files: Any, name: str) -> bool:
         """Report whether all supported mapping inputs are absent."""
         return not (
-            self._normalize_mapping(data, name)
-            or self._normalize_mapping(files, name)
+            self._normalize_mapping(data, name) or self._normalize_mapping(files, name)
         )
 
     def get_context(
@@ -182,9 +183,15 @@ class MappingWidget(Widget):
         context["widget"].update(
             {
                 "layout": layout.value,
+                "template_name": f"django/forms/widgets/mapping/{layout.value}.html",
                 "subform": subform,
                 "visible_fields": subform.visible_fields(),
                 "hidden_fields": subform.hidden_fields(),
+                "initial_hidden_fields": [
+                    field.as_hidden(only_initial=True)
+                    for field in subform
+                    if field.field.show_hidden_initial
+                ],
                 "non_field_errors": subform.non_field_errors(),
             }
         )
@@ -367,6 +374,9 @@ class MappingBoundField(BoundField):
         if self.field.disabled:
             for field in subform.fields.values():
                 field.disabled = True
+        if self.field.show_hidden_initial:
+            for field in subform.fields.values():
+                field.show_hidden_initial = True
         return subform
 
     def as_widget(

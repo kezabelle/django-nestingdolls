@@ -144,19 +144,15 @@ def prove_arbitrary_key_normalization(key: str) -> bool:
     pre: len(key) <= 8
     post[]: __return__
     """
-    return actual_arbitrary_key_normalization(
+    return actual_arbitrary_key_normalization(key) == model_arbitrary_key_normalization(
         key
-    ) == model_arbitrary_key_normalization(key)
+    )
 
 
 def actual_saturated_index(digits: str) -> tuple[str, bool]:
-    if not 1 <= len(digits) <= 6 or any(
-        digit < "0" or digit > "9" for digit in digits
-    ):
+    if not 1 <= len(digits) <= 6 or any(digit < "0" or digit > "9" for digit in digits):
         return ("invalid", False)
-    normalized = _PARSER_WIDGET._normalize_mapping(
-        {f"values-{digits}": "x"}, "values"
-    )
+    normalized = _PARSER_WIDGET._normalize_mapping({f"values-{digits}": "x"}, "values")
     total = normalized.get(f"values-{TOTAL_FORM_COUNT}")
     row_present = any(
         key not in _PARSER_WIDGET.management_names("values") for key in normalized
@@ -165,9 +161,7 @@ def actual_saturated_index(digits: str) -> tuple[str, bool]:
 
 
 def model_saturated_index(digits: str) -> tuple[str, bool]:
-    if not 1 <= len(digits) <= 6 or any(
-        digit < "0" or digit > "9" for digit in digits
-    ):
+    if not 1 <= len(digits) <= 6 or any(digit < "0" or digit > "9" for digit in digits):
         return ("invalid", False)
     index = 0
     for digit in digits:
@@ -206,11 +200,7 @@ def actual_clean_cardinality(
 def model_clean_cardinality(
     min_length: int, max_length: int, required: bool, values: list[int]
 ) -> tuple[str, tuple[int, ...]]:
-    if (
-        min_length < 0
-        or max_length < 0
-        or min_length > max_length
-    ):
+    if min_length < 0 or max_length < 0 or min_length > max_length:
         return ("constructor_error", ())
     length = len(values)
     if length == 0 and required:

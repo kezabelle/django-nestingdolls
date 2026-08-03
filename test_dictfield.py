@@ -7,8 +7,8 @@ import django
 from django import forms
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.forms import BaseForm
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.forms import BaseForm
 from django.http import QueryDict
 from django.test import SimpleTestCase
 from django.test.utils import setup_test_environment, teardown_test_environment
@@ -49,6 +49,8 @@ def setUpModule():
 def tearDownModule():
     # Undo the global template instrumentation after these unittest-based tests.
     teardown_test_environment()
+
+
 SMALL_INTEGERS = st.integers(min_value=-10, max_value=10)
 RAW_INTEGER_VALUES = st.one_of(
     st.none(),
@@ -59,8 +61,10 @@ RAW_INTEGER_VALUES = st.one_of(
 )
 JSON_VALUES = st.recursive(
     st.none() | st.booleans() | SMALL_INTEGERS | st.text(max_size=8),
-    lambda children: st.lists(children, max_size=3)
-    | st.dictionaries(st.text(max_size=4), children, max_size=3),
+    lambda children: (
+        st.lists(children, max_size=3)
+        | st.dictionaries(st.text(max_size=4), children, max_size=3)
+    ),
     max_leaves=8,
 )
 DATETIMES = st.datetimes(timezones=st.none()).map(
@@ -455,27 +459,23 @@ class DictFieldRenderingTestCase(SimpleTestCase):
                 inner_self.original_flag = bool(
                     getattr(BaseForm, "nestingdolls_render_patch_installed", False)
                 )
-                BaseForm.render = getattr(BaseForm, "nestingdolls_original_render")
-                setattr(BaseForm, "nestingdolls_render_patch_installed", False)
+                BaseForm.render = BaseForm.nestingdolls_original_render
+                BaseForm.nestingdolls_render_patch_installed = False
 
             def __exit__(inner_self, exc_type, exc, tb):
                 BaseForm.render = inner_self.original_render
-                setattr(
-                    BaseForm,
-                    "nestingdolls_render_patch_installed",
-                    inner_self.original_flag,
-                )
+                BaseForm.nestingdolls_render_patch_installed = inner_self.original_flag
 
         return NoPatchContext()
 
     def test_form_rendering_patch_is_idempotent(self):
-        original_render = getattr(BaseForm, "nestingdolls_original_render")
+        original_render = BaseForm.nestingdolls_original_render
 
         install_form_rendering_patch()
         install_form_rendering_patch()
 
-        self.assertTrue(getattr(BaseForm, "nestingdolls_render_patch_installed"))
-        self.assertIs(getattr(BaseForm, "nestingdolls_original_render"), original_render)
+        self.assertTrue(BaseForm.nestingdolls_render_patch_installed)
+        self.assertIs(BaseForm.nestingdolls_original_render, original_render)
 
     def test_form_rendering_patch_resets_layout_after_render_error(self):
         class ExplodingWidget(forms.TextInput):
@@ -981,11 +981,7 @@ class DictFieldPropertyTestCase(SimpleTestCase):
         for style in MAPPING_STYLES:
             outcomes.append(
                 self._form_outcome(
-                    Form(
-                        mapping_data(
-                            "value", {"payload": json.dumps(value)}, style
-                        )
-                    ),
+                    Form(mapping_data("value", {"payload": json.dumps(value)}, style)),
                     "value",
                 )
             )
@@ -1019,11 +1015,7 @@ class DictFieldPropertyTestCase(SimpleTestCase):
         self.assertTrue(form.is_valid(), (styles, form.errors))
         self.assertEqual(
             form.cleaned_data["payload"],
-            {
-                "rows": [
-                    {"point": {"a": value, "label": ""}} for value in values
-                ]
-            },
+            {"rows": [{"point": {"a": value, "label": ""}} for value in values]},
         )
 
     @HYPOTHESIS_SETTINGS
@@ -1193,7 +1185,9 @@ class DictFieldPropertyTestCase(SimpleTestCase):
                 value_results.append(type(exc).__name__)
             else:
                 value_results.append(None)
-        self.assertEqual(is_valid_results, [is_valid_results[0]] * len(is_valid_results))
+        self.assertEqual(
+            is_valid_results, [is_valid_results[0]] * len(is_valid_results)
+        )
         self.assertEqual(error_results, [error_results[0]] * len(error_results))
         self.assertEqual(render_results, [render_results[0]] * len(render_results))
         self.assertEqual(value_results, [value_results[0]] * len(value_results))
@@ -1279,7 +1273,9 @@ class DictFieldPropertyTestCase(SimpleTestCase):
                 value_results.append(type(exc).__name__)
             else:
                 value_results.append(None)
-        self.assertEqual(is_valid_results, [is_valid_results[0]] * len(is_valid_results))
+        self.assertEqual(
+            is_valid_results, [is_valid_results[0]] * len(is_valid_results)
+        )
         self.assertEqual(error_results, [error_results[0]] * len(error_results))
         self.assertEqual(render_results, [render_results[0]] * len(render_results))
         self.assertEqual(value_results, [value_results[0]] * len(value_results))
@@ -1308,6 +1304,7 @@ class DictFieldPropertyTestCase(SimpleTestCase):
 
         self.assertFalse(form.is_valid())
         self.assertEqual(form.errors.as_data()["point"][0].code, "required")
+
 
 class DictFieldRegressionTestCase(SimpleTestCase):
     def test_scalar_and_nested_mapping_aliases_do_not_crash_rendering(self):

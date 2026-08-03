@@ -13,6 +13,7 @@
       {{ widget.subform.as_table }}
     </tbody>
   </table>
+  {% include "django/forms/widgets/mapping/initial_hidden_fields.html" with initial_hidden_fields=widget.initial_hidden_fields only %}
 </div>
 {% endif %}
 {% endspaceless %}

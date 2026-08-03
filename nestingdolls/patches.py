@@ -7,7 +7,6 @@ from django.forms import BaseForm
 
 from nestingdolls.rendering import active_form_layout, form_layout_from_template_name
 
-
 RenderMethod = Callable[[BaseForm, str | None, dict[str, Any] | None, Any], str]
 
 
@@ -16,7 +15,7 @@ def install_form_rendering_patch() -> None:
         return
 
     original_render = cast(RenderMethod, BaseForm.render)
-    setattr(BaseForm, "nestingdolls_original_render", original_render)
+    BaseForm.nestingdolls_original_render = original_render
 
     def render_with_form_layout(
         self: BaseForm,
@@ -34,4 +33,4 @@ def install_form_rendering_patch() -> None:
             active_form_layout.reset(token)
 
     BaseForm.render = render_with_form_layout
-    setattr(BaseForm, "nestingdolls_render_patch_installed", True)
+    BaseForm.nestingdolls_render_patch_installed = True

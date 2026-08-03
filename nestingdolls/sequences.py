@@ -130,11 +130,12 @@ class SequenceBoundField(BoundField):
                 {"delete_name": f"{self.html_name}-{index}-{DELETION_FIELD_NAME}"}
                 for index in sorted(deleted_indexes)
             ]
-        template_name = f"django/forms/widgets/sequence/{FormLayout.current().value}.html"
         return cast(
             SafeString,
             cast(_RenderableWidget, widget)._render(
-                template_name, context, self.form.renderer
+                f"django/forms/widgets/sequence/{FormLayout.current().value}.html",
+                context,
+                self.form.renderer,
             ),
         )
 
@@ -743,7 +744,7 @@ class FrozenSetField(SetField):
 class SequenceWidget(Widget):
     """Render dynamic homogeneous rows while delegating each row to one widget."""
 
-    template_name = "django/forms/widgets/sequence_div.html"
+    template_name = "django/forms/widgets/sequence/div.html"
     use_fieldset = True
     deletion_field = BooleanField(required=False)
 
@@ -760,8 +761,6 @@ class SequenceWidget(Widget):
         renderer: object | None = None,
     ) -> SafeString:
         """Render with a template that matches the active form helper."""
-        layout = FormLayout.current()
-        template_name = f"django/forms/widgets/sequence/{layout.value}.html"
         context = self.get_context(
             name,
             cast(Sequence[Any] | None, value),
@@ -770,7 +769,7 @@ class SequenceWidget(Widget):
         return cast(
             SafeString,
             cast(_RenderableWidget, self)._render(
-                template_name,
+                f"django/forms/widgets/sequence/{FormLayout.current().value}.html",
                 context,
                 renderer,
             ),
@@ -995,6 +994,9 @@ class SequenceWidget(Widget):
     ) -> dict[str, Any]:
         """Build widget context for visible rows and the empty row template."""
         context = super().get_context(name, value, attrs)
+        context["widget"]["template_name"] = (
+            f"django/forms/widgets/sequence/{FormLayout.current().value}.html"
+        )
         if self.is_localized:
             self.child_field.widget.is_localized = True
 

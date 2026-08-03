@@ -1551,7 +1551,9 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
                 value_results.append(type(exc).__name__)
             else:
                 value_results.append(None)
-        self.assertEqual(is_valid_results, [is_valid_results[0]] * len(is_valid_results))
+        self.assertEqual(
+            is_valid_results, [is_valid_results[0]] * len(is_valid_results)
+        )
         self.assertEqual(error_results, [error_results[0]] * len(error_results))
         self.assertEqual(render_results, [render_results[0]] * len(render_results))
         self.assertEqual(value_results, [value_results[0]] * len(value_results))
@@ -1580,6 +1582,7 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
 
         self.assertFalse(form.is_valid())
         self.assertEqual(form.errors.as_data()["values"][0].code, "required")
+
 
 class SetFieldPropertyTestCase(_HypothesisTestCase):
     @HYPOTHESIS_SETTINGS
@@ -2021,16 +2024,12 @@ class WidgetIntegrationTestCase(SimpleTestCase):
                 inner_self.original_flag = bool(
                     getattr(BaseForm, "nestingdolls_render_patch_installed", False)
                 )
-                BaseForm.render = getattr(BaseForm, "nestingdolls_original_render")
-                setattr(BaseForm, "nestingdolls_render_patch_installed", False)
+                BaseForm.render = BaseForm.nestingdolls_original_render
+                BaseForm.nestingdolls_render_patch_installed = False
 
             def __exit__(inner_self, exc_type, exc, tb):
                 BaseForm.render = inner_self.original_render
-                setattr(
-                    BaseForm,
-                    "nestingdolls_render_patch_installed",
-                    inner_self.original_flag,
-                )
+                BaseForm.nestingdolls_render_patch_installed = inner_self.original_flag
 
         return NoPatchContext()
 
@@ -2381,7 +2380,9 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), min_length=2)
 
-        form = Form({"values-0": "bad", "values-TOTAL_FORMS": "1", "values-INITIAL_FORMS": "0"})
+        form = Form(
+            {"values-0": "bad", "values-TOTAL_FORMS": "1", "values-INITIAL_FORMS": "0"}
+        )
 
         self.assertFalse(form.is_valid())
         with self.assertTemplateUsed("django/forms/widgets/sequence/p.html"):
@@ -2455,9 +2456,7 @@ class PublicApiTestCase(SimpleTestCase):
         with self.assertRaisesMessage(
             ValueError, "'absolute_max' must be greater or equal to 'max_length'."
         ):
-            nestingdolls.ListField(
-                forms.IntegerField(), max_length=2, absolute_max=1
-            )
+            nestingdolls.ListField(forms.IntegerField(), max_length=2, absolute_max=1)
 
         for kwargs in (
             {"min_length": -1},
@@ -2466,6 +2465,7 @@ class PublicApiTestCase(SimpleTestCase):
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 nestingdolls.ListField(forms.IntegerField(), **kwargs)
+
     def test_rejects_non_fields_and_legacy_widget_usage(self):
         """It rejects invalid child fields and legacy widget arguments."""
         with self.assertRaises(ImproperlyConfigured):
