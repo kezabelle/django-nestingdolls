@@ -308,7 +308,7 @@ class MappingBoundField(BoundField):
 
     @cached_property
     def _should_bind_omitted_file_initial(self) -> bool:
-        """Bind omitted file-only subforms so child FileFields can preserve initial."""
+        """Bind omitted subforms when any child FileField may need its initial."""
         if not self.form.is_bound:
             return False
         if self.field.disabled:
@@ -322,7 +322,7 @@ class MappingBoundField(BoundField):
         child_fields = tuple(self.field.form_class().fields.values())
         if not child_fields:
             return False
-        return all(isinstance(field, FileField) for field in child_fields)
+        return any(isinstance(field, FileField) for field in child_fields)
 
     @cached_property
     def _is_bound_subform(self) -> bool:
@@ -450,6 +450,12 @@ class MappingField(Field):
             raise ImproperlyConfigured(
                 "form_class argument for MappingField must be a BaseForm subclass"
             )
+        try:
+            form_class()
+        except TypeError as exc:
+            raise ImproperlyConfigured(
+                "form_class argument for MappingField must be default-constructible"
+            ) from exc
         if initial is not None and not callable(initial):
             self._initial_value(initial)
 

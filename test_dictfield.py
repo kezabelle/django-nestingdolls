@@ -396,8 +396,15 @@ class DictFieldTestCase(SimpleTestCase):
 
     def test_rejects_wrong_form_widget_and_bound_field_types(self):
         """Constructor extension points require compatible Django types."""
+
+        class NeedsArgForm(forms.Form):
+            def __init__(self, token, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+
         with self.assertRaises(ImproperlyConfigured):
             nestingdolls.MappingField(forms.IntegerField)  # type: ignore[arg-type]
+        with self.assertRaises(ImproperlyConfigured):
+            nestingdolls.MappingField(NeedsArgForm)
         with self.assertRaises(TypeError):
             nestingdolls.MappingField(PointForm, widget=forms.TextInput)
         with self.assertRaises(TypeError):
@@ -740,6 +747,30 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
 
             with self.subTest(required=required):
                 self.assertTrue(form.is_valid(), form.errors)
+                self.assertIs(form.cleaned_data["asset"]["upload"], initial_upload)
+
+    def test_mixed_file_subforms_keep_initial_uploads_when_untouched(self):
+        """Untouched mixed mappings preserve child FileField initials."""
+
+        class ChildForm(forms.Form):
+            title = forms.CharField(required=False)
+            upload = forms.FileField()
+
+        initial_upload = SimpleUploadedFile("old.txt", b"old")
+        initial = {"asset": {"title": "", "upload": initial_upload}}
+
+        for required in (False, True):
+            Form = type(
+                "Form",
+                (forms.Form,),
+                {"asset": nestingdolls.MappingField(ChildForm, required=required)},
+            )
+
+            form = Form({}, initial=initial)
+
+            with self.subTest(required=required):
+                self.assertTrue(form.is_valid(), form.errors)
+                self.assertEqual(form.cleaned_data["asset"]["title"], "")
                 self.assertIs(form.cleaned_data["asset"]["upload"], initial_upload)
 
 
