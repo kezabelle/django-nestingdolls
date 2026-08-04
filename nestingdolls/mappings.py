@@ -129,14 +129,7 @@ class MappingWidget(CompositeWidget):
         files: Mapping[str, object],
         name: str,
     ) -> object:
-        """Extract child values from canonical data and files.
-
-        post:
-            implies(name in data, __return__ == data.get(name))
-            implies(name not in data and name in files, __return__ == files.get(name))
-            implies(not data and not files, __return__ == {})
-            implies(name not in data and name not in files, isinstance(__return__, dict))
-        """
+        """Extract child values from canonical data and files."""
         if name in data:
             return data.get(name)
         if name in files:
@@ -462,13 +455,7 @@ class MappingField(Field):
 
     @staticmethod
     def _initial_value(value: object) -> dict[str, object]:
-        """Normalize a supported initial mapping.
-
-        post[]:
-            implies(value is None or value == "", __return__ == {})
-            implies(isinstance(value, Mapping), __return__ == dict(value))
-        raises: InvalidInitialValueError
-        """
+        """Normalize a supported initial mapping."""
         if value is None or value == "":
             return {}
         if isinstance(value, Mapping):
@@ -476,13 +463,7 @@ class MappingField(Field):
         raise InvalidInitialValueError("initial must be a mapping of values")
 
     def to_python(self, value: object) -> dict[str, object]:
-        """Require input to be mapping-shaped.
-
-        post[]:
-            implies(value is None or value == "", __return__ == {})
-            implies(isinstance(value, Mapping), __return__ == dict(value))
-        raises: ValidationError
-        """
+        """Require input to be mapping-shaped."""
         if value is None or value == "":
             return {}
         if not isinstance(value, Mapping):
@@ -566,15 +547,7 @@ class MappingField(Field):
             return super().bound_data(data, initial)
 
     def prepare_value(self, value: object) -> object:
-        """Prepare each mapping member for widget rendering.
-
-        post:
-            isinstance(__return__, dict) or __return__ is value
-            implies(
-                value is not None and value != "" and not isinstance(value, Mapping),
-                __return__ is value,
-            )
-        """
+        """Prepare each mapping member for widget rendering."""
         try:
             mapping = self._initial_value(value)
             return {
@@ -586,16 +559,7 @@ class MappingField(Field):
             return super().prepare_value(value)
 
     def has_changed(self, initial: object, data: object) -> bool:
-        """Compare mapping members using child-field change semantics.
-
-        post:
-            implies(self.disabled, not __return__)
-            implies(
-                not self.disabled
-                and (not isinstance(initial, Mapping) or not isinstance(data, Mapping)),
-                __return__,
-            )
-        """
+        """Compare mapping members using child-field change semantics."""
         if self.disabled:
             return False
         try:

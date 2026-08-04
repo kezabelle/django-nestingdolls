@@ -602,6 +602,12 @@ class SequenceFieldTestCase(SimpleTestCase):
 
         field = Form.base_fields["values"]
         values = ["1"] * (field.absolute_max + 1)
+        self.assertEqual(
+            field.widget._value_from_normalized_data(
+                {"values": values}, {"values": ["ignored"]}, "values"
+            ),
+            values,
+        )
         with self.assertRaises(ValidationError) as context:
             field.clean(values)
         self.assertEqual(context.exception.error_list[0].code, "too_many_forms")

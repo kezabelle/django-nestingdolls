@@ -146,6 +146,29 @@ class PointForm(forms.Form):
 
 
 class DictFieldTestCase(SimpleTestCase):
+    def test_direct_mapping_data_wins_over_files_and_flat_input(self):
+        """It gives a direct data mapping the documented precedence."""
+        widget = nestingdolls.MappingWidget(PointForm)
+
+        self.assertEqual(
+            widget._value_from_normalized_data(
+                {"point": {"a": "1"}, "point-a": "2"},
+                {"point": {"a": "3"}},
+                "point",
+            ),
+            {"a": "1"},
+        )
+
+    def test_invalid_mapping_shapes_stay_in_djangos_bound_data_channel(self):
+        """It redisplays hostile submitted data and disabled hostile initials."""
+        enabled = nestingdolls.MappingField(PointForm, required=False)
+        disabled = nestingdolls.MappingField(PointForm, required=False, disabled=True)
+
+        submitted = ["hostile"]
+        initial = ["initial"]
+        self.assertIs(enabled.bound_data(submitted, initial), submitted)
+        self.assertIs(disabled.bound_data(submitted, initial), initial)
+
     def test_cleans_every_supported_mapping_spelling(self):
         """It cleans direct, dash, dot, and bracket mapping input."""
 

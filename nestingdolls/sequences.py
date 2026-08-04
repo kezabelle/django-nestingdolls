@@ -390,13 +390,7 @@ class SequenceField(Field):
 
     @staticmethod
     def _initial_values(value: object) -> list[object]:
-        """Normalize supported initial collections into a list.
-
-        post[]:
-            implies(value is None or value == "", __return__ == [])
-            implies(isinstance(value, Collection) and not isinstance(value, (Mapping, str, bytes, bytearray)), __return__ == list(value))
-        raises: InvalidInitialValueError
-        """
+        """Normalize supported initial collections into a list."""
         if value is None or value == "":
             return []
         if (
@@ -408,13 +402,7 @@ class SequenceField(Field):
         raise InvalidInitialValueError("initial must be a collection of values")
 
     def to_python(self, value: object) -> list[object]:
-        """Require sequence input to already be list-shaped.
-
-        post[]:
-            implies(value is None or value == "", __return__ == [])
-            implies(isinstance(value, list), __return__ is value)
-        raises: ValidationError
-        """
+        """Require sequence input to already be list-shaped."""
         if value is None or value == "":
             return []
         if not isinstance(value, list):
@@ -428,12 +416,7 @@ class SequenceField(Field):
         deleted_indexes: frozenset[int] = frozenset(),
         omitted_indexes: frozenset[int] = frozenset(),
     ) -> list[object]:
-        """Clean each submitted row and return the cleaned row list.
-
-        post:
-            len(values) <= self.absolute_max
-            len(__return__) == sum(index not in deleted_indexes and index not in omitted_indexes for index in range(len(values)))
-        """
+        """Clean each submitted row and return the cleaned row list."""
         if len(values) > self.absolute_max:
             raise ValidationError(
                 self.error_messages["too_many_forms"],
@@ -553,12 +536,7 @@ class SequenceField(Field):
         return result
 
     def validate(self, value: Collection[object]) -> None:
-        """Apply required, minimum, and maximum length checks.
-
-        post:
-            implies(self.required, bool(value))
-            not value or self.min_length <= len(value) <= self.max_length
-        """
+        """Apply required, minimum, and maximum length checks."""
         if not value:
             super().validate([])
             return
@@ -577,29 +555,11 @@ class SequenceField(Field):
             )
 
     def compress(self, data_list: list[object]) -> Collection[object]:
-        """Return the cleaned list unchanged.
-
-        post[]:
-            __return__ is data_list
-        """
+        """Return the cleaned list unchanged."""
         return data_list
 
     def bound_data(self, data: object, initial: object) -> Collection[object]:
-        """Bind each submitted row against its matching initial value.
-
-        post:
-            isinstance(__return__, list)
-            implies(self.disabled, len(__return__) == len(self._initial_values(initial)))
-            implies(
-                not self.disabled and isinstance(data, list) and len(data) <= self.absolute_max,
-                len(__return__) == len(data),
-            )
-            implies(
-                not self.disabled and isinstance(data, list) and len(data) > self.absolute_max,
-                __return__ == [],
-            )
-            implies(data is None or data == "", __return__ == [])
-        """
+        """Bind each submitted row against its matching initial value."""
         if self.disabled:
             return self._initial_values(initial)
         if isinstance(data, list) and len(data) > self.absolute_max:
@@ -621,16 +581,7 @@ class SequenceField(Field):
         return values
 
     def prepare_value(self, value: object) -> list[object]:
-        """Prepare each row for widget rendering.
-
-        post:
-            implies(value is None or value == "", __return__ == [])
-            implies(
-                isinstance(value, Collection)
-                and not isinstance(value, (Mapping, str, bytes, bytearray)),
-                len(__return__) == len(value),
-            )
-        """
+        """Prepare each row for widget rendering."""
         values = []
         for row in self._initial_values(value):
             try:
@@ -641,15 +592,7 @@ class SequenceField(Field):
         return values
 
     def has_changed(self, initial: object, data: object) -> bool:
-        """Compare submitted rows using child-field change semantics.
-
-        post:
-            implies(self.disabled, not __return__)
-            implies(
-                not self.disabled and isinstance(data, list) and len(data) > self.absolute_max,
-                __return__,
-            )
-        """
+        """Compare submitted rows using child-field change semantics."""
         if self.disabled:
             return False
         if isinstance(data, list) and len(data) > self.absolute_max:
@@ -890,14 +833,7 @@ class SequenceWidget(CompositeWidget):
         }
 
     def _normalized_row_key(self, key: object, name: str) -> tuple[str, int] | None:
-        """Normalize one supported row key into its canonical name and index.
-
-        post[]:
-            implies(not isinstance(key, str), __return__ is None)
-            __return__ is None or 0 <= __return__[1] <= self.absolute_max
-            __return__ is None or __return__[0].startswith(f"{name}-{__return__[1]}")
-            implies(__return__ is not None, len(__return__[0]) <= len(key))
-        """
+        """Normalize one supported row key into its canonical name and index."""
         if not isinstance(key, str):
             return None
         for separator in ("-", ".", "["):
@@ -1075,7 +1011,6 @@ class SequenceWidget(CompositeWidget):
             }
         )
         return context
-
 
     @property
     def is_hidden(self) -> bool:
