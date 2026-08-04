@@ -199,12 +199,16 @@ class SequenceFieldTestCase(SimpleTestCase):
             with self.subTest(data=data):
                 form = Form(data)
                 self.assertFalse(form.is_valid())
+                self.assertIsInstance(
+                    form.errors.as_data()["values"][0],
+                    nestingdolls.ItemValidationError,
+                )
                 self.assertEqual(
                     form.errors.as_data()["values"][0].code, "item_invalid"
                 )
-                self.assertEqual(
-                    form.errors.as_data()["values"][0].params["child_code"], "required"
-                )
+            self.assertEqual(
+                form.errors.as_data()["values"][0].params["child_code"], "required"
+            )
 
     def test_accepts_direct_and_flat_initial_spellings(self):
         """It accepts all supported initial row spellings."""
@@ -391,7 +395,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertEqual(
             [error.code for error in errors], ["item_invalid", "item_invalid"]
         )
-        self.assertEqual([error.params["index"] for error in errors], [1, 2])
+        self.assertEqual([error.params["item"] for error in errors], [1, 2])
         self.assertEqual(list(form["values"].errors), [])
 
         html = form.as_p()
@@ -729,6 +733,10 @@ class SequenceFieldTestCase(SimpleTestCase):
             files={"values-1": "file"},
         )
         self.assertFalse(malformed.is_valid())
+        self.assertIsInstance(
+            malformed.errors.as_data()["values"][0],
+            nestingdolls.MissingManagementFormValidationError,
+        )
         self.assertEqual(
             malformed.errors.as_data()["values"][0].code,
             "missing_management_form",
@@ -792,7 +800,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         )
         self.assertFalse(initial_missing.is_valid())
         self.assertEqual(
-            initial_missing.errors.as_data()["values"][0].params["index"], 0
+            initial_missing.errors.as_data()["values"][0].params["item"], 0
         )
 
     def test_explicit_management_data_skips_omitted_extra_rows(self):
@@ -2790,10 +2798,31 @@ class PublicApiTestCase(SimpleTestCase):
         self.assertIs(nestingdolls.FrozenSequenceField, nestingdolls.TupleField)
         self.assertTrue(issubclass(nestingdolls.FrozenSetField, nestingdolls.SetField))
         self.assertTrue(issubclass(nestingdolls.InvalidInitialValueError, ValueError))
+        self.assertTrue(
+            issubclass(
+                nestingdolls.SequenceInputValidationError,
+                ValidationError,
+            )
+        )
+        self.assertTrue(
+            issubclass(
+                nestingdolls.MissingManagementFormValidationError,
+                ValidationError,
+            )
+        )
+        self.assertTrue(
+            issubclass(
+                nestingdolls.TooManyFormsValidationError,
+                ValidationError,
+            )
+        )
+        self.assertTrue(issubclass(nestingdolls.ItemValidationError, ValidationError))
         self.assertEqual(
             nestingdolls.ListField(forms.IntegerField(), initial=range(2)).initial,
             range(2),
         )
+        with self.assertRaises(nestingdolls.SequenceInputValidationError):
+            nestingdolls.ListField(forms.IntegerField()).clean("not a list")
 
         with self.assertRaises(nestingdolls.InvalidInitialValueError):
             nestingdolls.ListField(forms.IntegerField(), initial="not a collection")
@@ -2866,6 +2895,10 @@ class PublicApiTestCase(SimpleTestCase):
         form = Form(data)
 
         self.assertFalse(form.is_valid())
+        self.assertIsInstance(
+            form.errors.as_data()["values"][0],
+            nestingdolls.TooManyFormsValidationError,
+        )
         self.assertEqual(form.errors.as_data()["values"][0].code, "too_many_forms")
 
     def test_custom_bound_field_keeps_sequence_error_integration(self):

@@ -146,7 +146,9 @@ class DictFieldTestCase(SimpleTestCase):
                 PointForm, required=False, initial={"a": 3}
             )
 
-        self.assertEqual(Form(initial={"other": "value"})["point"].initial, {"a": 3})
+        self.assertEqual(
+            Form(initial={"point-junk": "value"})["point"].initial, {"a": 3}
+        )
 
     def test_direct_mapping_data_wins_over_files_and_flat_input(self):
         """It gives a direct data mapping the documented precedence."""
@@ -294,6 +296,10 @@ class DictFieldTestCase(SimpleTestCase):
         form = Form({"point": "not a mapping"})
 
         self.assertFalse(form.is_valid())
+        self.assertIsInstance(
+            form.errors.as_data()["point"][0],
+            nestingdolls.InvalidMappingInputError,
+        )
         self.assertEqual(form.errors.as_data()["point"][0].code, "invalid")
 
     def test_required_and_optional_empty_mappings_use_the_container_boundary(self):
@@ -363,9 +369,10 @@ class DictFieldTestCase(SimpleTestCase):
 
         self.assertFalse(form.is_valid())
         error = form.errors.as_data()["value"][0]
+        self.assertIsInstance(error, nestingdolls.ItemValidationError)
         self.assertEqual(error.code, "item_invalid")
         self.assertEqual(error.params["child_code"], "unavailable")
-        self.assertEqual(error.params["key"], "__all__")
+        self.assertEqual(error.params["item"], "__all__")
         self.assertNotIn("path", error.params)
 
     def test_outer_validators_receive_cleaned_mapping(self):
@@ -391,7 +398,7 @@ class DictFieldTestCase(SimpleTestCase):
             raise ValidationError(
                 "Outer mapping error.",
                 code="item_invalid",
-                params={"key": 0, "message": "outer", "child_code": "outer"},
+                params={"key": "a", "message": "outer", "child_code": "outer"},
             )
 
         class Form(forms.Form):
@@ -945,6 +952,26 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
                 self.assertTrue(form.is_valid(), form.errors)
                 self.assertEqual(form.cleaned_data["asset"]["title"], "")
                 self.assertIs(form.cleaned_data["asset"]["upload"], initial_upload)
+
+    def test_nested_file_subforms_keep_initial_uploads_when_untouched(self):
+        """Untouched nested mappings preserve child FileField initials."""
+
+        class AssetForm(forms.Form):
+            upload = forms.FileField()
+
+        class ChildForm(forms.Form):
+            asset = nestingdolls.MappingField(AssetForm)
+
+        class Form(forms.Form):
+            payload = nestingdolls.MappingField(ChildForm)
+
+        initial_upload = SimpleUploadedFile("old.txt", b"old")
+        form = Form(
+            {}, initial={"payload": {"asset": {"upload": initial_upload}}}
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.cleaned_data["payload"]["asset"]["upload"], initial_upload)
 
 
 class NestedDictFieldTestCase(SimpleTestCase):
@@ -1551,6 +1578,30 @@ class DictFieldPropertyTestCase(SimpleTestCase):
 
 
 class DictFieldRegressionTestCase(SimpleTestCase):
+    def test_malformed_runtime_initials_remain_renderable(self):
+        """Malformed dynamic initials use Django's validation error channel."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm, required=False)
+
+        class CallableInitialForm(forms.Form):
+            point = nestingdolls.MappingField(
+                PointForm, required=False, initial=lambda: ["bad"]
+            )
+
+        class DisabledForm(forms.Form):
+            point = nestingdolls.MappingField(PointForm, required=False, disabled=True)
+
+        for form in (Form(initial={"point": ["bad"]}), CallableInitialForm()):
+            with self.subTest(form=form.__class__.__name__):
+                self.assertEqual(form["point"].value(), ["bad"])
+                str(form["point"])
+
+        disabled = DisabledForm({}, initial={"point": ["bad"]})
+        self.assertFalse(disabled.is_valid())
+        self.assertEqual(disabled.errors.as_data()["point"][0].code, "invalid")
+        str(disabled["point"])
+
     def test_show_hidden_initial_hostile_mappings_remain_renderable(self):
         """Scalar and nested composite mapping input stays in the error channel."""
 
@@ -1696,6 +1747,10 @@ class PublicApiTestCase(SimpleTestCase):
         self.assertIs(nestingdolls.DictField, nestingdolls.MappingField)
         self.assertIs(nestingdolls.FormField, nestingdolls.MappingField)
         self.assertIs(nestingdolls.Subform, nestingdolls.MappingField)
+        self.assertTrue(issubclass(nestingdolls.ItemValidationError, ValidationError))
+        self.assertTrue(
+            issubclass(nestingdolls.InvalidMappingInputError, ValidationError)
+        )
 
     def test_mapping_bound_field_rejects_non_mapping_field(self):
         """It rejects direct misuse with a non-mapping field under optimized Python."""

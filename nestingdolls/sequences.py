@@ -43,7 +43,13 @@ __all__ = [
     "TupleField",
 ]
 
-from nestingdolls.errors import InvalidInitialValueError
+from nestingdolls.errors import (
+    InvalidInitialValueError,
+    ItemValidationError,
+    MissingManagementFormValidationError,
+    SequenceInputValidationError,
+    TooManyFormsValidationError,
+)
 from nestingdolls.rendering import FormLayout
 
 
@@ -71,12 +77,7 @@ class SequenceBoundField(BoundField):
             return errors
         field_errors = []
         for error in errors.as_data():
-            params = error.params or {}
-            if (
-                error.code == "item_invalid"
-                and {"index", "message", "child_code"} <= params.keys()
-                and isinstance(params["index"], int)
-            ):
+            if isinstance(error, ItemValidationError):
                 continue
             field_errors.append(error)
         if len(field_errors) == len(errors):
@@ -99,17 +100,8 @@ class SequenceBoundField(BoundField):
             return super().as_widget(widget, attrs, only_initial)
         item_errors: dict[int, list[object]] = defaultdict(list)
         for error in super().errors.as_data():
-            params = error.params or {}
-            index = params.get("index")
-            if (
-                error.code == "item_invalid"
-                and {"index", "message", "child_code"} <= params.keys()
-                and isinstance(index, int)
-            ):
-                message = params.get("message")
-                item_errors[index].extend(
-                    [message] if message is not None else error.messages
-                )
+            if isinstance(error, ItemValidationError) and isinstance(error.item, int):
+                item_errors[error.item].extend([error.message])
         deleted_indexes = self._deleted_indexes
         if not deleted_indexes and not item_errors:
             return super().as_widget(widget, attrs, only_initial)
@@ -406,7 +398,7 @@ class SequenceField(Field):
         if value is None or value == "":
             return []
         if not isinstance(value, list):
-            raise ValidationError(self.error_messages["invalid"], code="invalid")
+            raise SequenceInputValidationError(self.error_messages["invalid"])
         return value
 
     def _clean_values(
@@ -418,10 +410,8 @@ class SequenceField(Field):
     ) -> list[object]:
         """Clean each submitted row and return the cleaned row list."""
         if len(values) > self.absolute_max:
-            raise ValidationError(
-                self.error_messages["too_many_forms"],
-                code="too_many_forms",
-                params={"num": self.max_length},
+            raise TooManyFormsValidationError(
+                self.error_messages["too_many_forms"], num=self.max_length
             )
         cleaned_data: list[object] = []
         errors = []
@@ -438,19 +428,18 @@ class SequenceField(Field):
                     cleaned = self.child_field.clean(value)
             except ValidationError as error:
                 for item_error in error.error_list:
-                    params = item_error.params or {}
                     for message in item_error.messages:
                         errors.append(
-                            ValidationError(
+                            ItemValidationError(
+                                index,
                                 message,
-                                code="item_invalid",
-                                params={
-                                    "index": index,
-                                    "message": message,
-                                    "child_code": params.get(
+                                ValidationError(
+                                    message,
+                                    code=(item_error.params or {}).get(
                                         "child_code", item_error.code
                                     ),
-                                },
+                                    params=item_error.params,
+                                ),
                             )
                         )
             else:
@@ -496,22 +485,17 @@ class SequenceField(Field):
 
         if management_form is not None:
             if not management_form.is_valid():
-                raise ValidationError(
+                raise MissingManagementFormValidationError(
                     self.error_messages["missing_management_form"],
-                    code="missing_management_form",
-                    params={
-                        "field_names": ", ".join(
-                            management_form.add_prefix(field_name)
-                            for field_name in management_form.errors
-                        )
-                    },
+                    field_names=", ".join(
+                        management_form.add_prefix(field_name)
+                        for field_name in management_form.errors
+                    ),
                 )
             submitted_total = management_form.cleaned_data[TOTAL_FORM_COUNT]
             if isinstance(submitted_total, int) and submitted_total > self.absolute_max:
-                raise ValidationError(
-                    self.error_messages["too_many_forms"],
-                    code="too_many_forms",
-                    params={"num": self.max_length},
+                raise TooManyFormsValidationError(
+                    self.error_messages["too_many_forms"], num=self.max_length
                 )
 
         initial = self._initial_values(bound_field.initial)

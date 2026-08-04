@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.forms import BaseForm, Field, FileField
+from django.forms import BaseForm, Field
 from django.forms.boundfield import BoundField
 from django.forms.utils import ErrorList
 from django.forms.widgets import Media as WidgetMedia
@@ -16,7 +16,11 @@ from django.utils.safestring import SafeString
 from django.utils.translation import gettext_lazy as _
 
 from nestingdolls._shared import CompositeWidget
-from nestingdolls.errors import InvalidInitialValueError
+from nestingdolls.errors import (
+    InvalidInitialValueError,
+    InvalidMappingInputError,
+    ItemValidationError,
+)
 from nestingdolls.rendering import FormLayout
 
 __all__ = [
@@ -227,12 +231,7 @@ class MappingBoundField(BoundField):
             return errors
         field_errors = []
         for error in errors.as_data():
-            params = error.params or {}
-            if (
-                error.code == "item_invalid"
-                and {"key", "message", "child_code"} <= params.keys()
-                and isinstance(params["key"], str)
-            ):
+            if isinstance(error, ItemValidationError):
                 continue
             field_errors.append(error)
         if len(field_errors) == len(errors):
@@ -265,8 +264,8 @@ class MappingBoundField(BoundField):
         )
 
     @cached_property
-    def initial(self) -> dict[str, object]:
-        """Normalize direct and flattened mapping initial values."""
+    def initial(self) -> object:
+        """Normalize recognized mapping initials and preserve invalid ones."""
         if self.form.initial and self.name not in self.form.initial:
             normalized = self.field.widget._normalize_mapping(
                 self.form.initial, self.name
@@ -275,9 +274,13 @@ class MappingBoundField(BoundField):
                 value = self.field.widget._value_from_normalized_data(
                     normalized, {}, self.name
                 )
-                if isinstance(value, Mapping):
+                if isinstance(value, Mapping) and value:
                     return self.field._initial_value(value)
-        return self.field._initial_value(super().initial)
+        value = super().initial
+        try:
+            return self.field._initial_value(value)
+        except InvalidInitialValueError:
+            return value
 
     @cached_property
     def _is_bound_subform(self) -> bool:
@@ -290,36 +293,28 @@ class MappingBoundField(BoundField):
             return False
         if self._data_input or self._file_input:
             return True
-        return bool(self.initial) and any(
-            isinstance(field, FileField)
-            for field in self.field.form_class().fields.values()
+        return (
+            isinstance(self.initial, dict)
+            and bool(self.initial)
+            and self.field.widget.needs_multipart_form
         )
 
     @cached_property
     def subform(self) -> BaseForm:
         """Return the child Form used for bound cleaning and rendering."""
-        if self._is_bound_subform:
-            subform = self.field.form_class(
-                data=self._data_input,
-                files=cast(Any, self._file_input),
-                initial=self.initial,
-                prefix=self.html_name,
-                auto_id=self.form.auto_id,
-                use_required_attribute=(
-                    self.field.required and self.form.use_required_attribute
-                ),
-                renderer=self.form.renderer,
-            )
-        else:
-            subform = self.field.form_class(
-                initial=self.initial,
-                prefix=self.html_name,
-                auto_id=self.form.auto_id,
-                use_required_attribute=(
-                    self.field.required and self.form.use_required_attribute
-                ),
-                renderer=self.form.renderer,
-            )
+        is_bound = self._is_bound_subform
+        initial = self.initial
+        subform = self.field.form_class(
+            data=self._data_input if is_bound else None,
+            files=cast(Any, self._file_input) if is_bound else None,
+            initial=initial if isinstance(initial, dict) else {},
+            prefix=self.html_name,
+            auto_id=self.form.auto_id,
+            use_required_attribute=(
+                self.field.required and self.form.use_required_attribute
+            ),
+            renderer=self.form.renderer,
+        )
         if self.field.disabled:
             for field in subform.fields.values():
                 field.disabled = True
@@ -467,26 +462,24 @@ class MappingField(Field):
         if value is None or value == "":
             return {}
         if not isinstance(value, Mapping):
-            raise ValidationError(self.error_messages["invalid"], code="invalid")
+            raise InvalidMappingInputError(self.error_messages["invalid"])
         return dict(value)
 
     @staticmethod
     def _form_errors(form: BaseForm) -> list[ValidationError]:
-        errors = []
+        errors: list[ValidationError] = []
         for key, error_list in form.errors.as_data().items():
             for error in error_list:
-                params = error.params or {}
-                child_code = params.get("child_code", error.code)
                 for message in error.messages:
                     errors.append(
-                        ValidationError(
+                        ItemValidationError(
+                            key,
                             message,
-                            code="item_invalid",
-                            params={
-                                "key": key,
-                                "message": message,
-                                "child_code": child_code,
-                            },
+                            ValidationError(
+                                message,
+                                code=(error.params or {}).get("child_code", error.code),
+                                params=error.params,
+                            ),
                         )
                     )
         return errors
