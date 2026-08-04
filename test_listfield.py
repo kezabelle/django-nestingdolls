@@ -94,6 +94,8 @@ DATETIME_ROWS = st.lists(
     max_size=4,
 )
 PARSER_KEYS = st.one_of(
+    st.none(),
+    st.integers(),
     st.text(max_size=40),
     st.builds(
         lambda separator, index, suffix: f"values{separator}{index}{suffix}",
@@ -625,6 +627,27 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertEqual(form.errors.as_data()["values"][0].code, "too_many_forms")
         form.as_p()
 
+    def test_direct_file_payload_uses_the_sequence_extraction_path(self):
+        """It extracts direct files when the matching data key is absent."""
+        widget = nestingdolls.SequenceWidget(
+            forms.CharField(required=False), max_length=1, absolute_max=2
+        )
+
+        self.assertEqual(
+            widget.value_from_datadict({}, {"values": ["first", "second"]}, "values"),
+            ["first", "second"],
+        )
+
+    def test_child_change_validation_errors_mark_the_sequence_changed(self):
+        """It treats a child comparison validation error as a change."""
+
+        class ErrorField(forms.IntegerField):
+            def has_changed(self, initial, data):
+                raise ValidationError("comparison failed")
+
+        field = nestingdolls.ListField(ErrorField(), required=False)
+        self.assertTrue(field.has_changed([], ["1"]))
+
     def test_management_data_and_file_inference_are_deterministic(self):
         """It infers across both inputs and accepts management data from files."""
 
@@ -902,6 +925,20 @@ class SequenceFieldTestCase(SimpleTestCase):
             [error.params["child_code"] for error in errors],
             ["first_code", "second_code"],
         )
+
+    def test_flattened_initial_sequence_falls_back_to_the_field_initial(self):
+        """It uses flattened rows when present and Django's initial otherwise."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.IntegerField(), required=False, initial=[3]
+            )
+
+        self.assertEqual(
+            Form(initial={"values-0": "1", "values-1": "2"})["values"].initial,
+            ["1", "2"],
+        )
+        self.assertEqual(Form(initial={"other": "value"})["values"].initial, [3])
 
 
 class TupleFieldTestCase(SequenceFieldTestCase):

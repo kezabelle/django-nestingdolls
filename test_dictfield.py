@@ -12,6 +12,7 @@ from django.forms import BaseForm
 from django.http import QueryDict
 from django.test import SimpleTestCase
 from django.test.utils import setup_test_environment, teardown_test_environment
+from django.utils.datastructures import MultiValueDict
 from hypothesis import HealthCheck, example, given
 from hypothesis import settings as hypothesis_settings
 from hypothesis import strategies as st
@@ -146,6 +147,42 @@ class PointForm(forms.Form):
 
 
 class DictFieldTestCase(SimpleTestCase):
+    def test_direct_multivalue_mapping_preserves_repeated_child_values(self):
+        """It keeps a direct nested MultiValueDict in Django's repeated-value shape."""
+
+        class TagsForm(forms.Form):
+            tags = forms.MultipleChoiceField(
+                choices=(("one", "One"), ("two", "Two")), required=False
+            )
+
+        nested = MultiValueDict[str, object]()
+        nested.setlist("tags", ["one", "two"])
+        data = MultiValueDict[str, object]()
+        data["point"] = nested
+
+        self.assertEqual(
+            nestingdolls.MappingWidget(TagsForm).value_from_datadict(data, {}, "point"),
+            {"tags": ["one", "two"]},
+        )
+
+    def test_flattened_initial_mapping_uses_child_widget_values(self):
+        """It reconstructs raw widget values from flat child names."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm, required=False)
+
+        self.assertEqual(Form(initial={"point-a": "2"})["point"].initial, {"a": "2"})
+
+    def test_unrecognized_flattened_initial_uses_the_field_initial(self):
+        """It leaves Django's configured mapping initial value intact."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(
+                PointForm, required=False, initial={"a": 3}
+            )
+
+        self.assertEqual(Form(initial={"other": "value"})["point"].initial, {"a": 3})
+
     def test_direct_mapping_data_wins_over_files_and_flat_input(self):
         """It gives a direct data mapping the documented precedence."""
         widget = nestingdolls.MappingWidget(PointForm)
