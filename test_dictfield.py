@@ -666,6 +666,25 @@ class DictFieldRenderingTestCase(SimpleTestCase):
         self.assertTrue(field.widget.needs_multipart_form)
         self.assertIn("child.js", field.widget.media._js)
 
+    def test_normalizes_bound_data_once(self):
+        """It normalizes one form's bound data only once."""
+
+        class CountingWidget(nestingdolls.MappingWidget):
+            normalizations = 0
+
+            def _normalize_mapping(self, data, name):
+                type(self).normalizations += 1
+                return super()._normalize_mapping(data, name)
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm, widget=CountingWidget)
+
+        form = Form({"point.a": "1"})
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.has_changed())
+        form.as_p()
+        self.assertEqual(CountingWidget.normalizations, 1)
+
 
 class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
     def test_widget_wrapper_exposes_field_specific_references(self):

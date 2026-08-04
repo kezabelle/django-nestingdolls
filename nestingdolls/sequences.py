@@ -30,6 +30,8 @@ from django.utils.safestring import SafeString
 from django.utils.translation import gettext_lazy as _
 from django.utils.translation import ngettext_lazy
 
+from nestingdolls._shared import CompositeWidget
+
 __all__ = [
     "FrozenSequenceField",
     "FrozenSetField",
@@ -787,7 +789,7 @@ class FrozenSetField(SetField):
     collection_type = frozenset
 
 
-class SequenceWidget(Widget):
+class SequenceWidget(CompositeWidget):
     """Render dynamic homogeneous rows while delegating each row to one widget."""
 
     _template_name = "django/forms/widgets/sequence/{layout}.html"
@@ -798,14 +800,6 @@ class SequenceWidget(Widget):
         """Load the client-side row add/remove controller."""
 
         js = ("nestingdolls/sequence.js",)
-
-    @property
-    def template_name(self) -> str:
-        return self._template_name.format(layout=FormLayout.current().value)
-
-    @template_name.setter
-    def template_name(self, value: str) -> None:
-        self._template_name = value
 
     def __init__(
         self,
@@ -824,10 +818,6 @@ class SequenceWidget(Widget):
             max_length + DEFAULT_MAX_NUM if absolute_max is None else absolute_max
         )
         super().__init__(dict(attrs) if attrs is not None else None)
-
-    def use_required_attribute(self, initial: object) -> bool:
-        """Disable HTML required handling for dynamic rows."""
-        return False
 
     def value_from_datadict(
         self,
@@ -888,17 +878,6 @@ class SequenceWidget(Widget):
             self.child_field.widget.value_from_datadict(data, files, f"{name}-{index}")
             for index in range(form_count)
         ]
-
-    def value_omitted_from_data(
-        self,
-        data: Mapping[str, object],
-        files: Mapping[str, object],
-        name: str,
-    ) -> bool:
-        """Report whether the sequence is entirely absent from submission data."""
-        return not (
-            self._normalize_mapping(data, name) or self._normalize_mapping(files, name)
-        )
 
     @staticmethod
     def management_names(name: str) -> set[str]:
@@ -1097,9 +1076,6 @@ class SequenceWidget(Widget):
         )
         return context
 
-    def id_for_label(self, id_: str) -> str:
-        """Suppress label targeting for the composite sequence widget."""
-        return ""
 
     @property
     def is_hidden(self) -> bool:

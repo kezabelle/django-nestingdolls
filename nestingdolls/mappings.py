@@ -15,6 +15,7 @@ from django.utils.functional import Promise, cached_property
 from django.utils.safestring import SafeString
 from django.utils.translation import gettext_lazy as _
 
+from nestingdolls._shared import CompositeWidget
 from nestingdolls.errors import InvalidInitialValueError
 from nestingdolls.rendering import FormLayout
 
@@ -36,20 +37,12 @@ class _ValueBoundField(BoundField):
         return self.form.data.get(self.name)
 
 
-class MappingWidget(Widget):
+class MappingWidget(CompositeWidget):
     """Render one child Form as a mapping-shaped widget."""
 
     _template_name = "django/forms/widgets/mapping/{layout}.html"
     use_fieldset = True
     input_type: str | None = None
-
-    @property
-    def template_name(self) -> str:
-        return self._template_name.format(layout=FormLayout.current().value)
-
-    @template_name.setter
-    def template_name(self, value: str) -> None:
-        self._template_name = value
 
     def __init__(
         self,
@@ -170,17 +163,6 @@ class MappingWidget(Widget):
             name,
         )
 
-    def value_omitted_from_data(
-        self,
-        data: Mapping[str, object],
-        files: Mapping[str, object],
-        name: str,
-    ) -> bool:
-        """Report whether all supported mapping inputs are absent."""
-        return not (
-            self._normalize_mapping(data, name) or self._normalize_mapping(files, name)
-        )
-
     def get_context(
         self, name: str, value: object, attrs: dict[str, Any] | None
     ) -> dict[str, Any]:
@@ -209,14 +191,6 @@ class MappingWidget(Widget):
             }
         )
         return context
-
-    def use_required_attribute(self, initial: object) -> bool:
-        """Let child fields own HTML required attributes."""
-        return False
-
-    def id_for_label(self, id_: str) -> str:
-        """Suppress label targeting for the composite widget."""
-        return ""
 
     @property
     def is_hidden(self) -> bool:
