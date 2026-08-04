@@ -390,9 +390,9 @@ class SequenceField(Field):
     def _initial_values(value: object) -> list[object]:
         """Normalize supported initial collections into a list.
 
-        post[]: isinstance(__return__, list)
-        post[]: (value is None or value == "") implies __return__ == []
-        post[]: isinstance(value, Collection) and not isinstance(value, Mapping) implies len(__return__) == len(value)
+        post[]:
+            implies(value is None or value == "", __return__ == [])
+            implies(isinstance(value, Collection) and not isinstance(value, (Mapping, str, bytes, bytearray)), __return__ == list(value))
         raises: InvalidInitialValueError
         """
         if value is None or value == "":
@@ -408,9 +408,9 @@ class SequenceField(Field):
     def to_python(self, value: object) -> list[object]:
         """Require sequence input to already be list-shaped.
 
-        post[]: isinstance(__return__, list)
-        post[]: (value is None or value == "") implies __return__ == []
-        post[]: isinstance(value, list) implies __return__ == value
+        post[]:
+            implies(value is None or value == "", __return__ == [])
+            implies(isinstance(value, list), __return__ is value)
         raises: ValidationError
         """
         if value is None or value == "":
@@ -426,7 +426,12 @@ class SequenceField(Field):
         deleted_indexes: frozenset[int] = frozenset(),
         omitted_indexes: frozenset[int] = frozenset(),
     ) -> list[object]:
-        """Clean each submitted row and return the cleaned row list."""
+        """Clean each submitted row and return the cleaned row list.
+
+        post:
+            len(values) <= self.absolute_max
+            len(__return__) == sum(index not in deleted_indexes and index not in omitted_indexes for index in range(len(values)))
+        """
         if len(values) > self.absolute_max:
             raise ValidationError(
                 self.error_messages["too_many_forms"],
@@ -546,7 +551,12 @@ class SequenceField(Field):
         return result
 
     def validate(self, value: Collection[object]) -> None:
-        """Apply required, minimum, and maximum length checks."""
+        """Apply required, minimum, and maximum length checks.
+
+        post:
+            implies(self.required, bool(value))
+            not value or self.min_length <= len(value) <= self.max_length
+        """
         if not value:
             super().validate([])
             return
@@ -567,16 +577,26 @@ class SequenceField(Field):
     def compress(self, data_list: list[object]) -> Collection[object]:
         """Return the cleaned list unchanged.
 
-        post[]: isinstance(__return__, list)
-        post[]: __return__ == data_list
+        post[]:
+            __return__ is data_list
         """
         return data_list
 
     def bound_data(self, data: object, initial: object) -> Collection[object]:
         """Bind each submitted row against its matching initial value.
 
-        post[]: self.disabled implies __return__ == self._initial_values(initial)
-        post[]: (not self.disabled) implies len(__return__) == len(self.to_python(data))
+        post:
+            isinstance(__return__, list)
+            implies(self.disabled, len(__return__) == len(self._initial_values(initial)))
+            implies(
+                not self.disabled and isinstance(data, list) and len(data) <= self.absolute_max,
+                len(__return__) == len(data),
+            )
+            implies(
+                not self.disabled and isinstance(data, list) and len(data) > self.absolute_max,
+                __return__ == [],
+            )
+            implies(data is None or data == "", __return__ == [])
         """
         if self.disabled:
             return self._initial_values(initial)
@@ -601,8 +621,13 @@ class SequenceField(Field):
     def prepare_value(self, value: object) -> list[object]:
         """Prepare each row for widget rendering.
 
-        post[]: isinstance(__return__, list)
-        post[]: len(__return__) == len(self._initial_values(value))
+        post:
+            implies(value is None or value == "", __return__ == [])
+            implies(
+                isinstance(value, Collection)
+                and not isinstance(value, (Mapping, str, bytes, bytearray)),
+                len(__return__) == len(value),
+            )
         """
         values = []
         for row in self._initial_values(value):
@@ -616,7 +641,12 @@ class SequenceField(Field):
     def has_changed(self, initial: object, data: object) -> bool:
         """Compare submitted rows using child-field change semantics.
 
-        post[]: isinstance(__return__, bool)
+        post:
+            implies(self.disabled, not __return__)
+            implies(
+                not self.disabled and isinstance(data, list) and len(data) > self.absolute_max,
+                __return__,
+            )
         """
         if self.disabled:
             return False
@@ -818,12 +848,7 @@ class SequenceWidget(Widget):
         files: Mapping[str, object],
         name: str,
     ) -> list[object]:
-        """Extract row values from canonicalized data and files.
-
-        post[]: isinstance(__return__, list)
-        post[]: (name in data and isinstance(data.get(name), list)) implies __return__ == data.get(name)
-        post[]: (name in files and isinstance(files.get(name), list) and name not in data) implies __return__ == files.get(name)
-        """
+        """Extract row values from canonicalized data and files."""
 
         def direct_sequence_value(
             source: Mapping[str, object],
@@ -877,14 +902,7 @@ class SequenceWidget(Widget):
 
     @staticmethod
     def management_names(name: str) -> set[str]:
-        """Return the management keys for a sequence field name.
-
-        post[]: len(__return__) == 4
-        post[]: f"{name}-{TOTAL_FORM_COUNT}" in __return__
-        post[]: f"{name}-{INITIAL_FORM_COUNT}" in __return__
-        post[]: f"{name}-{MIN_NUM_FORM_COUNT}" in __return__
-        post[]: f"{name}-{MAX_NUM_FORM_COUNT}" in __return__
-        """
+        """Return the management keys for a sequence field name."""
         return {
             f"{name}-{TOTAL_FORM_COUNT}",
             f"{name}-{INITIAL_FORM_COUNT}",
@@ -893,7 +911,14 @@ class SequenceWidget(Widget):
         }
 
     def _normalized_row_key(self, key: object, name: str) -> tuple[str, int] | None:
-        """Normalize one supported row key into its canonical name and index."""
+        """Normalize one supported row key into its canonical name and index.
+
+        post[]:
+            implies(not isinstance(key, str), __return__ is None)
+            __return__ is None or 0 <= __return__[1] <= self.absolute_max
+            __return__ is None or __return__[0].startswith(f"{name}-{__return__[1]}")
+            implies(__return__ is not None, len(__return__[0]) <= len(key))
+        """
         if not isinstance(key, str):
             return None
         for separator in ("-", ".", "["):
@@ -925,8 +950,11 @@ class SequenceWidget(Widget):
     ) -> MultiValueDict[str, object]:
         """Canonicalize accepted row spellings into Django-style keys and dense rows.
 
-        post[]: (not data) implies not __return__
-        post[]: (data and name in data) implies name in __return__
+        post[]:
+            implies(not data, not __return__)
+            implies(name in data, name in __return__)
+            all(key == name or key.startswith(f"{name}-") for key in __return__)
+            len(__return__) <= len(data) + 2
         """
         normalized = MultiValueDict[str, object]()
         if not data:

@@ -44,6 +44,92 @@ class _NestedSequenceMappingForm(forms.Form):
     value = nestingdolls.MappingField(_IntegerListForm)
 
 
+_MAPPING_WIDGET = nestingdolls.MappingWidget(_IntegerForm)
+
+
+def actual_mapping_key_normalization(key: str) -> str | None:
+    """pre: len(key) <= 8"""
+    normalized = _MAPPING_WIDGET._normalize_mapping({key: 1}, "value")
+    return next(iter(normalized), None)
+
+
+def model_mapping_key_normalization(key: str) -> str | None:
+    """pre: len(key) <= 8"""
+    for prefix in ("value-", "value."):
+        if key.startswith(prefix) and len(key) > len(prefix):
+            return f"value-{key.removeprefix(prefix)}"
+    prefix = "value["
+    if not key.startswith(prefix):
+        return None
+    end = key.find("]", len(prefix))
+    if end < 0:
+        return None
+    child_name = key[len(prefix) : end]
+    suffix = key[end + 1 :]
+    if not child_name or suffix and suffix[0] not in "_-.[":
+        return None
+    return f"value-{child_name}{suffix}"
+
+
+def prove_mapping_key_normalization(key: str) -> bool:
+    """pre: len(key) <= 8
+    post[]: __return__
+    """
+    return actual_mapping_key_normalization(key) == model_mapping_key_normalization(key)
+
+
+def actual_mapping_direct_precedence(
+    direct_data: bool, direct_files: bool, data_value: int, file_value: int
+) -> tuple[str, int]:
+    data: dict[str, object] = {"value": data_value} if direct_data else {"value-a": 1}
+    files: dict[str, object] = {"value": file_value} if direct_files else {"value-a": 2}
+    result = _MAPPING_WIDGET._value_from_normalized_data(data, files, "value")
+    if isinstance(result, int):
+        return ("direct", result)
+    return (
+        ("mapping", int(result.get("a", 0)))
+        if isinstance(result, dict)
+        else ("other", 0)
+    )
+
+
+def model_mapping_direct_precedence(
+    direct_data: bool, direct_files: bool, data_value: int, file_value: int
+) -> tuple[str, int]:
+    if direct_data:
+        return ("direct", data_value)
+    if direct_files:
+        return ("direct", file_value)
+    return ("mapping", 1)
+
+
+def prove_mapping_direct_precedence(
+    direct_data: bool, direct_files: bool, data_value: int, file_value: int
+) -> bool:
+    """post[]: __return__"""
+    return actual_mapping_direct_precedence(
+        direct_data, direct_files, data_value, file_value
+    ) == model_mapping_direct_precedence(
+        direct_data, direct_files, data_value, file_value
+    )
+
+
+def actual_mapping_hostile_fallback(disabled: bool, initial: int, data: int) -> int:
+    field = nestingdolls.MappingField(_IntegerForm, required=False, disabled=disabled)
+    return cast(int, field.bound_data(data, initial))
+
+
+def model_mapping_hostile_fallback(disabled: bool, initial: int, data: int) -> int:
+    return initial if disabled else data
+
+
+def prove_mapping_hostile_fallback(disabled: bool, initial: int, data: int) -> bool:
+    """post[]: __return__"""
+    return actual_mapping_hostile_fallback(
+        disabled, initial, data
+    ) == model_mapping_hostile_fallback(disabled, initial, data)
+
+
 def _integer_outcome(form: forms.Form) -> tuple[str, int]:
     if form.is_valid():
         cleaned = cast(dict[str, object], form.cleaned_data["value"])

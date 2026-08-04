@@ -196,6 +196,86 @@ def prove_saturated_index(digits: str) -> bool:
     return actual_saturated_index(digits) == model_saturated_index(digits)
 
 
+def actual_sequence_direct_extraction(
+    data_present: bool, files_present: bool, data: list[int], files: list[int]
+) -> tuple[int, ...]:
+    """pre: len(data) <= 6
+    pre: len(files) <= 6
+    """
+    submitted_data: dict[str, object] = {"values": data} if data_present else {}
+    submitted_files: dict[str, object] = {"values": files} if files_present else {}
+    return tuple(
+        _PARSER_WIDGET._value_from_normalized_data(
+            submitted_data, submitted_files, "values"
+        )
+    )
+
+
+def model_sequence_direct_extraction(
+    data_present: bool, files_present: bool, data: list[int], files: list[int]
+) -> tuple[int, ...]:
+    """pre: len(data) <= 6
+    pre: len(files) <= 6
+    """
+    if data_present:
+        return tuple(data[:5])
+    if files_present:
+        return tuple(files[:5])
+    return ()
+
+
+def prove_sequence_direct_extraction(
+    data_present: bool, files_present: bool, data: list[int], files: list[int]
+) -> bool:
+    """pre: len(data) <= 6
+    pre: len(files) <= 6
+    post[]: __return__
+    """
+    return actual_sequence_direct_extraction(
+        data_present, files_present, data, files
+    ) == model_sequence_direct_extraction(data_present, files_present, data, files)
+
+
+def prove_sequence_key_helper(key: str, absolute_max: int) -> bool:
+    """pre: len(key) <= 8
+    pre: 0 <= absolute_max <= 4
+    post[]: __return__
+    """
+    widget = nestingdolls.SequenceWidget(
+        forms.CharField(required=False), max_length=2, absolute_max=absolute_max
+    )
+    return widget._normalized_row_key(
+        key, "values"
+    ) == _model_normalized_row_key_with_max(key, absolute_max)
+
+
+def _model_normalized_row_key_with_max(
+    key: str, absolute_max: int
+) -> tuple[str, int] | None:
+    for separator in ("-", ".", "["):
+        prefix = f"values{separator}"
+        if not key.startswith(prefix):
+            continue
+        suffix = key[len(prefix) :]
+        index_end = 0
+        index = 0
+        while index_end < len(suffix) and "0" <= suffix[index_end] <= "9":
+            index = min(absolute_max, index * 10 + ord(suffix[index_end]) - ord("0"))
+            index_end += 1
+        if not index_end:
+            return None
+        if separator == "[":
+            if index_end == len(suffix) or suffix[index_end] != "]":
+                return None
+            suffix = suffix[index_end + 1 :]
+        else:
+            suffix = suffix[index_end:]
+        if suffix and suffix[0] not in "_-.[":
+            return None
+        return (f"values-{index}{suffix}", index)
+    return None
+
+
 def actual_clean_cardinality(
     min_length: int, max_length: int, required: bool, values: list[int]
 ) -> tuple[str, tuple[int, ...]]:

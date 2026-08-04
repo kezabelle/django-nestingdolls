@@ -62,11 +62,7 @@ class MappingWidget(Widget):
     def _normalize_mapping(
         self, data: Mapping[str, object], name: str
     ) -> Mapping[str, object]:
-        """Canonicalize accepted child names while preserving source values.
-
-        post[]: (not data) implies not __return__
-        post[]: isinstance(__return__, Mapping)
-        """
+        """Canonicalize accepted child names while preserving source values."""
         if not data:
             return {}
 
@@ -136,7 +132,14 @@ class MappingWidget(Widget):
         files: Mapping[str, object],
         name: str,
     ) -> object:
-        """Extract child values from canonical data and files."""
+        """Extract child values from canonical data and files.
+
+        post:
+            implies(name in data, __return__ == data.get(name))
+            implies(name not in data and name in files, __return__ == files.get(name))
+            implies(not data and not files, __return__ == {})
+            implies(name not in data and name not in files, isinstance(__return__, dict))
+        """
         if name in data:
             return data.get(name)
         if name in files:
@@ -484,8 +487,9 @@ class MappingField(Field):
     def _initial_value(value: object) -> dict[str, object]:
         """Normalize a supported initial mapping.
 
-        post[]: isinstance(__return__, dict)
-        post[]: (value is None or value == "") implies __return__ == {}
+        post[]:
+            implies(value is None or value == "", __return__ == {})
+            implies(isinstance(value, Mapping), __return__ == dict(value))
         raises: InvalidInitialValueError
         """
         if value is None or value == "":
@@ -497,8 +501,9 @@ class MappingField(Field):
     def to_python(self, value: object) -> dict[str, object]:
         """Require input to be mapping-shaped.
 
-        post[]: isinstance(__return__, dict)
-        post[]: (value is None or value == "") implies __return__ == {}
+        post[]:
+            implies(value is None or value == "", __return__ == {})
+            implies(isinstance(value, Mapping), __return__ == dict(value))
         raises: ValidationError
         """
         if value is None or value == "":
@@ -586,7 +591,12 @@ class MappingField(Field):
     def prepare_value(self, value: object) -> object:
         """Prepare each mapping member for widget rendering.
 
-        post[]: isinstance(value, Mapping) implies isinstance(__return__, dict)
+        post:
+            isinstance(__return__, dict) or __return__ is value
+            implies(
+                value is not None and value != "" and not isinstance(value, Mapping),
+                __return__ is value,
+            )
         """
         try:
             mapping = self._initial_value(value)
@@ -601,7 +611,13 @@ class MappingField(Field):
     def has_changed(self, initial: object, data: object) -> bool:
         """Compare mapping members using child-field change semantics.
 
-        post[]: isinstance(__return__, bool)
+        post:
+            implies(self.disabled, not __return__)
+            implies(
+                not self.disabled
+                and (not isinstance(initial, Mapping) or not isinstance(data, Mapping)),
+                __return__,
+            )
         """
         if self.disabled:
             return False
