@@ -106,41 +106,6 @@ PARSER_VALUES = st.one_of(
 PARSER_MAPPINGS = st.dictionaries(PARSER_KEYS, PARSER_VALUES, max_size=20)
 
 
-def mapping_data(name: str, values: dict[str, object], style: str):
-    if style == "direct":
-        return {name: values}
-    if style == "dash":
-        return {f"{name}-{key}": value for key, value in values.items()}
-    if style == "dot":
-        return {f"{name}.{key}": value for key, value in values.items()}
-    if style == "bracket":
-        return {f"{name}[{key}]": value for key, value in values.items()}
-    raise ValueError(style)
-
-
-def nested_path(name: str, segments: tuple[object, ...], style: str) -> str:
-    if style == "dash":
-        return "-".join((name, *(str(segment) for segment in segments)))
-    if style == "dot":
-        return ".".join((name, *(str(segment) for segment in segments)))
-    if style == "bracket":
-        return name + "".join(f"[{segment}]" for segment in segments)
-    raise ValueError(style)
-
-
-def mixed_path(name: str, segments: tuple[object, ...], styles: tuple[str, ...]):
-    for segment, style in zip(segments, styles, strict=True):
-        if style == "dash":
-            name = f"{name}-{segment}"
-        elif style == "dot":
-            name = f"{name}.{segment}"
-        elif style == "bracket":
-            name = f"{name}[{segment}]"
-        else:
-            raise ValueError(style)
-    return name
-
-
 class PointForm(forms.Form):
     a = forms.IntegerField()
     label = forms.CharField(required=False)
@@ -155,15 +120,15 @@ class DictFieldTestCase(SimpleTestCase):
                 choices=(("one", "One"), ("two", "Two")), required=False
             )
 
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(TagsForm, required=False)
+
         nested = MultiValueDict[str, object]()
         nested.setlist("tags", ["one", "two"])
-        data = MultiValueDict[str, object]()
-        data["point"] = nested
+        form = Form({"point": nested})
 
-        self.assertEqual(
-            nestingdolls.MappingWidget(TagsForm).value_from_datadict(data, {}, "point"),
-            {"tags": ["one", "two"]},
-        )
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["point"], {"tags": ["one", "two"]})
 
     def test_flattened_initial_mapping_uses_child_widget_values(self):
         """It reconstructs raw widget values from flat child names."""
@@ -185,16 +150,23 @@ class DictFieldTestCase(SimpleTestCase):
 
     def test_direct_mapping_data_wins_over_files_and_flat_input(self):
         """It gives a direct data mapping the documented precedence."""
-        widget = nestingdolls.MappingWidget(PointForm)
 
-        self.assertEqual(
-            widget._value_from_normalized_data(
-                {"point": {"a": "1"}, "point-a": "2"},
-                {"point": {"a": "3"}},
-                "point",
-            ),
-            {"a": "1"},
+        class ChildForm(forms.Form):
+            a = forms.IntegerField()
+            upload = forms.FileField(required=False)
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(ChildForm)
+
+        upload = SimpleUploadedFile("direct.txt", b"direct")
+        form = Form(
+            data={"point": {"a": "1"}, "point-a": "2"},
+            files={"point[upload]": upload},
         )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["point"]["a"], 1)
+        self.assertIs(form.cleaned_data["point"]["upload"], upload)
 
     def test_invalid_mapping_shapes_stay_in_djangos_bound_data_channel(self):
         """It redisplays hostile submitted data and disabled hostile initials."""
@@ -212,19 +184,26 @@ class DictFieldTestCase(SimpleTestCase):
         class Form(forms.Form):
             point = nestingdolls.MappingField(PointForm)
 
-        for style in MAPPING_STYLES:
+        cases = {
+            "direct": {"point": {"a": "2", "label": "east"}},
+            "dash": {"point-a": "2", "point-label": "east"},
+            "dot": {"point.a": "2", "point.label": "east"},
+            "bracket": {"point[a]": "2", "point[label]": "east"},
+        }
+
+        for style, data in cases.items():
             with self.subTest(style=style):
-                form = Form(mapping_data("point", {"a": "2", "label": "east"}, style))
+                form = Form(data)
                 self.assertTrue(form.is_valid(), form.errors)
                 self.assertEqual(form.cleaned_data["point"], {"a": 2, "label": "east"})
 
     def test_widget_returns_a_mapping_instead_of_an_internal_transport(self):
         """Widget extraction exposes the field's normal mapping shape."""
-        field = nestingdolls.MappingField(PointForm)
 
-        value = field.widget.value_from_datadict(
-            {"point-a": "2", "point-label": "east"}, {}, "point"
-        )
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm, required=False)
+
+        value = Form({"point-a": "2", "point-label": "east"})["point"].value()
 
         self.assertEqual(value, {"a": "2", "label": "east"})
         self.assertIsInstance(value, dict)
@@ -357,9 +336,13 @@ class DictFieldTestCase(SimpleTestCase):
                 cleaned_data["double"] = cleaned_data["a"] * 2
                 return cleaned_data
 
-        field = nestingdolls.MappingField(ChildForm)
+        class Form(forms.Form):
+            value = nestingdolls.MappingField(ChildForm)
 
-        self.assertEqual(field.clean({"a": "2"}), {"a": 3, "double": 6})
+        form = Form({"value-a": "2"})
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["value"], {"a": 3, "double": 6})
 
     def test_non_field_errors_keep_the_leaf_code(self):
         """Child Form errors remain structured without a path summary."""
@@ -514,10 +497,21 @@ class DictFieldTestCase(SimpleTestCase):
 
     def test_has_changed_uses_child_field_semantics(self):
         """Equivalent raw and Python child values are unchanged."""
-        field = nestingdolls.MappingField(PointForm, required=False)
 
-        self.assertFalse(field.has_changed({"a": 2, "label": ""}, {"a": "2"}))
-        self.assertTrue(field.has_changed({"a": 2, "label": ""}, {"a": "3"}))
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm, required=False)
+
+        unchanged = Form(
+            {"point": {"a": "2"}},
+            initial={"point": {"a": 2, "label": ""}},
+        )
+        changed = Form(
+            {"point": {"a": "3"}},
+            initial={"point": {"a": 2, "label": ""}},
+        )
+
+        self.assertFalse(unchanged.has_changed())
+        self.assertTrue(changed.has_changed())
 
     def test_has_changed_always_consults_file_children(self):
         """A submitted upload remains a change even when it is also the initial object."""
@@ -525,10 +519,17 @@ class DictFieldTestCase(SimpleTestCase):
         class ChildForm(forms.Form):
             upload = forms.FileField(required=False)
 
-        upload = SimpleUploadedFile("same.txt", b"same")
-        field = nestingdolls.MappingField(ChildForm, required=False)
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(ChildForm, required=False)
 
-        self.assertTrue(field.has_changed({"upload": upload}, {"upload": upload}))
+        upload = SimpleUploadedFile("same.txt", b"same")
+        form = Form(
+            data={},
+            files={"point[upload]": upload},
+            initial={"point": {"upload": upload}},
+        )
+
+        self.assertTrue(form.has_changed())
 
     def test_rejects_wrong_form_widget_and_bound_field_types(self):
         """Constructor extension points require compatible Django types."""
@@ -829,7 +830,6 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
         field = nestingdolls.MappingField(ChildForm)
 
         cleaned = field.clean({"happened_at": ["2026-08-01", "10:30:00"]})
-
         self.assertEqual(
             cleaned["happened_at"].replace(tzinfo=None).isoformat(),
             "2026-08-01T10:30:00",
@@ -1133,7 +1133,15 @@ class DictFieldPropertyTestCase(SimpleTestCase):
 
         outcomes = [
             self._form_outcome(
-                Form(mapping_data("point", {"a": value}, style)), "point"
+                Form(
+                    {
+                        "direct": {"point": {"a": value}},
+                        "dash": {"point-a": value},
+                        "dot": {"point.a": value},
+                        "bracket": {"point[a]": value},
+                    }[style]
+                ),
+                "point",
             )
             for style in MAPPING_STYLES
         ]
@@ -1154,7 +1162,14 @@ class DictFieldPropertyTestCase(SimpleTestCase):
         for style in MAPPING_STYLES:
             outcomes.append(
                 self._form_outcome(
-                    Form(mapping_data("value", {"payload": json.dumps(value)}, style)),
+                    Form(
+                        {
+                            "direct": {"value": {"payload": json.dumps(value)}},
+                            "dash": {"value-payload": json.dumps(value)},
+                            "dot": {"value.payload": json.dumps(value)},
+                            "bracket": {"value[payload]": json.dumps(value)},
+                        }[style]
+                    ),
                     "value",
                 )
             )
@@ -1179,10 +1194,19 @@ class DictFieldPropertyTestCase(SimpleTestCase):
         class Form(forms.Form):
             payload = nestingdolls.MappingField(ChildForm)
 
-        data = {
-            mixed_path("payload", ("rows", index, "point", "a"), styles): str(value)
-            for index, value in enumerate(values)
-        }
+        data = {}
+        for index, value in enumerate(values):
+            key = "payload"
+            for segment, style in zip(
+                ("rows", index, "point", "a"), styles, strict=True
+            ):
+                if style == "dash":
+                    key = f"{key}-{segment}"
+                elif style == "dot":
+                    key = f"{key}.{segment}"
+                else:
+                    key = f"{key}[{segment}]"
+            data[key] = str(value)
         form = Form(data)
 
         self.assertTrue(form.is_valid(), (styles, form.errors))
@@ -1227,9 +1251,13 @@ class DictFieldPropertyTestCase(SimpleTestCase):
         class Form(forms.Form):
             filters = nestingdolls.MappingField(ChildForm)
 
-        key = nested_path("filters", ("choices",), style)
         data = QueryDict("", mutable=True)
-        data.setlist(key, values)
+        if style == "dash":
+            data.setlist("filters-choices", values)
+        elif style == "dot":
+            data.setlist("filters.choices", values)
+        else:
+            data.setlist("filters[choices]", values)
         form = Form(data)
 
         self.assertTrue(form.is_valid(), (style, form.errors))
