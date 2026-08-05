@@ -467,6 +467,21 @@ class DictFieldTestCase(SimpleTestCase):
         self.assertEqual(form.cleaned_data["point"], {})
         self.assertTrue(form.has_changed())
 
+    def test_as_hidden_uses_child_hidden_widgets(self):
+        """A hidden mapping renders every child through its hidden widget."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm)
+
+        form = Form(initial={"point": {"a": 8, "label": "saved"}})
+
+        html = form["point"].as_hidden()
+
+        self.assertIn('type="hidden" name="point-a" value="8"', html)
+        self.assertIn('type="hidden" name="point-label" value="saved"', html)
+        self.assertNotIn('type="number"', html)
+        self.assertNotIn('type="text"', html)
+
     def test_show_hidden_initial_uses_child_hidden_widgets(self):
         """Django can compare hidden mapping initial values by child name."""
 

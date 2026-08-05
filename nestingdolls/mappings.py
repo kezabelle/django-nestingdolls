@@ -182,7 +182,11 @@ class MappingWidget(CompositeWidget):
                 "template_name": f"django/forms/widgets/mapping/{layout.value}.html",
                 "subform": value,
                 "visible_fields": value.visible_fields(),
-                "hidden_fields": value.hidden_fields(),
+                "hidden_fields": (
+                    [field.as_hidden() for field in value]
+                    if self.is_hidden
+                    else value.hidden_fields()
+                ),
                 "non_field_errors": value.non_field_errors(),
             }
         )
@@ -313,9 +317,6 @@ class MappingBoundField(BoundField):
         if self.field.disabled:
             for field in subform.fields.values():
                 field.disabled = True
-        if self.field.show_hidden_initial:
-            for field in subform.fields.values():
-                field.show_hidden_initial = True
         return subform
 
     def as_widget(
