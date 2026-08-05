@@ -202,9 +202,7 @@ class MappingWidget(CompositeWidget):
     @property
     def needs_multipart_form(self) -> bool:  # type: ignore[override]
         """Report whether any child widget accepts files."""
-        return any(
-            field.widget.needs_multipart_form for field in self.fields.values()
-        )
+        return any(field.widget.needs_multipart_form for field in self.fields.values())
 
     @property
     def media(self) -> WidgetMedia:

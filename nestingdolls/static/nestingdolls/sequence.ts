@@ -51,7 +51,13 @@
       root,
       "[data-sequence-remove-button]",
     );
-    row.append(template.content.cloneNode(true));
+    const fragment = template.content.cloneNode(true) as DocumentFragment;
+    const index = parseRequiredInteger(
+      row.dataset.sequenceIndex,
+      "data-sequence-index",
+    );
+    replacePrefixAttributes(fragment, index);
+    row.append(fragment);
   }
 
   function ensureAddButton(root: HTMLElement): HTMLButtonElement {
@@ -145,10 +151,7 @@
       root,
       "[data-sequence-empty-row]",
     );
-    const fragment = template.content.cloneNode(true);
-    if (!(fragment instanceof DocumentFragment)) {
-      throw new Error("Expected empty-row template to clone as a document fragment");
-    }
+    const fragment = template.content.cloneNode(true) as DocumentFragment;
     replacePrefixAttributes(fragment, index);
     const row = queryRequiredElement<HTMLElement>(fragment, "[data-sequence-row]");
     row.dataset.sequenceIndex = String(index);

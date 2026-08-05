@@ -2677,7 +2677,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         )
         self.assertIn("data-sequence-remove-button", html)
         self.assertInHTML(
-            '<button type="button" data-sequence-remove data-sequence-field="values" id="id_values_remove">Remove</button>',
+            '<button type="button" data-sequence-remove data-sequence-field="values" id="id_values___prefix___remove">Remove</button>',
             html,
         )
         self.assertIn("nestingdolls/sequence.js", str(form.media))

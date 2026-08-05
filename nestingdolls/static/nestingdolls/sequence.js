@@ -33,7 +33,10 @@
             return;
         }
         const template = queryRequiredElement(root, "[data-sequence-remove-button]");
-        row.append(template.content.cloneNode(true));
+        const fragment = template.content.cloneNode(true);
+        const index = parseRequiredInteger(row.dataset.sequenceIndex, "data-sequence-index");
+        replacePrefixAttributes(fragment, index);
+        row.append(fragment);
     }
     function ensureAddButton(root) {
         const existing = root.querySelector("[data-sequence-add]");
@@ -87,9 +90,6 @@
         }
         const template = queryRequiredElement(root, "[data-sequence-empty-row]");
         const fragment = template.content.cloneNode(true);
-        if (!(fragment instanceof DocumentFragment)) {
-            throw new Error("Expected empty-row template to clone as a document fragment");
-        }
         replacePrefixAttributes(fragment, index);
         const row = queryRequiredElement(fragment, "[data-sequence-row]");
         row.dataset.sequenceIndex = String(index);

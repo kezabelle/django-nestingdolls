@@ -4,7 +4,7 @@
     type="button"
     data-sequence-remove
     data-sequence-field="{{ widget.name }}"
-    {% if widget.attrs.id %}id="{{ widget.attrs.id }}_remove"{% endif %}
+    {% if widget.attrs.id %}id="{{ widget.attrs.id }}___prefix___remove"{% endif %}
     {% if widget.disabled %} disabled{% endif %}
   >{% translate "Remove" %}</button>
 </template>
