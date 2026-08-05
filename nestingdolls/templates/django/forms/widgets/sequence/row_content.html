@@ -9,5 +9,5 @@
 >
 {% include row.subwidget.template_name with widget=row.subwidget only %}
 {% if row.errors %}
-  <ul class="errorlist">{% for error in row.errors %}<li>{{ error }}</li>{% endfor %}</ul>
+  <ul class="errorlist"{% if row.error_id %} id="{{ row.error_id }}"{% endif %}>{% for error in row.errors %}<li>{{ error }}</li>{% endfor %}</ul>
 {% endif %}

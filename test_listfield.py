@@ -401,7 +401,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         html = form.as_p()
         self.assertEqual(html.count('aria-invalid="true"'), 2)
         self.assertInHTML(
-            '<input type="number" name="values-1" value="bad" id="id_values_1" aria-invalid="true">',
+            '<input type="number" name="values-1" value="bad" id="id_values_1" aria-invalid="true" aria-describedby="id_values_1_error">',
             html,
         )
         self.assertInHTML("<li>Enter a whole number.</li>", html)
@@ -2717,6 +2717,81 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         self.assertIn('data-widget="sequence"', p_html)
         self.assertIn("<span", p_html)
         self.assertIn("<ul", ul_html)
+
+    def test_row_error_is_described_by_child_widget(self):
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.IntegerField(
+                    widget=forms.NumberInput(
+                        attrs={"aria-describedby": "existing-description"}
+                    )
+                )
+            )
+
+        form = Form(
+            {"values-0": "bad", "values-TOTAL_FORMS": "1", "values-INITIAL_FORMS": "0"}
+        )
+
+        self.assertFalse(form.is_valid())
+        html = form.as_div()
+        self.assertInHTML(
+            '<input type="number" name="values-0" value="bad" aria-describedby="existing-description id_values_0_error" aria-invalid="true" id="id_values_0">',
+            html,
+        )
+        self.assertInHTML(
+            '<ul class="errorlist" id="id_values_0_error"><li>Enter a whole number.</li></ul>',
+            html,
+        )
+
+    def test_row_error_without_auto_id_has_no_error_reference(self):
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.IntegerField(
+                    widget=forms.NumberInput(
+                        attrs={"aria-describedby": "existing-description"}
+                    )
+                )
+            )
+
+        form = Form(
+            {"values-0": "bad", "values-TOTAL_FORMS": "1", "values-INITIAL_FORMS": "0"},
+            auto_id=False,
+        )
+
+        self.assertFalse(form.is_valid())
+        html = form.as_div()
+        self.assertInHTML(
+            '<input type="number" name="values-0" value="bad" aria-describedby="existing-description" aria-invalid="true">',
+            html,
+        )
+        self.assertInHTML(
+            '<ul class="errorlist"><li>Enter a whole number.</li></ul>',
+            html,
+        )
+
+    def test_compound_row_error_describes_every_subwidget(self):
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.SplitDateTimeField())
+
+        form = Form(
+            {
+                "values-0_0": "2026-08-05",
+                "values-0_1": "not-a-time",
+                "values-TOTAL_FORMS": "1",
+                "values-INITIAL_FORMS": "0",
+            }
+        )
+
+        self.assertFalse(form.is_valid())
+        html = form.as_div()
+        self.assertInHTML(
+            '<input type="text" name="values-0_0" value="2026-08-05" aria-invalid="true" aria-describedby="id_values_0_error" id="id_values_0_0">',
+            html,
+        )
+        self.assertInHTML(
+            '<input type="text" name="values-0_1" value="not-a-time" aria-invalid="true" aria-describedby="id_values_0_error" id="id_values_0_1">',
+            html,
+        )
 
     def test_invalid_widget_render_uses_active_helper_layout(self):
         class Form(forms.Form):

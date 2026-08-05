@@ -113,13 +113,37 @@ class SequenceBoundField(BoundField):
             attrs.setdefault("id", self.auto_id)
 
         context = widget.get_context(self.html_name, self.value(), attrs)
+
+        # A simple widget stores its HTML attributes in this context. A MultiWidget
+        # also creates one child context for each rendered input. Changes to the
+        # parent context do not update those child contexts. Walk the complete tree
+        # so every rendered input is invalid and refers to the same row error. Keep
+        # existing descriptions, and add no error reference when Django has no ID.
+        def set_error_attributes(
+            widget_context: dict[str, Any], error_id: str | None
+        ) -> None:
+            child_attrs = widget_context["attrs"]
+            child_attrs["aria-invalid"] = "true"
+            if error_id:
+                described_by = child_attrs.get("aria-describedby")
+                child_attrs["aria-describedby"] = (
+                    f"{described_by} {error_id}" if described_by else error_id
+                )
+            for child_context in widget_context.get("subwidgets", []):
+                set_error_attributes(child_context, error_id)
+
         rows = []
         for row in context["widget"]["rows"]:
             if row["index"] in deleted_indexes:
                 continue
             row["errors"] = item_errors[row["index"]]
             if row["errors"]:
-                row["subwidget"]["attrs"]["aria-invalid"] = "true"
+                subwidget = row["subwidget"]
+                child_id = subwidget["attrs"].get("id")
+                error_id = f"{child_id}_error" if child_id else None
+                if error_id:
+                    row["error_id"] = error_id
+                set_error_attributes(subwidget, error_id)
             rows.append(row)
         context["widget"]["rows"] = rows
         if deleted_indexes:
