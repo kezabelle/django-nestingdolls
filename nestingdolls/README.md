@@ -138,6 +138,13 @@ the error.
 The optional helper-aware rendering patch only changes package-owned wrapper
 markup. It does not rewrite Django child widgets or third-party child widgets.
 
+### Form renderer scope
+
+The app does not currently supply or support Django's Jinja2 form renderer. 
+It only supports normal Django Template Language via `DjangoTemplates` or
+`TemplatesSetting` when that renderer loads the templates through
+a DTL backend.
+
 ### Empty values
 
 Set `required=False` to permit an empty value. `DictField` then returns `{}`.
