@@ -1,6 +1,5 @@
 {% spaceless %}
 <span
-  class=""
   data-widget="sequence"
   data-sequence-field="{{ widget.name }}"
   data-sequence-maximum="{{ widget.maximum_forms }}"
@@ -16,13 +15,13 @@
     {% if widget.attrs.id %}id="{{ widget.attrs.id }}_rows"{% endif %}
   >
     {% for row in widget.rows %}
-      {% include "django/forms/widgets/sequence/row.html" with row=row widget_name=widget.name row_tag="span" body_tag="" widget_id=widget.attrs.id delete_disabled=widget.disabled inline_errors=True only %}
+      {% include "django/forms/widgets/sequence/row.html" with row=row widget_name=widget.name row_tag="span" body_tag="" widget_id=widget.attrs.id delete_disabled=widget.disabled only %}
       {% if not forloop.last %}<br>{% endif %}
     {% endfor %}
   </span>
   {% include "django/forms/widgets/sequence/deleted_rows.html" with deleted_rows=widget.deleted_rows widget_name=widget.name disabled=widget.disabled only %}
   <template data-sequence-empty-row data-sequence-field="{{ widget.name }}">
-    {% include "django/forms/widgets/sequence/row.html" with row=widget.empty_row widget_name=widget.name row_tag="span" body_tag="" widget_id=widget.attrs.id delete_disabled=False inline_errors=True only %}
+    {% include "django/forms/widgets/sequence/row.html" with row=widget.empty_row widget_name=widget.name row_tag="span" body_tag="" widget_id=widget.attrs.id delete_disabled=False only %}
   </template>
   {% include "django/forms/widgets/sequence/actions.html" with widget=widget only %}
 </span>
