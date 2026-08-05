@@ -106,22 +106,6 @@ elements until JavaScript starts.
 The widget includes its JavaScript in Django form media. Render `form.media`
 when you want the add and remove controls.
 
-### Optional helper-aware rendering patch
-
-`ListField` and `DictField` work without this patch.
-
-This patch exists because Django does not tell a widget which helper method
-rendered the parent form. If the parent form uses `as_p()`, `as_table()`,
-`as_ul()`, or `as_div()`, the widget does not know that by default.
-
-Without the patch, each composite widget uses its default inner layout.
-
-With the patch, each composite widget can detect the active Django helper and
-choose a matching inner template.
-
-Use this patch when you want the composite field's own wrapper markup to follow
-the parent helper more closely.
-
 ### Safety notes
 
 `ListField` uses the same row count pattern that Django formsets use.
@@ -230,3 +214,25 @@ Django already provides.
 The fields still respect Django request and upload limits such as
 `DATA_UPLOAD_MAX_MEMORY_SIZE`, `DATA_UPLOAD_MAX_NUMBER_FIELDS`,
 `DATA_UPLOAD_MAX_NUMBER_FILES`, and `FILE_UPLOAD_MAX_MEMORY_SIZE`.
+
+
+## Optional helper-aware rendering patch
+
+Optional but recommended. Add `"nestingdolls"` to `INSTALLED_APPS` to enable it:
+
+```python
+INSTALLED_APPS = [
+    # ...
+    "nestingdolls",
+]
+```
+If `"nestingdolls"` is not in `INSTALLED_APPS`, the package does not patch
+`BaseForm.render`. `ListField` and `DictField` can work without the patch, but
+each composite widget then uses its default inner layout.
+
+The patch y records which standard helper renders the form. Composite widgets 
+use that to select their inner layout.
+
+This patch is included because Django does not tell a widget which helper method
+rendered the parent form. If the parent form uses `as_p()`, `as_table()`,
+`as_ul()`, or `as_div()`, the widget does not know that by default.

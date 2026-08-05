@@ -967,10 +967,10 @@ class SequenceWidget(CompositeWidget):
         if self.is_localized:
             self.child_field.widget.is_localized = True
 
-        values = [] if value is None else list(value)
-        initial_forms = len(values)
-        if not values:
-            values = [None] * min(
+        value = [] if value is None else list(value)
+        initial_forms = len(value)
+        if not value:
+            value = [None] * min(
                 max(self.min_length, int(self.is_required)), self.max_length
             )
         final_attrs = context["widget"]["attrs"]
@@ -997,7 +997,7 @@ class SequenceWidget(CompositeWidget):
         management_form = ManagementForm(
             prefix=name,
             initial={
-                TOTAL_FORM_COUNT: len(values),
+                TOTAL_FORM_COUNT: len(value),
                 INITIAL_FORM_COUNT: initial_forms,
                 MIN_NUM_FORM_COUNT: self.min_length,
                 MAX_NUM_FORM_COUNT: self.max_length,
@@ -1009,7 +1009,7 @@ class SequenceWidget(CompositeWidget):
         if disabled:
             for management_field in management_form.fields.values():
                 management_field.widget.attrs["disabled"] = True
-        rows = [make_row(index, item) for index, item in enumerate(values)]
+        rows = [make_row(index, item) for index, item in enumerate(value)]
 
         context["widget"].update(
             {
