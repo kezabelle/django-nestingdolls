@@ -717,6 +717,22 @@ class DictFieldRenderingTestCase(SimpleTestCase):
         self.assertEqual(rendered.count("This field is required."), 1)
         self.assertIn('aria-invalid="true"', rendered)
 
+    def test_paragraph_child_error_has_described_by_target(self):
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm)
+
+        form = Form({"point-label": "missing a"})
+
+        self.assertFalse(form.is_valid())
+        html = form.as_p()
+        self.assertIn('aria-describedby="id_point-a_error"', html)
+        self.assertInHTML(
+            '<span class="errorlist" id="id_point-a_error">'
+            "This field is required."
+            "</span>",
+            html,
+        )
+
     def test_widget_renders_in_each_standard_form_layout(self):
         """The child Form renders without inspecting the parent render call."""
 

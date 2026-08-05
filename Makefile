@@ -30,7 +30,7 @@ mypy: ## Run mypy with strict checks.
 	$(MYPY) demo.py nestingdolls/__init__.py nestingdolls/errors.py nestingdolls/mappings.py nestingdolls/sequences.py
 
 test: ## Run the Django test files.
-	$(PYTHON) -m unittest test_listfield test_dictfield
+	$(PYTHON) -W error::DeprecationWarning -W error::PendingDeprecationWarning -m unittest test_listfield test_dictfield
 
 agents: ## Update the generated field method reference in nestingdolls/AGENTS.md.
 	$(PYTHON) scripts/update_package_agents.py
