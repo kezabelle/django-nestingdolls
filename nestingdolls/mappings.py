@@ -183,11 +183,6 @@ class MappingWidget(CompositeWidget):
                 "subform": value,
                 "visible_fields": value.visible_fields(),
                 "hidden_fields": value.hidden_fields(),
-                "initial_hidden_fields": [
-                    field.as_hidden(only_initial=True)
-                    for field in value
-                    if field.field.show_hidden_initial
-                ],
                 "non_field_errors": value.non_field_errors(),
             }
         )

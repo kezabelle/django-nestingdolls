@@ -17,7 +17,6 @@
     {% include "django/forms/widgets/shared/help_text.html" with field=field tag="span" only %}
     {% if not forloop.last %}<br>{% endif %}
   {% endfor %}
-  {% include "django/forms/widgets/mapping/initial_hidden_fields.html" with initial_hidden_fields=widget.initial_hidden_fields only %}
 </span>
 {% endif %}
 {% endspaceless %}

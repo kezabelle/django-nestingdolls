@@ -668,6 +668,19 @@ class DictFieldRenderingTestCase(SimpleTestCase):
                 self.assertIn('name="point-a"', html)
                 self.assertIn('name="point-label"', html)
 
+    def test_widget_renders_without_duplicating_hidden_initial(self):
+        """The child Form renders without duplicate output when using show_hidden_initial."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm, show_hidden_initial=True)
+
+        form = Form(initial={"point": {"a": 9, "label": "layout"}})
+
+        for renderer in (form.as_div, form.as_p, form.as_table, form.as_ul):
+            with self.subTest(renderer=renderer.__name__):
+                html = renderer()
+                self.assertEqual(html.count('name="initial-point-a"'), 1)
+
     def test_widget_uses_helper_specific_wrapper_markup(self):
         class Form(forms.Form):
             point = nestingdolls.MappingField(PointForm)
@@ -966,9 +979,7 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
             payload = nestingdolls.MappingField(ChildForm)
 
         initial_upload = SimpleUploadedFile("old.txt", b"old")
-        form = Form(
-            {}, initial={"payload": {"asset": {"upload": initial_upload}}}
-        )
+        form = Form({}, initial={"payload": {"asset": {"upload": initial_upload}}})
 
         self.assertTrue(form.is_valid(), form.errors)
         self.assertIs(form.cleaned_data["payload"]["asset"]["upload"], initial_upload)
