@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import wraps
 from typing import Any, cast
 
 from django.forms import BaseForm
@@ -17,6 +18,7 @@ def install_form_rendering_patch() -> None:
     original_render = cast(RenderMethod, BaseForm.render)
     BaseForm.nestingdolls_original_render = original_render
 
+    @wraps(original_render)
     def render_with_form_layout(
         self: BaseForm,
         template_name: str | None = None,
