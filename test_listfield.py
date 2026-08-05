@@ -2698,6 +2698,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             p_html = form.as_p()
 
         self.assertIn('data-widget="sequence"', div_html)
+        self.assertIn('<table role="presentation">', table_html)
         self.assertIn("<tbody", table_html)
         self.assertIn("<ul", ul_html)
         self.assertIn('data-widget="sequence"', p_html)

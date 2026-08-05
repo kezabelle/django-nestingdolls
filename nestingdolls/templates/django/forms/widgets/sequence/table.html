@@ -9,7 +9,7 @@
   {% for management_field in widget.management_form.hidden_fields %}
     {{ management_field }}
   {% endfor %}
-  <table>
+  <table role="presentation">
     <tbody
       data-sequence-rows
       data-sequence-field="{{ widget.name }}"

@@ -7,7 +7,7 @@
   data-mapping-field="{{ widget.name }}"
   {% if widget.attrs.id %}id="{{ widget.attrs.id }}_widget"{% endif %}
 >
-  <table>
+  <table role="presentation">
     <tbody>
       {{ widget.subform.as_table }}
     </tbody>

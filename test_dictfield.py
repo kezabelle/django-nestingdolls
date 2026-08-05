@@ -760,7 +760,7 @@ class DictFieldRenderingTestCase(SimpleTestCase):
             p_html = form.as_p()
 
         self.assertIn('data-widget="mapping"', div_html)
-        self.assertIn("<table>", table_html)
+        self.assertIn('<table role="presentation">', table_html)
         self.assertIn("<ul>", ul_html)
         self.assertIn('data-widget="mapping"', p_html)
         self.assertIn("<span", p_html)
@@ -775,7 +775,7 @@ class DictFieldRenderingTestCase(SimpleTestCase):
         p_html = form.as_p()
         ul_html = form.as_ul()
 
-        self.assertIn("<table>", table_html)
+        self.assertIn('<table role="presentation">', table_html)
         self.assertIn('data-widget="mapping"', p_html)
         self.assertIn("<span", p_html)
         self.assertIn("<ul>", ul_html)
