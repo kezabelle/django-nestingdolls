@@ -251,6 +251,54 @@ class DictFieldTestCase(SimpleTestCase):
         self.assertTrue(form.is_valid(), form.errors)
         self.assertEqual(form.cleaned_data["point"], {"a": 4, "label": ""})
 
+    def test_dynamic_child_fields_use_instantiated_form_fields(self):
+        """Rendering and cleaning use fields added by the child Form instance."""
+
+        class DynamicForm(forms.Form):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.fields["number"] = forms.IntegerField()
+                self.fields["upload"] = forms.FileField(required=False)
+                self.fields["nested"] = nestingdolls.MappingField(PointForm)
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(DynamicForm)
+
+        unbound = Form(
+            initial={
+                "point": {
+                    "number": 3,
+                    "nested": {"a": 4, "label": "inside"},
+                }
+            }
+        )
+        html = unbound.as_div()
+        self.assertIn('type="number" name="point-number"', html)
+        self.assertIn('type="file" name="point-upload"', html)
+        self.assertIn('name="point-nested-a"', html)
+        self.assertFalse(unbound["point"].field.widget.is_hidden)
+        self.assertTrue(unbound["point"].field.widget.needs_multipart_form)
+
+        upload = SimpleUploadedFile("dynamic.txt", b"dynamic")
+        bound = Form(
+            data={
+                "point": {
+                    "number": "5",
+                    "nested": {"a": "6", "label": "submitted"},
+                }
+            },
+            files={"point": {"upload": upload}},
+        )
+        self.assertTrue(bound.is_valid(), bound.errors)
+        self.assertEqual(
+            bound.cleaned_data["point"],
+            {
+                "number": 5,
+                "upload": upload,
+                "nested": {"a": 6, "label": "submitted"},
+            },
+        )
+
     def test_direct_mapping_ignores_undeclared_keys(self):
         """A direct mapping only binds declared child fields."""
 

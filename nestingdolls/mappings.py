@@ -56,9 +56,9 @@ class MappingWidget(CompositeWidget):
         self.form_class = form_class
         super().__init__(dict(attrs) if attrs is not None else None)
 
-    @property
-    def base_fields(self) -> dict[str, Field]:
-        return cast(dict[str, Field], self.form_class.base_fields)  # type: ignore[attr-defined]
+    @cached_property
+    def fields(self) -> dict[str, Field]:
+        return self.form_class().fields
 
     def _normalize_mapping(
         self, data: Mapping[str, object], name: str
@@ -93,7 +93,7 @@ class MappingWidget(CompositeWidget):
             value = data.get(name)
             if not isinstance(value, Mapping):
                 return {name: value}
-            child_names = self.base_fields
+            child_names = self.fields
             if isinstance(value, MultiValueDict):
                 # Keep repeated child values for widgets that read all values.
                 normalized = MultiValueDict[str, object]()
@@ -145,7 +145,7 @@ class MappingWidget(CompositeWidget):
             child_name: field.widget.value_from_datadict(
                 data, files, f"{name}-{child_name}"
             )
-            for child_name, field in self.base_fields.items()
+            for child_name, field in self.fields.items()
             if not field.widget.value_omitted_from_data(
                 data, files, f"{name}-{child_name}"
             )
@@ -196,14 +196,14 @@ class MappingWidget(CompositeWidget):
     def is_hidden(self) -> bool:
         """Report whether the mapping or every child widget is hidden."""
         return self.input_type == "hidden" or all(
-            field.widget.is_hidden for field in self.base_fields.values()
+            field.widget.is_hidden for field in self.fields.values()
         )
 
     @property
     def needs_multipart_form(self) -> bool:  # type: ignore[override]
         """Report whether any child widget accepts files."""
         return any(
-            field.widget.needs_multipart_form for field in self.base_fields.values()
+            field.widget.needs_multipart_form for field in self.fields.values()
         )
 
     @property
