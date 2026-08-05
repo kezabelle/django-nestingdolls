@@ -127,6 +127,9 @@ class SequenceBoundField(BoundField):
                 {"delete_name": f"{self.html_name}-{index}-{DELETION_FIELD_NAME}"}
                 for index in sorted(deleted_indexes)
             ]
+
+        # Widget.render() builds a new context and would lose the row changes above.
+        # Django has no public API for a prepared widget context, so use _render().
         return widget._render(  # type: ignore[attr-defined, no-any-return]
             f"django/forms/widgets/sequence/{FormLayout.current().value}.html",
             context,
