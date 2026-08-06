@@ -407,6 +407,32 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertNotInHTML("<li>Item 1: Enter a whole number.</li>", html)
         self.assertNotInHTML("<li>Item 2: Enter a whole number.</li>", html)
 
+    def test_invalid_added_row_keeps_initial_count(self):
+        """It keeps the initial count when an added row is invalid."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), max_length=1)
+
+        form = Form(
+            QueryDict(
+                f"values-{TOTAL_FORM_COUNT}=2&"
+                f"values-{INITIAL_FORM_COUNT}=1&"
+                "values-0=1&values-1=2"
+            ),
+            initial={"values": [1]},
+        )
+
+        self.assertFalse(form.is_valid())
+        html = form.as_p()
+        self.assertInHTML(
+            '<input type="hidden" name="values-TOTAL_FORMS" value="2" data-sequence-total id="id_values-TOTAL_FORMS">',
+            html,
+        )
+        self.assertInHTML(
+            '<input type="hidden" name="values-INITIAL_FORMS" value="1" id="id_values-INITIAL_FORMS">',
+            html,
+        )
+
     def test_item_errors_do_not_promote_to_field_errors(self):
         """It keeps child validation errors out of the field-level error list."""
 

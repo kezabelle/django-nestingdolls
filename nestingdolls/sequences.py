@@ -99,12 +99,16 @@ class SequenceBoundField(BoundField):
         widget = widget or self.field.widget
         if only_initial or not isinstance(widget, SequenceWidget):
             return super().as_widget(widget, attrs, only_initial)
+        errors = super().errors
         item_errors: dict[int, list[object]] = defaultdict(list)
-        for error in super().errors.as_data():
+        for error in errors.as_data():
             if isinstance(error, ItemValidationError) and isinstance(error.item, int):
                 item_errors[error.item].extend([error.message])
         deleted_indexes = self._deleted_indexes
-        if not deleted_indexes and not item_errors:
+        management_form = self._management_form if errors else None
+        if management_form is not None and not management_form.is_valid():
+            management_form = None
+        if not deleted_indexes and not item_errors and management_form is None:
             return super().as_widget(widget, attrs, only_initial)
 
         if self.field.localize:
@@ -114,6 +118,10 @@ class SequenceBoundField(BoundField):
             attrs.setdefault("id", self.auto_id)
 
         context = widget.get_context(self.html_name, self.value(), attrs)
+        if management_form is not None:
+            context["widget"]["management_form"].initial[INITIAL_FORM_COUNT] = (
+                management_form.cleaned_data[INITIAL_FORM_COUNT]
+            )
 
         # A simple widget stores its HTML attributes in this context. A MultiWidget
         # also creates one child context for each rendered input. Changes to the
