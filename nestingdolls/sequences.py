@@ -4,6 +4,7 @@ import copy
 from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import datetime, time
+from itertools import islice
 from typing import Any, Self, cast
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
@@ -208,7 +209,7 @@ class SequenceBoundField(BoundField):
             if normalized_value is not None:
                 value = normalized_value
         try:
-            value = self.field._initial_values(value)
+            value = self.field._initial_values(value, limit=self.field.absolute_max)
         except InvalidInitialValueError:
             value = [value]
         if not self.field.child_field.widget.supports_microseconds:
@@ -408,7 +409,7 @@ class SequenceField(Field):
         return result
 
     @staticmethod
-    def _initial_values(value: object) -> list[object]:
+    def _initial_values(value: object, *, limit: int | None = None) -> list[object]:
         """Normalize supported initial collections into a list."""
         if value is None or value == "":
             return []
@@ -417,6 +418,8 @@ class SequenceField(Field):
             and not isinstance(value, Mapping)
             and not isinstance(value, (str, bytes, bytearray))
         ):
+            if limit is not None:
+                return list(islice(value, limit))
             return list(value)
         raise InvalidInitialValueError("initial must be a collection of values")
 
@@ -594,7 +597,7 @@ class SequenceField(Field):
     def prepare_value(self, value: object) -> list[object]:
         """Prepare each row for widget rendering."""
         values = []
-        for row in self._initial_values(value):
+        for row in self._initial_values(value, limit=self.absolute_max):
             try:
                 row = self.child_field.prepare_value(row)
             except (InvalidInitialValueError, ValidationError):
@@ -967,7 +970,7 @@ class SequenceWidget(CompositeWidget):
         if self.is_localized:
             self.child_field.widget.is_localized = True
 
-        value = [] if value is None else list(value)
+        value = [] if value is None else list(islice(value, self.absolute_max))
         initial_forms = len(value)
         if not value:
             value = [None] * min(

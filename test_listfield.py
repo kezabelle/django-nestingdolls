@@ -2821,6 +2821,59 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             html,
         )
 
+    def test_widget_bounds_callable_initial_before_materializing_it(self):
+        """It reads at most absolute_max items from a callable initial."""
+
+        class GuardedInitial(list[int]):
+            def __iter__(self):
+                for index, value in enumerate(super().__iter__()):
+                    if index == 2:
+                        raise AssertionError("read beyond absolute_max")
+                    yield value
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.IntegerField(),
+                max_length=2,
+                absolute_max=2,
+                initial=lambda: GuardedInitial([1, 2, 3]),
+            )
+
+        html = Form().as_p()
+
+        self.assertIn('name="values-0"', html)
+        self.assertIn('name="values-1"', html)
+        self.assertNotIn('name="values-2"', html)
+        self.assertIn('name="values-TOTAL_FORMS" value="2"', html)
+        self.assertIn('name="values-INITIAL_FORMS" value="2"', html)
+
+    def test_nested_widget_bounds_runtime_initial_before_materializing_it(self):
+        """It applies the same read bound to a nested runtime initial."""
+
+        class GuardedInitial(list[int]):
+            def __iter__(self):
+                for index, value in enumerate(super().__iter__()):
+                    if index == 2:
+                        raise AssertionError("read beyond absolute_max")
+                    yield value
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.ListField(
+                    forms.IntegerField(), max_length=2, absolute_max=2
+                ),
+                max_length=1,
+                absolute_max=1,
+            )
+
+        html = Form(initial={"values": [GuardedInitial([1, 2, 3])]}).as_p()
+
+        self.assertIn('name="values-0-0"', html)
+        self.assertIn('name="values-0-1"', html)
+        self.assertNotIn('name="values-0-2"', html)
+        self.assertIn('name="values-0-TOTAL_FORMS" value="2"', html)
+        self.assertIn('name="values-0-INITIAL_FORMS" value="2"', html)
+
 
 class PublicApiTestCase(SimpleTestCase):
     def test_management_names_match_the_formset_contract(self):
