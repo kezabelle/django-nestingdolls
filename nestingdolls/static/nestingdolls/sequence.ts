@@ -1,5 +1,19 @@
 ((): void => {
   const prefix = "__prefix__";
+  const prefixAttributes = [
+    "name",
+    "id",
+    "for",
+    "aria-describedby",
+    "aria-labelledby",
+    "aria-controls",
+    "list",
+    "form",
+    "data-sequence-field",
+  ] as const;
+  const prefixAttributeSelector = prefixAttributes
+    .map((attribute) => `[${attribute}]`)
+    .join(", ");
 
   function queryRequiredElement<E extends Element>(
     parent: ParentNode,
@@ -113,19 +127,31 @@
     syncAddButton(root);
   }
 
+  function replacePrefix(value: string, index: number): string {
+    const replacement = String(index);
+    // Replace one placeholder in each space-separated value. Later placeholders
+    // belong to nested rows.
+    return value.replace(/\S+/g, (part) => part.replace(prefix, replacement));
+  }
+
   function replacePrefixAttributes(
     fragment: DocumentFragment,
     index: number,
   ): void {
-    for (const element of fragment.querySelectorAll<HTMLElement>(
-      "[name], [id], label[for]",
-    )) {
-      for (const attribute of ["name", "id", "for"] as const) {
+    const elements =
+      fragment.querySelectorAll<HTMLElement>(prefixAttributeSelector);
+    for (const element of elements) {
+      for (const attribute of prefixAttributes) {
         const value = element.getAttribute(attribute);
         if (value) {
-          element.setAttribute(attribute, value.replaceAll(prefix, String(index)));
+          element.setAttribute(attribute, replacePrefix(value, index));
         }
       }
+    }
+    for (const template of fragment.querySelectorAll<HTMLTemplateElement>(
+      "template",
+    )) {
+      replacePrefixAttributes(template.content, index);
     }
   }
 

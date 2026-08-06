@@ -1,6 +1,20 @@
 "use strict";
 (() => {
     const prefix = "__prefix__";
+    const prefixAttributes = [
+        "name",
+        "id",
+        "for",
+        "aria-describedby",
+        "aria-labelledby",
+        "aria-controls",
+        "list",
+        "form",
+        "data-sequence-field",
+    ];
+    const prefixAttributeSelector = prefixAttributes
+        .map((attribute) => `[${attribute}]`)
+        .join(", ");
     function queryRequiredElement(parent, selector) {
         const element = parent.querySelector(selector);
         if (!element) {
@@ -70,14 +84,24 @@
             .forEach(disableRemovedControl);
         syncAddButton(root);
     }
+    function replacePrefix(value, index) {
+        const replacement = String(index);
+        // Replace one placeholder in each space-separated value. Later placeholders
+        // belong to nested rows.
+        return value.replace(/\S+/g, (part) => part.replace(prefix, replacement));
+    }
     function replacePrefixAttributes(fragment, index) {
-        for (const element of fragment.querySelectorAll("[name], [id], label[for]")) {
-            for (const attribute of ["name", "id", "for"]) {
+        const elements = fragment.querySelectorAll(prefixAttributeSelector);
+        for (const element of elements) {
+            for (const attribute of prefixAttributes) {
                 const value = element.getAttribute(attribute);
                 if (value) {
-                    element.setAttribute(attribute, value.replaceAll(prefix, String(index)));
+                    element.setAttribute(attribute, replacePrefix(value, index));
                 }
             }
+        }
+        for (const template of fragment.querySelectorAll("template")) {
+            replacePrefixAttributes(template.content, index);
         }
     }
     function addRow(root) {

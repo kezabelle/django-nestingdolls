@@ -7,7 +7,7 @@ TSC := ./node_modules/typescript/bin/tsc
 
 DEFAULT_GOAL := help
 
-.PHONY: js tscheck format ruff mypy test agents check crosshair
+.PHONY: js tscheck jstest format ruff mypy test agents check crosshair
 
 .DEFAULT_GOAL := $(DEFAULT_GOAL)
 
@@ -19,6 +19,9 @@ js: ## Build JavaScript from TypeScript.
 
 tscheck: ## Check TypeScript. Do not write files.
 	$(TSC) -p tsconfig.json --noEmit
+
+jstest: ## Run JavaScript DOM tests.
+	node --test test_sequence.mjs
 
 format: ## Run Ruff formatter on maintained Python files.
 	$(RUFF) format demo.py nestingdolls test_dictfield.py test_listfield.py test_patches.py test_settings.py proof_dictfield.py proof_listfield.py scripts/update_package_agents.py
@@ -36,7 +39,7 @@ agents: ## Update the generated field method reference in nestingdolls/AGENTS.md
 	$(PYTHON) scripts/update_package_agents.py
 
 check: ## Update generated docs and run all fast checks.
-check: tscheck ruff format mypy test agents
+check: tscheck jstest ruff format mypy test agents
 
 crosshair: ## Confirm the small set of independent semantic models.
 	$(CROSSHAIR) check --report_all --max_uninteresting_iterations=25 --per_condition_timeout=12 proof_listfield.prove_sequence_direct_extraction proof_dictfield.prove_mapping_direct_precedence proof_dictfield.prove_mapping_hostile_fallback

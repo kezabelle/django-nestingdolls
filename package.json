@@ -1,5 +1,6 @@
 {
   "devDependencies": {
+    "jsdom": "^30.0.1",
     "typescript": "^7.0.2"
   }
 }
