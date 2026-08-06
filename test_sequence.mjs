@@ -142,7 +142,7 @@ test("the added row keeps the placeholder for the inner row", () => {
   );
 });
 
-test("each add button changes only its sequence", () => {
+test("mapping and nested sequence actions stay with their owning sequence", () => {
   const dom = new JSDOM(
     `
       <div
@@ -153,12 +153,13 @@ test("each add button changes only its sequence", () => {
         <input id="outer-total" type="hidden" value="1" data-sequence-total>
         <div id="outer-rows" data-sequence-rows>
           <div data-sequence-row data-sequence-index="0">
-            <div
-              data-widget="sequence"
-              data-sequence-field="values-0"
-              data-sequence-maximum="5"
-              data-sequence-absolute-maximum="5"
-            >
+            <div data-widget="mapping">
+              <div
+                data-widget="sequence"
+                data-sequence-field="values-0"
+                data-sequence-maximum="5"
+                data-sequence-absolute-maximum="5"
+              >
               <input
                 id="inner-total"
                 type="hidden"
@@ -179,18 +180,20 @@ test("each add button changes only its sequence", () => {
               <template data-sequence-remove-button>
                 <button type="button" data-sequence-remove>Remove</button>
               </template>
-              <button id="inner-add" type="button" data-sequence-add>Add</button>
+                <button id="inner-add" type="button" data-sequence-add>Add</button>
+              </div>
             </div>
           </div>
         </div>
         <template data-sequence-empty-row>
           <div data-sequence-row>
-            <div
-              data-widget="sequence"
-              data-sequence-field="values-__prefix__"
-              data-sequence-maximum="5"
-              data-sequence-absolute-maximum="5"
-            >
+            <div data-widget="mapping">
+              <div
+                data-widget="sequence"
+                data-sequence-field="values-__prefix__"
+                data-sequence-maximum="5"
+                data-sequence-absolute-maximum="5"
+              >
               <input
                 type="hidden"
                 name="values-__prefix__-TOTAL_FORMS"
@@ -206,7 +209,8 @@ test("each add button changes only its sequence", () => {
               <template data-sequence-remove-button>
                 <button type="button" data-sequence-remove>Remove</button>
               </template>
-              <button type="button" data-sequence-add>Add</button>
+                <button type="button" data-sequence-add>Add</button>
+              </div>
             </div>
           </div>
         </template>
@@ -273,4 +277,110 @@ test("each add button changes only its sequence", () => {
   assert.equal(newInnerRows.children.length, 2);
   assert.equal(outerTotal.value, "2");
   assert.equal(outerRows.children.length, 2);
+});
+
+test("add and remove manage limits, focus, and change events", () => {
+  const dom = new JSDOM(
+    `
+      <div
+        data-widget="sequence"
+        data-sequence-minimum="1"
+        data-sequence-maximum="2"
+        data-sequence-absolute-maximum="3"
+      >
+        <input type="hidden" value="1" data-sequence-total>
+        <div data-sequence-rows>
+          <div data-sequence-row data-sequence-index="0">
+            <input type="hidden" name="values-0-DELETE" data-sequence-delete>
+            <input id="value-0" name="values-0">
+          </div>
+        </div>
+        <template data-sequence-empty-row>
+          <div data-sequence-row>
+            <input
+              type="hidden"
+              name="values-__prefix__-DELETE"
+              data-sequence-delete
+            >
+            <input id="value-__prefix__" name="values-__prefix__">
+          </div>
+        </template>
+        <template data-sequence-remove-button>
+          <button type="button" data-sequence-remove>Remove</button>
+        </template>
+        <button type="button" data-sequence-add>Add</button>
+      </div>
+    `,
+    { runScripts: "outside-only" },
+  );
+  dom.window.eval(controller);
+  dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded"));
+
+  const root = dom.window.document.querySelector('[data-widget="sequence"]');
+  const addButton = dom.window.document.querySelector("[data-sequence-add]");
+  const totalInput = dom.window.document.querySelector("[data-sequence-total]");
+  const firstRow = dom.window.document.querySelector('[data-sequence-index="0"]');
+  const firstRemove = firstRow?.querySelector("[data-sequence-remove]");
+  assert.ok(root);
+  assert.ok(addButton instanceof dom.window.HTMLButtonElement);
+  assert.ok(totalInput instanceof dom.window.HTMLInputElement);
+  assert.ok(firstRow instanceof dom.window.HTMLElement);
+  assert.ok(firstRemove instanceof dom.window.HTMLButtonElement);
+  assert.equal(firstRemove.hidden, true);
+  const changes = [];
+  dom.window.document.addEventListener("nestingdolls:sequence-change", (event) => {
+    assert.ok(event instanceof dom.window.CustomEvent);
+    assert.equal(event.bubbles, true);
+    assert.equal(event.target, root);
+    changes.push({ action: event.detail.action, index: event.detail.index });
+  });
+
+  addButton.click();
+
+  const secondRow = dom.window.document.querySelector('[data-sequence-index="1"]');
+  const secondInput = dom.window.document.querySelector("#value-1");
+  const secondRemove = secondRow?.querySelector("[data-sequence-remove]");
+  assert.ok(secondRow instanceof dom.window.HTMLElement);
+  assert.ok(secondInput instanceof dom.window.HTMLInputElement);
+  assert.ok(secondRemove instanceof dom.window.HTMLButtonElement);
+  assert.equal(dom.window.document.activeElement, secondInput);
+  assert.equal(addButton.hidden, true);
+  assert.equal(firstRemove.hidden, false);
+  assert.equal(secondRemove.hidden, false);
+
+  firstRemove.click();
+
+  assert.equal(firstRow.hidden, true);
+  assert.equal(dom.window.document.activeElement, secondInput);
+  assert.equal(addButton.hidden, false);
+  assert.equal(secondRemove.hidden, true);
+
+  addButton.click();
+
+  const thirdRow = dom.window.document.querySelector('[data-sequence-index="2"]');
+  const thirdInput = dom.window.document.querySelector("#value-2");
+  const thirdRemove = thirdRow?.querySelector("[data-sequence-remove]");
+  assert.ok(thirdRow instanceof dom.window.HTMLElement);
+  assert.ok(thirdInput instanceof dom.window.HTMLInputElement);
+  assert.ok(thirdRemove instanceof dom.window.HTMLButtonElement);
+  assert.equal(dom.window.document.activeElement, thirdInput);
+  assert.equal(totalInput.value, "3");
+
+  thirdRemove.click();
+
+  assert.equal(thirdRow.hidden, true);
+  assert.equal(dom.window.document.activeElement, secondInput);
+  assert.equal(addButton.hidden, true);
+  assert.equal(secondRemove.hidden, true);
+
+  secondRemove.click();
+
+  assert.equal(secondRow.hidden, false);
+  assert.equal(dom.window.document.activeElement, secondInput);
+  assert.deepEqual(changes, [
+    { action: "add", index: 1 },
+    { action: "remove", index: 0 },
+    { action: "add", index: 2 },
+    { action: "remove", index: 2 },
+  ]);
 });

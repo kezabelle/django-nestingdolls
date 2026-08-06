@@ -106,6 +106,11 @@ elements until JavaScript starts.
 The widget includes its JavaScript in Django form media. Render `form.media`
 when you want the add and remove controls.
 
+After a row is added or removed, the sequence root emits a bubbling
+`nestingdolls:sequence-change` `CustomEvent`. Its `detail` contains an `action`
+of `"add"` or `"remove"` and the row `index`. Consumers can listen for this
+event when they need their own announcements or other interface updates.
+
 ### Safety notes
 
 `ListField` uses the same row count pattern that Django formsets use.

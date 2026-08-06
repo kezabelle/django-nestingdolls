@@ -44,7 +44,7 @@ class _ValueBoundField(BoundField):
 class MappingWidget(CompositeWidget):
     """Render one child Form as a mapping-shaped widget."""
 
-    _template_name = "django/forms/widgets/mapping/{layout}.html"
+    _template_name = "nestingdolls/mapping/{layout}.html"
     use_fieldset = True
     input_type: str | None = None
 
@@ -179,7 +179,7 @@ class MappingWidget(CompositeWidget):
         context["widget"].update(
             {
                 "layout": layout.value,
-                "template_name": f"django/forms/widgets/mapping/{layout.value}.html",
+                "template_name": f"nestingdolls/mapping/{layout.value}.html",
                 "subform": value,
                 "visible_fields": value.visible_fields(),
                 "hidden_fields": (

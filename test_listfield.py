@@ -2823,6 +2823,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         self.assertIn('id="id_values_rows"', html)
         self.assertIn('data-widget="sequence"', html)
         self.assertIn('data-sequence-field="values"', html)
+        self.assertIn('data-sequence-minimum="2"', html)
         self.assertIn('id="id_values_row_0"', html)
         self.assertIn('id="id_values_0_DELETE"', html)
         self.assertIn('id="id_values_row_1"', html)
@@ -2848,13 +2849,13 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
         form = Form()
 
-        with self.assertTemplateUsed("django/forms/widgets/sequence/div.html"):
+        with self.assertTemplateUsed("nestingdolls/sequence/div.html"):
             div_html = form.as_div()
-        with self.assertTemplateUsed("django/forms/widgets/sequence/table.html"):
+        with self.assertTemplateUsed("nestingdolls/sequence/table.html"):
             table_html = form.as_table()
-        with self.assertTemplateUsed("django/forms/widgets/sequence/ul.html"):
+        with self.assertTemplateUsed("nestingdolls/sequence/ul.html"):
             ul_html = form.as_ul()
-        with self.assertTemplateUsed("django/forms/widgets/sequence/p.html"):
+        with self.assertTemplateUsed("nestingdolls/sequence/p.html"):
             p_html = form.as_p()
 
         self.assertIn('data-widget="sequence"', div_html)
@@ -2963,7 +2964,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         )
 
         self.assertFalse(form.is_valid())
-        with self.assertTemplateUsed("django/forms/widgets/sequence/p.html"):
+        with self.assertTemplateUsed("nestingdolls/sequence/p.html"):
             html = form.as_p()
 
         self.assertIn('data-widget="sequence"', html)

@@ -5,6 +5,6 @@
   {% if widget_id %}id="{{ widget_id }}_row_{{ row.index }}"{% endif %}
 >
   {% if body_tag %}<{{ body_tag }}>{% endif %}
-  {% include "django/forms/widgets/sequence/row_content.html" with row=row widget_name=widget_name delete_id=widget_id delete_disabled=delete_disabled only %}
+  {% include "nestingdolls/sequence/row_content.html" with row=row widget_name=widget_name delete_id=widget_id delete_disabled=delete_disabled only %}
   {% if body_tag %}</{{ body_tag }}>{% endif %}
 </{{ row_tag }}>

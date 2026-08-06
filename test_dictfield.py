@@ -726,13 +726,13 @@ class DictFieldRenderingTestCase(SimpleTestCase):
 
         form = Form(initial={"point": {"a": 9, "label": "layout"}})
 
-        with self.assertTemplateUsed("django/forms/widgets/mapping/div.html"):
+        with self.assertTemplateUsed("nestingdolls/mapping/div.html"):
             div_html = form.as_div()
-        with self.assertTemplateUsed("django/forms/widgets/mapping/table.html"):
+        with self.assertTemplateUsed("nestingdolls/mapping/table.html"):
             table_html = form.as_table()
-        with self.assertTemplateUsed("django/forms/widgets/mapping/ul.html"):
+        with self.assertTemplateUsed("nestingdolls/mapping/ul.html"):
             ul_html = form.as_ul()
-        with self.assertTemplateUsed("django/forms/widgets/mapping/p.html"):
+        with self.assertTemplateUsed("nestingdolls/mapping/p.html"):
             p_html = form.as_p()
 
         self.assertIn('data-widget="mapping"', div_html)

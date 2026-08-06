@@ -17,6 +17,13 @@
     const prefixAttributeSelector = prefixAttributes
         .map((attribute) => `[${attribute}]`)
         .join(", ");
+    const focusableControlSelector = [
+        'input:not([type="hidden"]):not([disabled]):not([hidden])',
+        "select:not([disabled]):not([hidden])",
+        "textarea:not([disabled]):not([hidden])",
+        "button:not([disabled]):not([hidden])",
+        '[tabindex]:not([tabindex="-1"]):not([hidden])',
+    ].join(", ");
     function queryRequiredElement(parent, selector) {
         const element = parent.querySelector(selector);
         if (!element) {
@@ -76,7 +83,45 @@
     function syncAddButton(root) {
         const addButton = ensureAddButton(root);
         const maximum = parseRequiredInteger(root.dataset.sequenceMaximum, "data-sequence-maximum");
-        addButton.hidden = activeRows(root).length >= maximum;
+        const absoluteMaximum = parseRequiredInteger(root.dataset.sequenceAbsoluteMaximum, "data-sequence-absolute-maximum");
+        const totalInput = queryRequiredOwnedElement(root, root, "[data-sequence-total]");
+        const nextIndex = parseRequiredInteger(totalInput.value, "data-sequence-total");
+        addButton.hidden =
+            activeRows(root).length >= maximum || nextIndex >= absoluteMaximum;
+    }
+    function minimumRows(root) {
+        if (root.dataset.sequenceMinimum === undefined) {
+            return 0;
+        }
+        return parseRequiredInteger(root.dataset.sequenceMinimum, "data-sequence-minimum");
+    }
+    function syncRemoveButtons(root) {
+        const rows = activeRows(root);
+        const hidden = rows.length <= minimumRows(root);
+        for (const row of rows) {
+            for (const button of ownedElements(root, row, "[data-sequence-remove]")) {
+                button.hidden = hidden;
+            }
+        }
+    }
+    function syncButtons(root) {
+        syncAddButton(root);
+        syncRemoveButtons(root);
+    }
+    function focusFirstControl(parent) {
+        const control = parent.querySelector(focusableControlSelector);
+        if (!control) {
+            return false;
+        }
+        control.focus();
+        return true;
+    }
+    function dispatchSequenceChange(root, row, action) {
+        const index = parseRequiredInteger(row.dataset.sequenceIndex, "data-sequence-index");
+        root.dispatchEvent(new CustomEvent("nestingdolls:sequence-change", {
+            bubbles: true,
+            detail: { action, index },
+        }));
     }
     function disableRemovedControl(control) {
         if (!control.matches("[data-sequence-delete]")) {
@@ -88,13 +133,23 @@
         if (!root) {
             return;
         }
+        const rows = activeRows(root);
+        const rowPosition = rows.indexOf(row);
+        if (rowPosition < 0 || rows.length <= minimumRows(root)) {
+            return;
+        }
+        const focusRow = rows[rowPosition + 1] ?? rows[rowPosition - 1];
         const deleteInput = queryRequiredOwnedElement(root, row, "[data-sequence-delete]");
         deleteInput.value = "1";
         row.hidden = true;
         row
             .querySelectorAll("input, select, textarea, button")
             .forEach(disableRemovedControl);
-        syncAddButton(root);
+        syncButtons(root);
+        if (!focusRow || !focusFirstControl(focusRow)) {
+            ensureAddButton(root).focus();
+        }
+        dispatchSequenceChange(root, row, "remove");
     }
     function replacePrefix(value, index) {
         const replacement = String(index);
@@ -132,17 +187,19 @@
         ensureRemoveButtonInRoot(row, root);
         queryRequiredOwnedElement(root, root, "[data-sequence-rows]").append(fragment);
         totalInput.value = String(index + 1);
-        syncAddButton(root);
         row
             .querySelectorAll(sequenceWidgetSelector)
             .forEach(enhanceWidget);
+        syncButtons(root);
+        focusFirstControl(row);
+        dispatchSequenceChange(root, row, "add");
     }
     function enhanceWidget(root) {
         if (enhancedWidgets.has(root)) {
             return;
         }
         activeRows(root).forEach(ensureRemoveButton);
-        syncAddButton(root);
+        syncButtons(root);
         root.addEventListener("click", (event) => {
             if (!(event.target instanceof Element) ||
                 event.target.closest(sequenceWidgetSelector) !== root) {

@@ -162,7 +162,7 @@ class SequenceBoundField(BoundField):
         # Widget.render() builds a new context and would lose the row changes above.
         # Django has no public API for a prepared widget context, so use _render().
         return widget._render(  # type: ignore[attr-defined, no-any-return]
-            f"django/forms/widgets/sequence/{FormLayout.current().value}.html",
+            f"nestingdolls/sequence/{FormLayout.current().value}.html",
             context,
             self.form.renderer,
         )
@@ -754,7 +754,7 @@ class FrozenSetField(SetField):
 class SequenceWidget(CompositeWidget):
     """Render dynamic homogeneous rows while delegating each row to one widget."""
 
-    _template_name = "django/forms/widgets/sequence/{layout}.html"
+    _template_name = "nestingdolls/sequence/{layout}.html"
     use_fieldset = True
     deletion_field = BooleanField(required=False)
 
@@ -975,7 +975,7 @@ class SequenceWidget(CompositeWidget):
         """Build rows and use bound management data when it is available."""
         context = super().get_context(name, value, attrs)
         context["widget"]["template_name"] = (
-            f"django/forms/widgets/sequence/{FormLayout.current().value}.html"
+            f"nestingdolls/sequence/{FormLayout.current().value}.html"
         )
         child_widget = self.child_field.widget
         if self.is_localized:
@@ -1046,6 +1046,7 @@ class SequenceWidget(CompositeWidget):
                 "rows": rows,
                 "empty_row": make_row("__prefix__", None),
                 "management_form": management_form,
+                "minimum_forms": self.min_length,
                 "maximum_forms": self.max_length,
                 "absolute_maximum_forms": self.absolute_max,
                 "disabled": disabled or management_invalid,

@@ -143,11 +143,11 @@ It inherits `SetField` behavior.
 
 - Public exports: `nestingdolls/__init__.py`
 - Mapping fields: `nestingdolls/mappings.py`,
-  `nestingdolls/templates/django/forms/widgets/dictwidget.html`,
-  `test_dictfield.py`, and `proof_dictfield.py`
+  `nestingdolls/templates/nestingdolls/mapping/`, `test_dictfield.py`, and
+  `proof_dictfield.py`
 - Sequence fields: `nestingdolls/sequences.py`,
-  `nestingdolls/templates/django/forms/widgets/sequence.html`,
-  `test_listfield.py`, and `proof_listfield.py`
+  `nestingdolls/templates/nestingdolls/sequence/`, `test_listfield.py`, and
+  `proof_listfield.py`
 - Sequence JavaScript: `nestingdolls/static/nestingdolls/sequence.ts` and its
   compiled `sequence.js` file
 - Generated reference: `scripts/update_package_agents.py`

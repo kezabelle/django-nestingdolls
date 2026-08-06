@@ -9,11 +9,11 @@ Prefer small obvious templates over clever template abstraction.
 
 ## What lives here
 
-- `django/forms/widgets/mapping/`
+- `nestingdolls/mapping/`
   Helper-specific templates for mapping widgets.
-- `django/forms/widgets/sequence/`
+- `nestingdolls/sequence/`
   Helper-specific templates for sequence widgets.
-- `django/forms/widgets/shared/`
+- `nestingdolls/shared/`
   Small generic fragments shared by more than one widget family.
 
 ## Design rules

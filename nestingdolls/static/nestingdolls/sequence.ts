@@ -16,6 +16,13 @@
   const prefixAttributeSelector = prefixAttributes
     .map((attribute) => `[${attribute}]`)
     .join(", ");
+  const focusableControlSelector = [
+    'input:not([type="hidden"]):not([disabled]):not([hidden])',
+    "select:not([disabled]):not([hidden])",
+    "textarea:not([disabled]):not([hidden])",
+    "button:not([disabled]):not([hidden])",
+    '[tabindex]:not([tabindex="-1"]):not([hidden])',
+  ].join(", ");
 
   function queryRequiredElement<E extends Element>(
     parent: ParentNode,
@@ -129,7 +136,76 @@
       root.dataset.sequenceMaximum,
       "data-sequence-maximum",
     );
-    addButton.hidden = activeRows(root).length >= maximum;
+    const absoluteMaximum = parseRequiredInteger(
+      root.dataset.sequenceAbsoluteMaximum,
+      "data-sequence-absolute-maximum",
+    );
+    const totalInput = queryRequiredOwnedElement<HTMLInputElement>(
+      root,
+      root,
+      "[data-sequence-total]",
+    );
+    const nextIndex = parseRequiredInteger(
+      totalInput.value,
+      "data-sequence-total",
+    );
+    addButton.hidden =
+      activeRows(root).length >= maximum || nextIndex >= absoluteMaximum;
+  }
+
+  function minimumRows(root: HTMLElement): number {
+    if (root.dataset.sequenceMinimum === undefined) {
+      return 0;
+    }
+    return parseRequiredInteger(
+      root.dataset.sequenceMinimum,
+      "data-sequence-minimum",
+    );
+  }
+
+  function syncRemoveButtons(root: HTMLElement): void {
+    const rows = activeRows(root);
+    const hidden = rows.length <= minimumRows(root);
+    for (const row of rows) {
+      for (const button of ownedElements<HTMLButtonElement>(
+        root,
+        row,
+        "[data-sequence-remove]",
+      )) {
+        button.hidden = hidden;
+      }
+    }
+  }
+
+  function syncButtons(root: HTMLElement): void {
+    syncAddButton(root);
+    syncRemoveButtons(root);
+  }
+
+  function focusFirstControl(parent: ParentNode): boolean {
+    const control = parent.querySelector<HTMLElement>(focusableControlSelector);
+    if (!control) {
+      return false;
+    }
+    control.focus();
+    return true;
+  }
+
+  function dispatchSequenceChange(
+    root: HTMLElement,
+    row: HTMLElement,
+    action: "add" | "remove",
+  ): void {
+    const index = parseRequiredInteger(
+      row.dataset.sequenceIndex,
+      "data-sequence-index",
+    );
+    root.dispatchEvent(
+      new CustomEvent("nestingdolls:sequence-change", {
+        bubbles: true,
+        detail: { action, index },
+      }),
+    );
   }
 
   function disableRemovedControl(
@@ -149,6 +225,12 @@
     if (!root) {
       return;
     }
+    const rows = activeRows(root);
+    const rowPosition = rows.indexOf(row);
+    if (rowPosition < 0 || rows.length <= minimumRows(root)) {
+      return;
+    }
+    const focusRow = rows[rowPosition + 1] ?? rows[rowPosition - 1];
     const deleteInput = queryRequiredOwnedElement<HTMLInputElement>(
       root,
       row,
@@ -161,7 +243,11 @@
         HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
       >("input, select, textarea, button")
       .forEach(disableRemovedControl);
-    syncAddButton(root);
+    syncButtons(root);
+    if (!focusRow || !focusFirstControl(focusRow)) {
+      ensureAddButton(root).focus();
+    }
+    dispatchSequenceChange(root, row, "remove");
   }
 
   function replacePrefix(value: string, index: number): string {
@@ -227,10 +313,12 @@
       "[data-sequence-rows]",
     ).append(fragment);
     totalInput.value = String(index + 1);
-    syncAddButton(root);
     row
       .querySelectorAll<HTMLElement>(sequenceWidgetSelector)
       .forEach(enhanceWidget);
+    syncButtons(root);
+    focusFirstControl(row);
+    dispatchSequenceChange(root, row, "add");
   }
 
   function enhanceWidget(root: HTMLElement): void {
@@ -238,7 +326,7 @@
       return;
     }
     activeRows(root).forEach(ensureRemoveButton);
-    syncAddButton(root);
+    syncButtons(root);
     root.addEventListener("click", (event: MouseEvent): void => {
       if (
         !(event.target instanceof Element) ||
