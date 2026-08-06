@@ -29,16 +29,16 @@ generator, and then run `make agents`.
 
 #### Overrides parent methods
 
-- `__init__(self, form_class: 'type[BaseForm]', /, *, required: 'bool' = True, widget: 'MappingWidget | type[MappingWidget] | None' = None, label: 'str | Promise | None' = None, initial: 'object | Callable[[], object] | None' = None, help_text: 'str | Promise' = '', error_messages: 'Mapping[str, str | Promise] | None' = None, show_hidden_initial: 'bool' = False, validators: 'Sequence[Callable[[dict[str, object]], None]]' = (), localize: 'bool' = False, disabled: 'bool' = False, label_suffix: 'str | None' = None, template_name: 'str | None' = None, bound_field_class: 'type[MappingBoundField] | None' = None) -> 'None'`
-- `to_python(self, value: 'object') -> 'dict[str, object]'`
-- `clean(self, value: 'object') -> 'dict[str, object]'`
-- `_clean_bound_field(self, bound_field: 'BoundField') -> 'dict[str, object]'`
-- `bound_data(self, data: 'object', initial: 'object') -> 'object'`
-- `prepare_value(self, value: 'object') -> 'object'`
-- `has_changed(self, initial: 'object', data: 'object') -> 'bool'`
+- `__init__`
+- `to_python`
+- `clean`
+- `_clean_bound_field`
+- `bound_data`
+- `prepare_value`
+- `has_changed`
 #### Methods introduced here
 
-- `_clean_form(self, form: 'BaseForm') -> 'dict[str, object]'`
+- `_clean_form`
 
 ### DictField
 
@@ -56,19 +56,19 @@ Alias of `MappingField`. It defines no methods of its own.
 
 #### Overrides parent methods
 
-- `__init__(self, child_field: 'Field', /, *, min_length: 'int' = 0, max_length: 'int' = 1000, absolute_max: 'int | None' = None, required: 'bool' = True, widget: 'SequenceWidget | type[SequenceWidget] | None' = None, label: 'str | Promise | None' = None, initial: 'object | Callable[[], object] | None' = None, help_text: 'str | Promise' = '', error_messages: 'Mapping[str, str | Promise] | None' = None, show_hidden_initial: 'bool' = False, validators: 'Sequence[Callable[[Collection[object]], None]]' = (), localize: 'bool' = False, disabled: 'bool' = False, label_suffix: 'str | None' = None, template_name: 'str | None' = None, bound_field_class: 'type[SequenceBoundField] | None' = None) -> 'None'`
-- `__deepcopy__(self, memo: 'dict[int, object]') -> 'Self'`
-- `to_python(self, value: 'object') -> 'list[object]'`
-- `clean(self, value: 'object') -> 'Collection[object]'`
-- `_clean_bound_field(self, bound_field: 'BoundField') -> 'Collection[object]'`
-- `validate(self, value: 'Collection[object]') -> 'None'`
-- `bound_data(self, data: 'object', initial: 'object') -> 'Collection[object]'`
-- `prepare_value(self, value: 'object') -> 'list[object]'`
-- `has_changed(self, initial: 'object', data: 'object') -> 'bool'`
+- `__init__`
+- `__deepcopy__`
+- `to_python`
+- `clean`
+- `_clean_bound_field`
+- `validate`
+- `bound_data`
+- `prepare_value`
+- `has_changed`
 #### Methods introduced here
 
-- `_clean_values(self, values: 'list[object]', initial_values: 'list[object]', deleted_indexes: 'frozenset[int]' = frozenset(), omitted_indexes: 'frozenset[int]' = frozenset()) -> 'list[object]'`
-- `compress(self, data_list: 'list[object]') -> 'Collection[object]'`
+- `_clean_values`
+- `compress`
 
 ### ListField
 
@@ -78,18 +78,18 @@ Alias of `SequenceField`. It defines no methods of its own.
 
 #### Overrides parent methods
 
-- `compress(self, data_list: 'list[object]') -> 'tuple[object, ...]'`
+- `compress`
 
-### FrozenSequenceField
+### TupleField
 
-Alias of `TupleField`. It defines no methods of its own.
+Alias of `FrozenSequenceField`. It defines no methods of its own.
 
 ### SetField
 
 #### Overrides parent methods
 
-- `compress(self, data_list: 'list[object]') -> 'set[object] | frozenset[object]'`
-- `has_changed(self, initial: 'object', data: 'object') -> 'bool'`
+- `compress`
+- `has_changed`
 
 ### FrozenSetField
 

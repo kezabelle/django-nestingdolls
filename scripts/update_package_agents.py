@@ -35,8 +35,8 @@ def split_methods(
     return overrides, introduced
 
 
-def render_method(name: str, value: Callable[..., object]) -> str:
-    return f"- `{name}{inspect.signature(value)}`"
+def render_method(name: str) -> str:
+    return f"- `{name}`"
 
 
 def render_method_group(
@@ -47,7 +47,7 @@ def render_method_group(
     return [
         f"#### {title}",
         "",
-        *(render_method(name, value) for name, value in methods),
+        *(render_method(name) for name, _ in methods),
     ]
 
 
@@ -97,9 +97,9 @@ def render_generated_block() -> str:
         "",
         *render_alias_section("ListField", "SequenceField"),
         "",
-        *render_class_section(nestingdolls.TupleField),
+        *render_class_section(nestingdolls.FrozenSequenceField),
         "",
-        *render_alias_section("FrozenSequenceField", "TupleField"),
+        *render_alias_section("TupleField", "FrozenSequenceField"),
         "",
         *render_class_section(nestingdolls.SetField),
         "",
