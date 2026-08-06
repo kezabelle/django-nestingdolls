@@ -118,10 +118,30 @@ class SequenceBoundField(BoundField):
             attrs.setdefault("id", self.auto_id)
 
         context = widget.get_context(self.html_name, self.value(), attrs)
-        if management_form is not None:
-            context["widget"]["management_form"].initial[INITIAL_FORM_COUNT] = (
-                management_form.cleaned_data[INITIAL_FORM_COUNT]
-            )
+
+        # Nested sequence widgets build child contexts directly, without a nested
+        # BoundField, and submitted management counts are not part of their row
+        # values. Walk the rendered rows to restore each valid count without adding
+        # state to shared widgets or changing the field value shape.
+        def set_initial_counts(
+            sequence_widget: SequenceWidget,
+            widget_context: dict[str, Any],
+            name: str,
+        ) -> None:
+            submitted_management_form = ManagementForm(self._data_input, prefix=name)
+            if submitted_management_form.is_valid():
+                widget_context["management_form"].initial[INITIAL_FORM_COUNT] = (
+                    submitted_management_form.cleaned_data[INITIAL_FORM_COUNT]
+                )
+            child_widget = sequence_widget.child_field.widget
+            if not isinstance(child_widget, SequenceWidget):
+                return
+            for row in widget_context["rows"]:
+                child_name = f"{name}-{row['index']}"
+                child_context = row["subwidget"]
+                set_initial_counts(child_widget, child_context, child_name)
+
+        set_initial_counts(widget, context["widget"], self.html_name)
 
         # A simple widget stores its HTML attributes in this context. A MultiWidget
         # also creates one child context for each rendered input. Changes to the

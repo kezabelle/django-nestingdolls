@@ -433,6 +433,84 @@ class SequenceFieldTestCase(SimpleTestCase):
             html,
         )
 
+    def test_minimum_length_error_keeps_initial_count(self):
+        """It keeps the initial count after minimum length validation."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), min_length=3)
+
+        form = Form(
+            QueryDict(
+                f"values-{TOTAL_FORM_COUNT}=2&"
+                f"values-{INITIAL_FORM_COUNT}=1&"
+                "values-0=1&values-1=2"
+            ),
+            initial={"values": [1]},
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(form.errors.as_data()["values"][0].code, "min_length")
+        self.assertInHTML(
+            '<input type="hidden" name="values-INITIAL_FORMS" value="1" id="id_values-INITIAL_FORMS">',
+            form.as_p(),
+        )
+
+    def test_invalid_original_row_keeps_deletion(self):
+        """It keeps a deleted added row when an original row is invalid."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        data = QueryDict(
+            f"values-{TOTAL_FORM_COUNT}=2&"
+            f"values-{INITIAL_FORM_COUNT}=1&"
+            "values-0=bad&values-1=2",
+            mutable=True,
+        )
+        data[f"values-1-{DELETION_FIELD_NAME}"] = "on"
+        form = Form(data, initial={"values": [1]})
+
+        self.assertFalse(form.is_valid())
+        html = form.as_p()
+        self.assertInHTML(
+            '<input type="hidden" name="values-INITIAL_FORMS" value="1" id="id_values-INITIAL_FORMS">',
+            html,
+        )
+        self.assertInHTML(
+            '<input type="hidden" name="values-1-DELETE" value="1" data-sequence-deleted-row data-sequence-field="values">',
+            html,
+        )
+        self.assertNotInHTML(
+            '<input type="number" name="values-1" value="2" id="id_values_1">',
+            html,
+        )
+
+    def test_missing_initial_count_keeps_submitted_rows(self):
+        """It keeps submitted rows when the initial count is missing."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        form = Form(
+            QueryDict(f"values-{TOTAL_FORM_COUNT}=2&values-0=1&values-1=bad"),
+            initial={"values": [1]},
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIsInstance(
+            form.errors.as_data()["values"][0],
+            nestingdolls.MissingManagementFormValidationError,
+        )
+        html = form.as_p()
+        self.assertInHTML(
+            '<input type="number" name="values-0" value="1" id="id_values_0">',
+            html,
+        )
+        self.assertInHTML(
+            '<input type="number" name="values-1" value="bad" id="id_values_1">',
+            html,
+        )
+
     def test_item_errors_do_not_promote_to_field_errors(self):
         """It keeps child validation errors out of the field-level error list."""
 
@@ -1257,6 +1335,36 @@ class SetFieldTestCase(SimpleTestCase):
 
 
 class NestedSequenceFieldTestCase(SimpleTestCase):
+    def test_invalid_nested_added_row_keeps_initial_count(self):
+        """It keeps the inner initial count when an added row is invalid."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.ListField(forms.IntegerField())
+            )
+
+        form = Form(
+            QueryDict(
+                f"values-{TOTAL_FORM_COUNT}=1&"
+                f"values-{INITIAL_FORM_COUNT}=1&"
+                f"values-0-{TOTAL_FORM_COUNT}=2&"
+                f"values-0-{INITIAL_FORM_COUNT}=1&"
+                "values-0-0=1&values-0-1=bad"
+            ),
+            initial={"values": [[1]]},
+        )
+
+        self.assertFalse(form.is_valid())
+        html = form.as_p()
+        self.assertInHTML(
+            '<input type="hidden" name="values-INITIAL_FORMS" value="1" id="id_values-INITIAL_FORMS">',
+            html,
+        )
+        self.assertInHTML(
+            '<input type="hidden" name="values-0-INITIAL_FORMS" value="1" id="id_values-0-INITIAL_FORMS">',
+            html,
+        )
+
     def test_nested_tuple_has_changed_uses_semantic_equality(self):
         """It treats equal nested tuple values as unchanged."""
         field = nestingdolls.ListField(
