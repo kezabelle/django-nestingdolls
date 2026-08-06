@@ -105,10 +105,7 @@ class SequenceBoundField(BoundField):
             if isinstance(error, ItemValidationError) and isinstance(error.item, int):
                 item_errors[error.item].extend([error.message])
         deleted_indexes = self._deleted_indexes
-        management_form = self._management_form if errors else None
-        if management_form is not None and not management_form.is_valid():
-            management_form = None
-        if not deleted_indexes and not item_errors and management_form is None:
+        if not deleted_indexes and not errors:
             return super().as_widget(widget, attrs, only_initial)
 
         if self.field.localize:
@@ -117,31 +114,12 @@ class SequenceBoundField(BoundField):
         if self.auto_id and "id" not in widget.attrs:
             attrs.setdefault("id", self.auto_id)
 
-        context = widget.get_context(self.html_name, self.value(), attrs)
-
-        # Nested sequence widgets build child contexts directly, without a nested
-        # BoundField, and submitted management counts are not part of their row
-        # values. Walk the rendered rows to restore each valid count without adding
-        # state to shared widgets or changing the field value shape.
-        def set_initial_counts(
-            sequence_widget: SequenceWidget,
-            widget_context: dict[str, Any],
-            name: str,
-        ) -> None:
-            submitted_management_form = ManagementForm(self._data_input, prefix=name)
-            if submitted_management_form.is_valid():
-                widget_context["management_form"].initial[INITIAL_FORM_COUNT] = (
-                    submitted_management_form.cleaned_data[INITIAL_FORM_COUNT]
-                )
-            child_widget = sequence_widget.child_field.widget
-            if not isinstance(child_widget, SequenceWidget):
-                return
-            for row in widget_context["rows"]:
-                child_name = f"{name}-{row['index']}"
-                child_context = row["subwidget"]
-                set_initial_counts(child_widget, child_context, child_name)
-
-        set_initial_counts(widget, context["widget"], self.html_name)
+        context = widget.get_context(
+            self.html_name,
+            self.value(),
+            attrs,
+            management_data=self._data_input,
+        )
 
         # A simple widget stores its HTML attributes in this context. A MultiWidget
         # also creates one child context for each rendered input. Changes to the
@@ -204,13 +182,12 @@ class SequenceBoundField(BoundField):
     @cached_property
     def _management_form(self) -> ManagementForm | None:
         """Build a management form from normalized sequence inputs."""
-        management_data: MultiValueDict[str, object] = MultiValueDict()
-        for name in self.field.widget.management_names(self.html_name):
-            if name in self._data_input:
-                management_data[name] = self._data_input[name]
-        if not management_data:
+        if not any(
+            name in self._data_input
+            for name in self.field.widget.management_names(self.html_name)
+        ):
             return None
-        management_form = ManagementForm(management_data, prefix=self.html_name)
+        management_form = ManagementForm(self._data_input, prefix=self.html_name)
         management_form.full_clean()
         return management_form
 
@@ -988,22 +965,46 @@ class SequenceWidget(CompositeWidget):
         return normalized
 
     def get_context(
-        self, name: str, value: Sequence[object] | None, attrs: dict[str, Any] | None
+        self,
+        name: str,
+        value: Sequence[object] | None,
+        attrs: dict[str, Any] | None,
+        *,
+        management_data: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
-        """Build widget context for visible rows and the empty row template."""
+        """Build rows and use bound management data when it is available."""
         context = super().get_context(name, value, attrs)
         context["widget"]["template_name"] = (
             f"django/forms/widgets/sequence/{FormLayout.current().value}.html"
         )
+        child_widget = self.child_field.widget
         if self.is_localized:
-            self.child_field.widget.is_localized = True
+            child_widget.is_localized = True
 
         value = [] if value is None else list(islice(value, self.absolute_max))
-        initial_forms = len(value)
-        if not value:
-            value = [None] * min(
-                max(self.min_length, int(self.is_required)), self.max_length
+        if management_data is not None and any(
+            key in management_data for key in self.management_names(name)
+        ):
+            management_form = ManagementForm(management_data, prefix=name)
+            management_invalid = not management_form.is_valid()
+            total_forms = cast(int, management_form.cleaned_data[TOTAL_FORM_COUNT])
+            value = value[: max(0, min(total_forms, self.absolute_max))]
+        else:
+            initial_forms = len(value)
+            if not value:
+                value = [None] * min(
+                    max(self.min_length, int(self.is_required)), self.max_length
+                )
+            management_form = ManagementForm(
+                prefix=name,
+                initial={
+                    TOTAL_FORM_COUNT: len(value),
+                    INITIAL_FORM_COUNT: initial_forms,
+                    MIN_NUM_FORM_COUNT: self.min_length,
+                    MAX_NUM_FORM_COUNT: self.max_length,
+                },
             )
+            management_invalid = False
         final_attrs = context["widget"]["attrs"]
         final_attrs.pop("aria-invalid", None)
         id_ = final_attrs.get("id")
@@ -1016,24 +1017,22 @@ class SequenceWidget(CompositeWidget):
                 child_attrs["id"] = f"{id_}_{index}"
             if self.child_field.disabled:
                 child_attrs["disabled"] = True
+            if isinstance(child_widget, SequenceWidget):
+                child_context = child_widget.get_context(
+                    row_name,
+                    cast(Sequence[object] | None, item),
+                    child_attrs,
+                    management_data=management_data,
+                )
+            else:
+                child_context = child_widget.get_context(row_name, item, child_attrs)
             return {
                 "index": index,
                 "delete_name": f"{row_name}-{DELETION_FIELD_NAME}",
-                "subwidget": self.child_field.widget.get_context(
-                    row_name, item, child_attrs
-                )["widget"],
+                "subwidget": child_context["widget"],
                 "errors": [],
             }
 
-        management_form = ManagementForm(
-            prefix=name,
-            initial={
-                TOTAL_FORM_COUNT: len(value),
-                INITIAL_FORM_COUNT: initial_forms,
-                MIN_NUM_FORM_COUNT: self.min_length,
-                MAX_NUM_FORM_COUNT: self.max_length,
-            },
-        )
         management_form.fields[TOTAL_FORM_COUNT].widget.attrs["data-sequence-total"] = (
             ""
         )
@@ -1049,7 +1048,7 @@ class SequenceWidget(CompositeWidget):
                 "management_form": management_form,
                 "maximum_forms": self.max_length,
                 "absolute_maximum_forms": self.absolute_max,
-                "disabled": disabled,
+                "disabled": disabled or management_invalid,
             }
         )
         return context

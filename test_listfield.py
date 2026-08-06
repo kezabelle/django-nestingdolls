@@ -485,31 +485,49 @@ class SequenceFieldTestCase(SimpleTestCase):
             html,
         )
 
-    def test_missing_initial_count_keeps_submitted_rows(self):
-        """It keeps submitted rows when the initial count is missing."""
+    def test_invalid_initial_count_uses_bound_management_form(self):
+        """It keeps raw management data and rows when the initial count is invalid."""
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
-        form = Form(
-            QueryDict(f"values-{TOTAL_FORM_COUNT}=2&values-0=1&values-1=bad"),
-            initial={"values": [1]},
+        cases = (
+            (
+                QueryDict(f"values-{TOTAL_FORM_COUNT}=2&values-0=1&values-1=bad"),
+                '<input type="hidden" name="values-INITIAL_FORMS" id="id_values-INITIAL_FORMS">',
+            ),
+            (
+                QueryDict(
+                    f"values-{TOTAL_FORM_COUNT}=2&"
+                    f"values-{INITIAL_FORM_COUNT}=bad&"
+                    "values-0=1&values-1=bad"
+                ),
+                '<input type="hidden" name="values-INITIAL_FORMS" value="bad" id="id_values-INITIAL_FORMS">',
+            ),
         )
+        for data, management_input in cases:
+            with self.subTest(data=data):
+                form = Form(data, initial={"values": [1]})
 
-        self.assertFalse(form.is_valid())
-        self.assertIsInstance(
-            form.errors.as_data()["values"][0],
-            nestingdolls.MissingManagementFormValidationError,
-        )
-        html = form.as_p()
-        self.assertInHTML(
-            '<input type="number" name="values-0" value="1" id="id_values_0">',
-            html,
-        )
-        self.assertInHTML(
-            '<input type="number" name="values-1" value="bad" id="id_values_1">',
-            html,
-        )
+                self.assertFalse(form.is_valid())
+                self.assertIsInstance(
+                    form.errors.as_data()["values"][0],
+                    nestingdolls.MissingManagementFormValidationError,
+                )
+                html = form.as_p()
+                self.assertInHTML(management_input, html)
+                self.assertInHTML(
+                    '<button type="button" data-sequence-add data-sequence-field="values" id="id_values_add" disabled>Add another</button>',
+                    html,
+                )
+                self.assertInHTML(
+                    '<input type="number" name="values-0" value="1" id="id_values_0">',
+                    html,
+                )
+                self.assertInHTML(
+                    '<input type="number" name="values-1" value="bad" id="id_values_1">',
+                    html,
+                )
 
     def test_item_errors_do_not_promote_to_field_errors(self):
         """It keeps child validation errors out of the field-level error list."""
@@ -844,6 +862,17 @@ class SequenceFieldTestCase(SimpleTestCase):
             malformed.errors.as_data()["values"][0].code,
             "missing_management_form",
         )
+        html = malformed.as_p()
+        self.assertInHTML(
+            '<input type="hidden" name="values-TOTAL_FORMS" value="not a number" data-sequence-total id="id_values-TOTAL_FORMS">',
+            html,
+        )
+        self.assertInHTML(
+            '<input type="hidden" name="values-INITIAL_FORMS" value="0" id="id_values-INITIAL_FORMS">',
+            html,
+        )
+        self.assertNotIn('name="values-0"', html)
+        self.assertNotIn('name="values-1"', html)
 
     def test_rows_beyond_an_authoritative_total_are_ignored(self):
         """It matches formsets by ignoring indexed rows beyond the submitted total."""
