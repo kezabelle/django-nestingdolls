@@ -40,13 +40,18 @@ test("the added row has the correct attribute values", () => {
         <template data-sequence-remove-button>
           <button type="button" data-sequence-remove>Remove</button>
         </template>
-        <button type="button" data-sequence-add>Add</button>
+        <template data-sequence-add-button>
+          <button type="button" data-sequence-add>Add</button>
+        </template>
       </div>
     `,
     { runScripts: "outside-only" },
   );
   dom.window.eval(controller);
   dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded"));
+  assert.equal(dom.window.document.querySelectorAll("[data-sequence-add]").length, 1);
+  dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded"));
+  assert.equal(dom.window.document.querySelectorAll("[data-sequence-add]").length, 1);
 
   const addButton = dom.window.document.querySelector("[data-sequence-add]");
   assert.ok(addButton);

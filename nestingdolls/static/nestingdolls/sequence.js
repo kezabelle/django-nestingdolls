@@ -24,8 +24,7 @@
         "button:not([disabled]):not([hidden])",
         '[tabindex]:not([tabindex="-1"]):not([hidden])',
     ].join(", ");
-    function queryRequiredElement(parent, selector) {
-        const element = parent.querySelector(selector);
+    function requiredElement(element, selector) {
         if (!element) {
             throw new Error(`Missing required element: ${selector}`);
         }
@@ -33,13 +32,6 @@
     }
     function ownedElements(root, parent, selector) {
         return Array.from(parent.querySelectorAll(selector)).filter((element) => element.closest(sequenceWidgetSelector) === root);
-    }
-    function queryRequiredOwnedElement(root, parent, selector) {
-        const element = ownedElements(root, parent, selector)[0];
-        if (!element) {
-            throw new Error(`Missing required element: ${selector}`);
-        }
-        return element;
     }
     function parseRequiredInteger(value, description) {
         if (!value) {
@@ -54,18 +46,11 @@
     function activeRows(root) {
         return ownedElements(root, root, "[data-sequence-row]").filter((row) => !row.hidden);
     }
-    function ensureRemoveButton(row) {
-        const root = row.closest(sequenceWidgetSelector);
-        if (!root) {
-            return;
-        }
-        ensureRemoveButtonInRoot(row, root);
-    }
-    function ensureRemoveButtonInRoot(row, root) {
+    function ensureRemoveButton(root, row) {
         if (ownedElements(root, row, "[data-sequence-remove]").length > 0) {
             return;
         }
-        const template = queryRequiredOwnedElement(root, root, "[data-sequence-remove-button]");
+        const template = requiredElement(ownedElements(root, root, "[data-sequence-remove-button]")[0], "[data-sequence-remove-button]");
         const fragment = template.content.cloneNode(true);
         const index = parseRequiredInteger(row.dataset.sequenceIndex, "data-sequence-index");
         replacePrefixAttributes(fragment, index);
@@ -76,18 +61,14 @@
         if (existing) {
             return existing;
         }
-        const template = queryRequiredOwnedElement(root, root, "[data-sequence-add-button]");
+        const template = requiredElement(ownedElements(root, root, "[data-sequence-add-button]")[0], "[data-sequence-add-button]");
         root.append(template.content.cloneNode(true));
-        return queryRequiredOwnedElement(root, root, "[data-sequence-add]");
+        return requiredElement(ownedElements(root, root, "[data-sequence-add]")[0], "[data-sequence-add]");
     }
-    function syncAddButton(root) {
-        const addButton = ensureAddButton(root);
+    function canAddRow(root, rowCount, nextIndex) {
         const maximum = parseRequiredInteger(root.dataset.sequenceMaximum, "data-sequence-maximum");
         const absoluteMaximum = parseRequiredInteger(root.dataset.sequenceAbsoluteMaximum, "data-sequence-absolute-maximum");
-        const totalInput = queryRequiredOwnedElement(root, root, "[data-sequence-total]");
-        const nextIndex = parseRequiredInteger(totalInput.value, "data-sequence-total");
-        addButton.hidden =
-            activeRows(root).length >= maximum || nextIndex >= absoluteMaximum;
+        return rowCount < maximum && nextIndex < absoluteMaximum;
     }
     function minimumRows(root) {
         if (root.dataset.sequenceMinimum === undefined) {
@@ -95,18 +76,17 @@
         }
         return parseRequiredInteger(root.dataset.sequenceMinimum, "data-sequence-minimum");
     }
-    function syncRemoveButtons(root) {
+    function syncButtons(root) {
         const rows = activeRows(root);
-        const hidden = rows.length <= minimumRows(root);
+        const totalInput = requiredElement(ownedElements(root, root, "[data-sequence-total]")[0], "[data-sequence-total]");
+        const nextIndex = parseRequiredInteger(totalInput.value, "data-sequence-total");
+        ensureAddButton(root).hidden = !canAddRow(root, rows.length, nextIndex);
+        const removeButtonsHidden = rows.length <= minimumRows(root);
         for (const row of rows) {
             for (const button of ownedElements(root, row, "[data-sequence-remove]")) {
-                button.hidden = hidden;
+                button.hidden = removeButtonsHidden;
             }
         }
-    }
-    function syncButtons(root) {
-        syncAddButton(root);
-        syncRemoveButtons(root);
     }
     function focusFirstControl(parent) {
         const control = parent.querySelector(focusableControlSelector);
@@ -128,18 +108,14 @@
             control.disabled = true;
         }
     }
-    function removeRow(row) {
-        const root = row.closest(sequenceWidgetSelector);
-        if (!root) {
-            return;
-        }
+    function removeRow(root, row) {
         const rows = activeRows(root);
         const rowPosition = rows.indexOf(row);
         if (rowPosition < 0 || rows.length <= minimumRows(root)) {
             return;
         }
         const focusRow = rows[rowPosition + 1] ?? rows[rowPosition - 1];
-        const deleteInput = queryRequiredOwnedElement(root, row, "[data-sequence-delete]");
+        const deleteInput = requiredElement(ownedElements(root, row, "[data-sequence-delete]")[0], "[data-sequence-delete]");
         deleteInput.value = "1";
         row.hidden = true;
         row
@@ -151,19 +127,16 @@
         }
         dispatchSequenceChange(root, row, "remove");
     }
-    function replacePrefix(value, index) {
-        const replacement = String(index);
-        // Replace one placeholder in each space-separated value. Later placeholders
-        // belong to nested rows.
-        return value.replace(/\S+/g, (part) => part.replace(prefix, replacement));
-    }
     function replacePrefixAttributes(fragment, index) {
+        const replacement = String(index);
         const elements = fragment.querySelectorAll(prefixAttributeSelector);
         for (const element of elements) {
             for (const attribute of prefixAttributes) {
                 const value = element.getAttribute(attribute);
                 if (value) {
-                    element.setAttribute(attribute, replacePrefix(value, index));
+                    // Replace one placeholder in each space-separated value. Later
+                    // placeholders belong to nested rows.
+                    element.setAttribute(attribute, value.replace(/\S+/g, (part) => part.replace(prefix, replacement)));
                 }
             }
         }
@@ -172,20 +145,18 @@
         }
     }
     function addRow(root) {
-        const maximum = parseRequiredInteger(root.dataset.sequenceMaximum, "data-sequence-maximum");
-        const absoluteMaximum = parseRequiredInteger(root.dataset.sequenceAbsoluteMaximum, "data-sequence-absolute-maximum");
-        const totalInput = queryRequiredOwnedElement(root, root, "[data-sequence-total]");
+        const totalInput = requiredElement(ownedElements(root, root, "[data-sequence-total]")[0], "[data-sequence-total]");
         const index = parseRequiredInteger(totalInput.value, "data-sequence-total");
-        if (activeRows(root).length >= maximum || index >= absoluteMaximum) {
+        if (!canAddRow(root, activeRows(root).length, index)) {
             return;
         }
-        const template = queryRequiredOwnedElement(root, root, "[data-sequence-empty-row]");
+        const template = requiredElement(ownedElements(root, root, "[data-sequence-empty-row]")[0], "[data-sequence-empty-row]");
         const fragment = template.content.cloneNode(true);
         replacePrefixAttributes(fragment, index);
-        const row = queryRequiredElement(fragment, "[data-sequence-row]");
+        const row = requiredElement(fragment.querySelector("[data-sequence-row]"), "[data-sequence-row]");
         row.dataset.sequenceIndex = String(index);
-        ensureRemoveButtonInRoot(row, root);
-        queryRequiredOwnedElement(root, root, "[data-sequence-rows]").append(fragment);
+        ensureRemoveButton(root, row);
+        requiredElement(ownedElements(root, root, "[data-sequence-rows]")[0], "[data-sequence-rows]").append(fragment);
         totalInput.value = String(index + 1);
         row
             .querySelectorAll(sequenceWidgetSelector)
@@ -198,27 +169,27 @@
         if (enhancedWidgets.has(root)) {
             return;
         }
-        activeRows(root).forEach(ensureRemoveButton);
+        for (const row of activeRows(root)) {
+            ensureRemoveButton(root, row);
+        }
         syncButtons(root);
         root.addEventListener("click", (event) => {
-            if (!(event.target instanceof Element) ||
-                event.target.closest(sequenceWidgetSelector) !== root) {
+            if (!(event.target instanceof Element)) {
                 return;
             }
-            const addButton = event.target.closest("[data-sequence-add]");
-            if (addButton) {
+            const action = event.target.closest("[data-sequence-add], [data-sequence-remove]");
+            if (!action || action.closest(sequenceWidgetSelector) !== root) {
+                return;
+            }
+            if (action.matches("[data-sequence-add]")) {
                 addRow(root);
                 return;
             }
-            const removeButton = event.target.closest("[data-sequence-remove]");
-            if (!removeButton) {
-                return;
-            }
-            const row = removeButton.closest("[data-sequence-row]");
+            const row = action.closest("[data-sequence-row]");
             if (!row) {
                 return;
             }
-            removeRow(row);
+            removeRow(root, row);
         });
         enhancedWidgets.add(root);
     }
