@@ -1,5 +1,7 @@
 ((): void => {
   const prefix = "__prefix__";
+  const sequenceWidgetSelector = '[data-widget="sequence"]';
+  const enhancedWidgets = new WeakSet<HTMLElement>();
   const prefixAttributes = [
     "name",
     "id",
@@ -26,6 +28,28 @@
     return element;
   }
 
+  function ownedElements<E extends Element>(
+    root: HTMLElement,
+    parent: ParentNode,
+    selector: string,
+  ): E[] {
+    return Array.from(parent.querySelectorAll<E>(selector)).filter(
+      (element) => element.closest(sequenceWidgetSelector) === root,
+    );
+  }
+
+  function queryRequiredOwnedElement<E extends Element>(
+    root: HTMLElement,
+    parent: ParentNode,
+    selector: string,
+  ): E {
+    const element = ownedElements<E>(root, parent, selector)[0];
+    if (!element) {
+      throw new Error(`Missing required element: ${selector}`);
+    }
+    return element;
+  }
+
   function parseRequiredInteger(
     value: string | undefined,
     description: string,
@@ -41,13 +65,15 @@
   }
 
   function activeRows(root: HTMLElement): HTMLElement[] {
-    return Array.from(
-      root.querySelectorAll<HTMLElement>("[data-sequence-row]"),
+    return ownedElements<HTMLElement>(
+      root,
+      root,
+      "[data-sequence-row]",
     ).filter((row) => !row.hidden);
   }
 
   function ensureRemoveButton(row: HTMLElement): void {
-    const root = row.closest<HTMLElement>('[data-widget="sequence"]');
+    const root = row.closest<HTMLElement>(sequenceWidgetSelector);
     if (!root) {
       return;
     }
@@ -58,10 +84,11 @@
     row: HTMLElement,
     root: HTMLElement,
   ): void {
-    if (row.querySelector("[data-sequence-remove]")) {
+    if (ownedElements(root, row, "[data-sequence-remove]").length > 0) {
       return;
     }
-    const template = queryRequiredElement<HTMLTemplateElement>(
+    const template = queryRequiredOwnedElement<HTMLTemplateElement>(
+      root,
       root,
       "[data-sequence-remove-button]",
     );
@@ -75,16 +102,25 @@
   }
 
   function ensureAddButton(root: HTMLElement): HTMLButtonElement {
-    const existing = root.querySelector<HTMLButtonElement>("[data-sequence-add]");
+    const existing = ownedElements<HTMLButtonElement>(
+      root,
+      root,
+      "[data-sequence-add]",
+    )[0];
     if (existing) {
       return existing;
     }
-    const template = queryRequiredElement<HTMLTemplateElement>(
+    const template = queryRequiredOwnedElement<HTMLTemplateElement>(
+      root,
       root,
       "[data-sequence-add-button]",
     );
     root.append(template.content.cloneNode(true));
-    return queryRequiredElement<HTMLButtonElement>(root, "[data-sequence-add]");
+    return queryRequiredOwnedElement<HTMLButtonElement>(
+      root,
+      root,
+      "[data-sequence-add]",
+    );
   }
 
   function syncAddButton(root: HTMLElement): void {
@@ -109,11 +145,12 @@
   }
 
   function removeRow(row: HTMLElement): void {
-    const root = row.closest<HTMLElement>('[data-widget="sequence"]');
+    const root = row.closest<HTMLElement>(sequenceWidgetSelector);
     if (!root) {
       return;
     }
-    const deleteInput = queryRequiredElement<HTMLInputElement>(
+    const deleteInput = queryRequiredOwnedElement<HTMLInputElement>(
+      root,
       row,
       "[data-sequence-delete]",
     );
@@ -164,7 +201,8 @@
       root.dataset.sequenceAbsoluteMaximum,
       "data-sequence-absolute-maximum",
     );
-    const totalInput = queryRequiredElement<HTMLInputElement>(
+    const totalInput = queryRequiredOwnedElement<HTMLInputElement>(
+      root,
       root,
       "[data-sequence-total]",
     );
@@ -173,7 +211,8 @@
       return;
     }
 
-    const template = queryRequiredElement<HTMLTemplateElement>(
+    const template = queryRequiredOwnedElement<HTMLTemplateElement>(
+      root,
       root,
       "[data-sequence-empty-row]",
     );
@@ -182,25 +221,38 @@
     const row = queryRequiredElement<HTMLElement>(fragment, "[data-sequence-row]");
     row.dataset.sequenceIndex = String(index);
     ensureRemoveButtonInRoot(row, root);
-    queryRequiredElement(root, "[data-sequence-rows]").append(fragment);
+    queryRequiredOwnedElement(
+      root,
+      root,
+      "[data-sequence-rows]",
+    ).append(fragment);
     totalInput.value = String(index + 1);
     syncAddButton(root);
+    row
+      .querySelectorAll<HTMLElement>(sequenceWidgetSelector)
+      .forEach(enhanceWidget);
   }
 
   function enhanceWidget(root: HTMLElement): void {
+    if (enhancedWidgets.has(root)) {
+      return;
+    }
     activeRows(root).forEach(ensureRemoveButton);
     syncAddButton(root);
     root.addEventListener("click", (event: MouseEvent): void => {
-      if (!(event.target instanceof Element)) {
+      if (
+        !(event.target instanceof Element) ||
+        event.target.closest(sequenceWidgetSelector) !== root
+      ) {
         return;
       }
       const addButton = event.target.closest("[data-sequence-add]");
-      if (addButton && root.contains(addButton)) {
+      if (addButton) {
         addRow(root);
         return;
       }
       const removeButton = event.target.closest("[data-sequence-remove]");
-      if (!removeButton || !root.contains(removeButton)) {
+      if (!removeButton) {
         return;
       }
       const row = removeButton.closest<HTMLElement>("[data-sequence-row]");
@@ -209,11 +261,12 @@
       }
       removeRow(row);
     });
+    enhancedWidgets.add(root);
   }
 
   function start(): void {
     document
-      .querySelectorAll<HTMLElement>('[data-widget="sequence"]')
+      .querySelectorAll<HTMLElement>(sequenceWidgetSelector)
       .forEach(enhanceWidget);
   }
 

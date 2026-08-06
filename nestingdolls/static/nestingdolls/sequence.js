@@ -1,6 +1,8 @@
 "use strict";
 (() => {
     const prefix = "__prefix__";
+    const sequenceWidgetSelector = '[data-widget="sequence"]';
+    const enhancedWidgets = new WeakSet();
     const prefixAttributes = [
         "name",
         "id",
@@ -22,6 +24,16 @@
         }
         return element;
     }
+    function ownedElements(root, parent, selector) {
+        return Array.from(parent.querySelectorAll(selector)).filter((element) => element.closest(sequenceWidgetSelector) === root);
+    }
+    function queryRequiredOwnedElement(root, parent, selector) {
+        const element = ownedElements(root, parent, selector)[0];
+        if (!element) {
+            throw new Error(`Missing required element: ${selector}`);
+        }
+        return element;
+    }
     function parseRequiredInteger(value, description) {
         if (!value) {
             throw new Error(`Missing required integer value for ${description}`);
@@ -33,33 +45,33 @@
         return parsed;
     }
     function activeRows(root) {
-        return Array.from(root.querySelectorAll("[data-sequence-row]")).filter((row) => !row.hidden);
+        return ownedElements(root, root, "[data-sequence-row]").filter((row) => !row.hidden);
     }
     function ensureRemoveButton(row) {
-        const root = row.closest('[data-widget="sequence"]');
+        const root = row.closest(sequenceWidgetSelector);
         if (!root) {
             return;
         }
         ensureRemoveButtonInRoot(row, root);
     }
     function ensureRemoveButtonInRoot(row, root) {
-        if (row.querySelector("[data-sequence-remove]")) {
+        if (ownedElements(root, row, "[data-sequence-remove]").length > 0) {
             return;
         }
-        const template = queryRequiredElement(root, "[data-sequence-remove-button]");
+        const template = queryRequiredOwnedElement(root, root, "[data-sequence-remove-button]");
         const fragment = template.content.cloneNode(true);
         const index = parseRequiredInteger(row.dataset.sequenceIndex, "data-sequence-index");
         replacePrefixAttributes(fragment, index);
         row.append(fragment);
     }
     function ensureAddButton(root) {
-        const existing = root.querySelector("[data-sequence-add]");
+        const existing = ownedElements(root, root, "[data-sequence-add]")[0];
         if (existing) {
             return existing;
         }
-        const template = queryRequiredElement(root, "[data-sequence-add-button]");
+        const template = queryRequiredOwnedElement(root, root, "[data-sequence-add-button]");
         root.append(template.content.cloneNode(true));
-        return queryRequiredElement(root, "[data-sequence-add]");
+        return queryRequiredOwnedElement(root, root, "[data-sequence-add]");
     }
     function syncAddButton(root) {
         const addButton = ensureAddButton(root);
@@ -72,11 +84,11 @@
         }
     }
     function removeRow(row) {
-        const root = row.closest('[data-widget="sequence"]');
+        const root = row.closest(sequenceWidgetSelector);
         if (!root) {
             return;
         }
-        const deleteInput = queryRequiredElement(row, "[data-sequence-delete]");
+        const deleteInput = queryRequiredOwnedElement(root, row, "[data-sequence-delete]");
         deleteInput.value = "1";
         row.hidden = true;
         row
@@ -107,35 +119,42 @@
     function addRow(root) {
         const maximum = parseRequiredInteger(root.dataset.sequenceMaximum, "data-sequence-maximum");
         const absoluteMaximum = parseRequiredInteger(root.dataset.sequenceAbsoluteMaximum, "data-sequence-absolute-maximum");
-        const totalInput = queryRequiredElement(root, "[data-sequence-total]");
+        const totalInput = queryRequiredOwnedElement(root, root, "[data-sequence-total]");
         const index = parseRequiredInteger(totalInput.value, "data-sequence-total");
         if (activeRows(root).length >= maximum || index >= absoluteMaximum) {
             return;
         }
-        const template = queryRequiredElement(root, "[data-sequence-empty-row]");
+        const template = queryRequiredOwnedElement(root, root, "[data-sequence-empty-row]");
         const fragment = template.content.cloneNode(true);
         replacePrefixAttributes(fragment, index);
         const row = queryRequiredElement(fragment, "[data-sequence-row]");
         row.dataset.sequenceIndex = String(index);
         ensureRemoveButtonInRoot(row, root);
-        queryRequiredElement(root, "[data-sequence-rows]").append(fragment);
+        queryRequiredOwnedElement(root, root, "[data-sequence-rows]").append(fragment);
         totalInput.value = String(index + 1);
         syncAddButton(root);
+        row
+            .querySelectorAll(sequenceWidgetSelector)
+            .forEach(enhanceWidget);
     }
     function enhanceWidget(root) {
+        if (enhancedWidgets.has(root)) {
+            return;
+        }
         activeRows(root).forEach(ensureRemoveButton);
         syncAddButton(root);
         root.addEventListener("click", (event) => {
-            if (!(event.target instanceof Element)) {
+            if (!(event.target instanceof Element) ||
+                event.target.closest(sequenceWidgetSelector) !== root) {
                 return;
             }
             const addButton = event.target.closest("[data-sequence-add]");
-            if (addButton && root.contains(addButton)) {
+            if (addButton) {
                 addRow(root);
                 return;
             }
             const removeButton = event.target.closest("[data-sequence-remove]");
-            if (!removeButton || !root.contains(removeButton)) {
+            if (!removeButton) {
                 return;
             }
             const row = removeButton.closest("[data-sequence-row]");
@@ -144,10 +163,11 @@
             }
             removeRow(row);
         });
+        enhancedWidgets.add(root);
     }
     function start() {
         document
-            .querySelectorAll('[data-widget="sequence"]')
+            .querySelectorAll(sequenceWidgetSelector)
             .forEach(enhanceWidget);
     }
     if (document.readyState === "loading") {
