@@ -1131,6 +1131,20 @@ class SetFieldTestCase(SimpleTestCase):
         )
         self.assertLessEqual(field.child_field.comparisons, size * 3)
 
+    def test_has_changed_uses_fallback_for_multiple_choice_lists(self):
+        """It compares multiple-choice lists without hashing them."""
+        field = nestingdolls.SetField(
+            forms.MultipleChoiceField(
+                choices=[("first", "First"), ("second", "Second")]
+            ),
+            required=False,
+        )
+
+        self.assertFalse(
+            field.has_changed({("first", "second")}, [["second", "first"]])
+        )
+        self.assertTrue(field.has_changed({("first", "second")}, [["first"]]))
+
     def test_has_changed_keeps_duplicate_blank_invalid_and_json_semantics(self):
         """Indexed matching preserves the child field's semantic edge cases."""
         integer_field = nestingdolls.SetField(
