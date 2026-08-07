@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import unittest
 
@@ -10,6 +11,7 @@ from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.http import QueryDict
 from django.test import SimpleTestCase
+from django.test.html import Element, parse_html
 from django.test.utils import setup_test_environment, teardown_test_environment
 from django.utils.datastructures import MultiValueDict
 from hypothesis import HealthCheck, example, given
@@ -820,6 +822,46 @@ class DictFieldRenderingTestCase(SimpleTestCase):
         form.as_p()
         self.assertEqual(CountingWidget.normalizations, 1)
 
+    def test_all_helper_layouts_parse_and_keep_error_references(self):
+        """Each helper emits parseable markup with resolvable error references."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm)
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        form = Form(
+            {
+                "point-label": "missing a",
+                "values-TOTAL_FORMS": "1",
+                "values-INITIAL_FORMS": "0",
+                "values-0": "bad",
+            }
+        )
+        self.assertIs(form.is_valid(), False)
+
+        for renderer in (form.as_div, form.as_p, form.as_ul, form.as_table):
+            with self.subTest(renderer=renderer.__name__):
+                elements = [parse_html(renderer())]
+                for element in elements:
+                    elements.extend(
+                        child
+                        for child in element.children
+                        if isinstance(child, Element)
+                    )
+
+                element_attributes = [dict(element.attributes) for element in elements]
+                ids = [
+                    attributes["id"]
+                    for attributes in element_attributes
+                    if "id" in attributes
+                ]
+                self.assertEqual(len(ids), len(set(ids)))
+                self.assertIn("id_point-a_error", ids)
+                self.assertIn("id_values_0_error", ids)
+                for attributes in element_attributes:
+                    for reference in attributes.get("aria-describedby", "").split():
+                        self.assertIn(reference, ids)
+
 
 class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
     def test_widget_wrapper_exposes_field_specific_references(self):
@@ -1200,6 +1242,67 @@ class NestedDictFieldTestCase(SimpleTestCase):
                 ]
             },
         )
+
+    def test_every_three_level_mapping_sequence_order_cleans_flat_input(self):
+        """Every three-level mapping and sequence order cleans one leaf value."""
+
+        for order in itertools.product(("mapping", "sequence"), repeat=3):
+            field = forms.IntegerField()
+            expected = 1
+            for depth, kind in enumerate(reversed(order)):
+                if kind == "mapping":
+                    child_form = type(
+                        f"MappingChild{depth}", (forms.Form,), {"child": field}
+                    )
+                    field = nestingdolls.MappingField(child_form)
+                    expected = {"child": expected}
+                else:
+                    field = nestingdolls.ListField(field)
+                    expected = [expected]
+
+            form_class = type("Form", (forms.Form,), {"value": field})
+            name = "value"
+            for kind in order:
+                name += "[child]" if kind == "mapping" else "[0]"
+            form = form_class({name: "1"})
+
+            with self.subTest(order=order):
+                self.assertIs(form.is_valid(), True, form.errors)
+                self.assertEqual(form.cleaned_data["value"], expected)
+
+    def test_nested_clearable_file_and_compound_children_follow_django(self):
+        """Nested files retain Django clear and compound-widget behavior."""
+
+        class AssetForm(forms.Form):
+            upload = forms.FileField(required=False, widget=forms.ClearableFileInput)
+            happened_at = forms.SplitDateTimeField()
+
+        class Form(forms.Form):
+            assets = nestingdolls.ListField(nestingdolls.MappingField(AssetForm))
+
+        data = {
+            "assets-0-upload-clear": "1",
+            "assets-0-happened_at_0": "2026-08-01",
+            "assets-0-happened_at_1": "10:30:00",
+        }
+        initial = {"assets": [{"upload": SimpleUploadedFile("old.txt", b"old")}]}
+        cleared = Form(data, initial=initial)
+
+        self.assertIs(cleared.is_valid(), True, cleared.errors)
+        self.assertIs(cleared.cleaned_data["assets"][0]["upload"], False)
+        self.assertEqual(
+            cleared.cleaned_data["assets"][0]["happened_at"]
+            .replace(tzinfo=None)
+            .isoformat(),
+            "2026-08-01T10:30:00",
+        )
+
+        contradictory = Form(
+            data,
+            files={"assets-0-upload": SimpleUploadedFile("new.txt", b"new")},
+            initial=initial,
+        )
+        self.assertIs(contradictory.is_valid(), False)
 
 
 class DictFieldPropertyTestCase(SimpleTestCase):
