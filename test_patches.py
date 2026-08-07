@@ -66,7 +66,7 @@ class FormRenderingPatchTestCase(SimpleTestCase):
         install_form_rendering_patch()
         install_form_rendering_patch()
 
-        self.assertTrue(BaseForm.nestingdolls_render_patch_installed)
+        self.assertIs(BaseForm.nestingdolls_render_patch_installed, True)
         self.assertIs(BaseForm.nestingdolls_original_render, original_render)
 
     def test_patch_preserves_wrapped_method(self):
@@ -111,9 +111,9 @@ class FormRenderingPatchTestCase(SimpleTestCase):
             install_form_rendering_patch()
             html = Form().as_p()
 
-        self.assertTrue(wrapper_layouts)
+        self.assertIs(bool(wrapper_layouts), True)
         self.assertEqual(set(wrapper_layouts), {FormLayout.p})
-        self.assertTrue(widget_layouts)
+        self.assertIs(bool(widget_layouts), True)
         self.assertEqual(set(widget_layouts), {FormLayout.p})
         self.assertIs(html, render_results[-1])
         self.assertIs(BaseForm.nestingdolls_original_render, original_render)
@@ -153,7 +153,7 @@ class FormRenderingPatchTestCase(SimpleTestCase):
                 html = form.as_p()
 
                 self.assertIs(form.renderer, renderer)
-                self.assertTrue(widget_layouts)
+                self.assertIs(bool(widget_layouts), True)
                 self.assertEqual(set(widget_layouts), {FormLayout.p})
                 self.assertIn('data-widget="mapping"', html)
                 self.assertIn('name="child-value"', html)

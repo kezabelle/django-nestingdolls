@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import copy
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
+from django.core.files.uploadedfile import UploadedFile
 from django.forms import BaseForm, Field
 from django.forms.boundfield import BoundField
+from django.forms.fields import FileField
 from django.forms.utils import ErrorList
 from django.forms.widgets import Media as WidgetMedia
 from django.forms.widgets import Widget
@@ -46,7 +47,6 @@ class MappingWidget(CompositeWidget):
 
     _template_name = "nestingdolls/mapping/{layout}.html"
     use_fieldset = True
-    input_type: str | None = None
 
     def __init__(
         self,
@@ -141,15 +141,37 @@ class MappingWidget(CompositeWidget):
         if not data and not files:
             return {}
 
-        return {
-            child_name: field.widget.value_from_datadict(
-                data, files, f"{name}-{child_name}"
+        file_data = cast(MultiValueDict[str, UploadedFile], files)
+        value: dict[str, object] = {}
+        for child_name, field in self.fields.items():
+            child_widget = self._child_widget(field)
+            child_input_name = f"{name}-{child_name}"
+            if child_widget.value_omitted_from_data(data, file_data, child_input_name):
+                continue
+            value[child_name] = child_widget.value_from_datadict(
+                data, file_data, child_input_name
             )
-            for child_name, field in self.fields.items()
-            if not field.widget.value_omitted_from_data(
-                data, files, f"{name}-{child_name}"
-            )
-        }
+        return value
+
+    def _child_widget(self, field: Field) -> Widget:
+        """Return the child widget for this composite widget's current mode."""
+        return self._hidden_child_widget(field) if super().is_hidden else field.widget
+
+    def _normalize_hidden_initial(self, field: Field, value: object) -> object:
+        """Normalize submitted hidden child values recursively."""
+        value = field.to_python(value)
+        if not isinstance(value, dict):
+            return value
+        for name, child_field in self.fields.items():
+            if name not in value or isinstance(child_field, FileField):
+                continue
+            if isinstance(child_field.widget, CompositeWidget):
+                value[name] = child_field.widget._normalize_hidden_initial(
+                    child_field, value[name]
+                )
+            else:
+                value[name] = child_field.to_python(value[name])
+        return value
 
     def value_from_datadict(
         self,
@@ -325,13 +347,36 @@ class MappingBoundField(BoundField):
     ) -> SafeString:
         """Render the cached child Form through the mapping widget."""
         widget = widget or self.field.widget
-        if only_initial or not isinstance(widget, MappingWidget):
+        if not isinstance(widget, MappingWidget):
             return super().as_widget(widget, attrs, only_initial)
         if self.field.localize:
             widget.is_localized = True
         attrs = self.build_widget_attrs(dict(attrs or {}), widget)
         if self.auto_id and "id" not in widget.attrs:
-            attrs.setdefault("id", self.auto_id)
+            attrs.setdefault(
+                "id", self.html_initial_id if only_initial else self.auto_id
+            )
+        if only_initial:
+            name = self.html_initial_name
+            normalized_data = widget._normalize_mapping(self.form.data, name)
+            normalized_files = (
+                widget._normalize_mapping(self.form.files, name)
+                if self.form.files
+                else {}
+            )
+            value = (
+                widget._value_from_normalized_data(
+                    normalized_data, normalized_files, name
+                )
+                if normalized_data or normalized_files
+                else self.value()
+            )
+            return widget.render(
+                name,
+                value,
+                attrs=attrs,
+                renderer=self.form.renderer,
+            )
         return widget.render(
             self.html_name,
             self.subform,
@@ -345,25 +390,21 @@ class MappingBoundField(BoundField):
         **kwargs: Any,
     ) -> SafeString:
         """Render each child through its own hidden widget."""
-        widget = copy.deepcopy(self.field.widget)
-        widget.input_type = "hidden"
-        return self.as_widget(widget, attrs, **kwargs)
+        return self.as_widget(self.field.widget.hidden_widget(), attrs, **kwargs)
 
     def _has_changed(self) -> bool:
         """Read hidden mapping initial values through the mapping widget."""
+        if self.field.disabled:
+            return False
         if not self.field.show_hidden_initial:
             return cast(bool, super()._has_changed())  # type: ignore[misc]
-        widget = copy.deepcopy(self.field.widget)
-        widget.input_type = "hidden"
+        widget = self.field.widget.hidden_widget()
         initial_value = widget.value_from_datadict(
             self.form.data, self.form.files, self.html_initial_name
         )
         try:
-            initial_value = self.field.to_python(initial_value)
-            for name, field in self.field.form_class().fields.items():
-                if name in initial_value:
-                    initial_value[name] = field.to_python(initial_value[name])
-        except ValidationError:
+            initial_value = widget._normalize_hidden_initial(self.field, initial_value)
+        except (TypeError, ValidationError):
             return True
         return self.field.has_changed(initial_value, self.data)
 

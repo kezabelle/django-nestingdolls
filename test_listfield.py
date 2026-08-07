@@ -21,6 +21,7 @@ from django.http import QueryDict
 from django.test import SimpleTestCase, override_settings
 from django.test.utils import setup_test_environment, teardown_test_environment
 from django.utils import translation
+from django.utils.datastructures import MultiValueDict
 from hypothesis import HealthCheck, assume, example, given
 from hypothesis import settings as hypothesis_settings
 from hypothesis import strategies as st
@@ -129,7 +130,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             )
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assert_cleaned_values(form.cleaned_data["values"], [1, 2, 3])
 
     def test_plain_mapping_uses_indexed_values_without_management_data(self):
@@ -140,7 +141,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
         form = Form({"values-0": "1", "values-1": "2"})
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], [1, 2])
 
     def test_accepts_direct_and_flat_data_spellings(self):
@@ -159,7 +160,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         for data in data_shapes:
             with self.subTest(data=data):
                 form = Form(data)
-                self.assertTrue(form.is_valid(), form.errors)
+                self.assertIs(form.is_valid(), True, form.errors)
                 self.assertEqual(form.cleaned_data["values"], [1, 2, 3])
 
     def test_sparse_high_index_dot_and_bracket_rows_are_accepted_without_management_data(
@@ -178,7 +179,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         for data in data_shapes:
             with self.subTest(data=data):
                 form = Form(data)
-                self.assertTrue(form.is_valid(), form.errors)
+                self.assertIs(form.is_valid(), True, form.errors)
                 self.assertEqual(form.cleaned_data["values"], [3])
 
     def test_json_null_row_is_rejected_consistently_across_supported_spellings(self):
@@ -197,7 +198,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         for data in data_shapes:
             with self.subTest(data=data):
                 form = Form(data)
-                self.assertFalse(form.is_valid())
+                self.assertIs(form.is_valid(), False)
                 self.assertIsInstance(
                     form.errors.as_data()["values"][0],
                     nestingdolls.ItemValidationError,
@@ -261,7 +262,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             values = nestingdolls.ListField(forms.IntegerField())
 
         bound = Form({"values": "1"})
-        self.assertTrue(bound.is_valid(), bound.errors)
+        self.assertIs(bound.is_valid(), True, bound.errors)
         self.assertEqual(bound.cleaned_data["values"], [1])
         self.assertInHTML(
             '<input type="number" name="values-0" value="1" id="id_values_0">',
@@ -305,7 +306,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             values = nestingdolls.ListField(forms.IntegerField())
 
         missing_initial = Form(QueryDict("values-TOTAL_FORMS=1&values-0=1"))
-        self.assertFalse(missing_initial.is_valid())
+        self.assertIs(missing_initial.is_valid(), False)
         self.assertFormError(
             missing_initial,
             "values",
@@ -319,7 +320,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         )
 
         missing_total = Form(QueryDict("values-INITIAL_FORMS=0&values-0=1"))
-        self.assertFalse(missing_total.is_valid())
+        self.assertIs(missing_total.is_valid(), False)
         self.assertFormError(
             missing_total,
             "values",
@@ -345,7 +346,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             )
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], [1, 2])
 
     def test_overlapping_spellings_use_normal_overwrite_semantics(self):
@@ -372,7 +373,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         for data, expected, label in cases:
             with self.subTest(label=label, data=data):
                 form = Form(data)
-                self.assertTrue(form.is_valid(), form.errors)
+                self.assertIs(form.is_valid(), True, form.errors)
                 self.assertEqual(form.cleaned_data["values"], expected)
 
     def test_item_errors_are_inline_and_available_to_api_consumers(self):
@@ -389,7 +390,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             )
         )
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         errors = form.errors.as_data()["values"]
         self.assertEqual(
             [error.code for error in errors], ["item_invalid", "item_invalid"]
@@ -422,7 +423,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             initial={"values": [1]},
         )
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         html = form.as_p()
         self.assertInHTML(
             '<input type="hidden" name="values-TOTAL_FORMS" value="2" data-sequence-total id="id_values-TOTAL_FORMS">',
@@ -448,7 +449,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             initial={"values": [1]},
         )
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["values"][0].code, "min_length")
         self.assertInHTML(
             '<input type="hidden" name="values-INITIAL_FORMS" value="1" id="id_values-INITIAL_FORMS">',
@@ -470,7 +471,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         data[f"values-1-{DELETION_FIELD_NAME}"] = "on"
         form = Form(data, initial={"values": [1]})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         html = form.as_p()
         self.assertInHTML(
             '<input type="hidden" name="values-INITIAL_FORMS" value="1" id="id_values-INITIAL_FORMS">',
@@ -509,7 +510,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             with self.subTest(data=data):
                 form = Form(data, initial={"values": [1]})
 
-                self.assertFalse(form.is_valid())
+                self.assertIs(form.is_valid(), False)
                 self.assertIsInstance(
                     form.errors.as_data()["values"][0],
                     nestingdolls.MissingManagementFormValidationError,
@@ -543,7 +544,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             )
         )
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(
             [error.code for error in form.errors.as_data()["emails"]],
             ["item_invalid"] * 5,
@@ -575,7 +576,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             )
         )
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(list(form["values"].errors), ["Outer sequence error."])
         self.assertEqual(form.as_p().count("Outer sequence error."), 1)
 
@@ -595,9 +596,9 @@ class SequenceFieldTestCase(SimpleTestCase):
             initial={"values": [1, 2]},
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], [1])
-        self.assertTrue(form.has_changed())
+        self.assertIs(form.has_changed(), True)
 
     def test_delete_flags_follow_django_boolean_semantics(self):
         """It treats standard Django truthy delete flags as deletes."""
@@ -615,7 +616,7 @@ class SequenceFieldTestCase(SimpleTestCase):
                 )
                 data["values-0-DELETE"] = delete_value
                 form = Form(data, initial={"values": [1]})
-                self.assertTrue(form.is_valid(), form.errors)
+                self.assertIs(form.is_valid(), True, form.errors)
                 self.assertEqual(form.cleaned_data["values"], [])
 
     def test_cardinality_is_independent_from_required(self):
@@ -635,9 +636,9 @@ class SequenceFieldTestCase(SimpleTestCase):
             )
         )
 
-        self.assertTrue(empty.is_valid(), empty.errors)
+        self.assertIs(empty.is_valid(), True, empty.errors)
         self.assertEqual(empty.cleaned_data["values"], [])
-        self.assertFalse(short.is_valid())
+        self.assertIs(short.is_valid(), False)
         self.assertFormError(
             short,
             "values",
@@ -660,7 +661,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             )
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], [1])
 
     def test_management_total_uses_formset_absolute_maximum(self):
@@ -674,7 +675,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         data[f"values-{INITIAL_FORM_COUNT}"] = "0"
         form = Form(data)
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["values"][0].code, "too_many_forms")
 
     def test_flat_mapping_uses_the_same_absolute_maximum(self):
@@ -685,7 +686,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
         form = Form({f"values-{DEFAULT_MAX_NUM + 1}": "1"})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["values"][0].code, "too_many_forms")
 
     def test_indexes_are_ascii_only_and_do_not_use_unbounded_integer_parsing(self):
@@ -697,7 +698,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             )
 
         unicode_digits = Form({"values-²": "1", "values[١]": "2"})
-        self.assertTrue(unicode_digits.is_valid(), unicode_digits.errors)
+        self.assertIs(unicode_digits.is_valid(), True, unicode_digits.errors)
         self.assertEqual(unicode_digits.cleaned_data["values"], [])
 
         class SparseForm(forms.Form):
@@ -710,7 +711,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         ):
             with self.subTest(style=style):
                 form = SparseForm(data)
-                self.assertTrue(form.is_valid(), form.errors)
+                self.assertIs(form.is_valid(), True, form.errors)
                 self.assertEqual(form.cleaned_data["values"], [False, True])
                 normalized = form.fields["values"].widget._normalize_mapping(
                     form.data, "values"
@@ -719,14 +720,14 @@ class SequenceFieldTestCase(SimpleTestCase):
                 self.assertIn("values-1", normalized)
 
         long_index = Form({f"values-{'9' * 5000}": "1"})
-        self.assertFalse(long_index.is_valid())
+        self.assertIs(long_index.is_valid(), False)
         self.assertEqual(
             long_index.errors.as_data()["values"][0].code, "too_many_forms"
         )
         normalized = long_index.fields["values"].widget._normalize_mapping(
             long_index.data, "values"
         )
-        self.assertFalse(any(key.startswith("values-1001") for key in normalized))
+        self.assertIs(any(key.startswith("values-1001") for key in normalized), False)
 
     def test_sparse_unmanaged_indexes_do_not_expand_rendering(self):
         """A sparse flat index renders as one dense row when management data is absent."""
@@ -737,7 +738,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
         form = Form({"other": "bad", "values-1999": "on"})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         html = form.as_p()
         self.assertIn('name="values-1"', html)
         self.assertNotIn('name="values-1999"', html)
@@ -772,7 +773,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         with self.assertRaises(ValidationError) as context:
             field.clean(values)
         self.assertEqual(context.exception.error_list[0].code, "too_many_forms")
-        self.assertTrue(field.has_changed([], values))
+        self.assertIs(field.has_changed([], values), True)
 
         form = Form(
             {
@@ -782,7 +783,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             }
         )
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["values"][0].code, "too_many_forms")
         form.as_p()
 
@@ -809,7 +810,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
         form = Form({"values": ["1"]})
 
-        self.assertTrue(form.has_changed())
+        self.assertIs(form.has_changed(), True)
 
     def test_management_data_and_file_inference_are_deterministic(self):
         """It infers across both inputs and accepts management data from files."""
@@ -827,7 +828,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             )
 
         inferred = TextForm({"values-0": "data"}, files={"values-1": "file"})
-        self.assertTrue(inferred.is_valid(), inferred.errors)
+        self.assertIs(inferred.is_valid(), True, inferred.errors)
         self.assertEqual(inferred.cleaned_data["values"], ["data", "file"])
 
         class UploadForm(forms.Form):
@@ -842,7 +843,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             "values-1": second,
         }
         files_authoritative = UploadForm({}, files=files)
-        self.assertTrue(files_authoritative.is_valid(), files_authoritative.errors)
+        self.assertIs(files_authoritative.is_valid(), True, files_authoritative.errors)
         self.assertEqual(files_authoritative.cleaned_data["values"], [first, second])
 
         malformed = TextForm(
@@ -853,7 +854,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             },
             files={"values-1": "file"},
         )
-        self.assertFalse(malformed.is_valid())
+        self.assertIs(malformed.is_valid(), False)
         self.assertIsInstance(
             malformed.errors.as_data()["values"][0],
             nestingdolls.MissingManagementFormValidationError,
@@ -887,7 +888,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         data["values-1"] = "not an integer"
         form = Form(data)
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], [1])
 
     def test_disabled_children_clean_and_validate_sequence_initials(self):
@@ -902,7 +903,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             ),
             initial={"values": ["7"]},
         )
-        self.assertTrue(valid.is_valid(), valid.errors)
+        self.assertIs(valid.is_valid(), True, valid.errors)
         self.assertEqual(valid.cleaned_data["values"], [7])
 
         invalid = Form(
@@ -911,7 +912,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             ),
             initial={"values": ["bad"]},
         )
-        self.assertFalse(invalid.is_valid())
+        self.assertIs(invalid.is_valid(), False)
         error = invalid.errors.as_data()["values"][0]
         self.assertEqual(error.code, "item_invalid")
         self.assertEqual(error.params["child_code"], "invalid")
@@ -923,14 +924,14 @@ class SequenceFieldTestCase(SimpleTestCase):
             values = nestingdolls.ListField(forms.IntegerField())
 
         extra_only = Form({"values-1": "2"})
-        self.assertTrue(extra_only.is_valid(), extra_only.errors)
+        self.assertIs(extra_only.is_valid(), True, extra_only.errors)
         self.assertEqual(extra_only.cleaned_data["values"], [2])
 
         initial_missing = Form(
             QueryDict("values-TOTAL_FORMS=1&values-INITIAL_FORMS=1"),
             initial={"values": [1]},
         )
-        self.assertFalse(initial_missing.is_valid())
+        self.assertIs(initial_missing.is_valid(), False)
         self.assertEqual(
             initial_missing.errors.as_data()["values"][0].params["item"], 0
         )
@@ -950,7 +951,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             initial={"values": [10]},
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], [10, 30])
 
     def test_leading_zero_indexes_normalize_once(self):
@@ -960,7 +961,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             values = nestingdolls.ListField(forms.IntegerField())
 
         form = Form({"values-01": "2"})
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], [2])
 
     def test_rejects_unhashable_cleaned_values(self):
@@ -975,7 +976,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
         form = Form({"values": [{"answer": 42}]})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["values"][0].code, "unhashable")
 
     def test_has_changed_uses_child_field_semantics(self):
@@ -990,8 +991,8 @@ class SequenceFieldTestCase(SimpleTestCase):
         json_form = JsonForm({"values": ["1"]}, initial={"values": [True]})
         set_form = SetForm({"values": ["2", "1", "1"]}, initial={"values": {1, 2}})
 
-        self.assertTrue(json_form.has_changed())
-        self.assertFalse(set_form.has_changed())
+        self.assertIs(json_form.has_changed(), True)
+        self.assertIs(set_form.has_changed(), False)
 
         upload = SimpleUploadedFile("same.txt", b"same")
 
@@ -1006,7 +1007,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             initial={"values": [upload]},
         )
 
-        self.assertTrue(file_form.has_changed())
+        self.assertIs(file_form.has_changed(), True)
 
     def test_disabled_oversized_sequences_are_unchanged(self):
         """Disabled sequence fields never inspect or reject submitted rows as changes."""
@@ -1026,7 +1027,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             values = ["1"] * (absolute_max + 1)
             with self.subTest(field_class=field_class.__name__):
                 form = Form({"values": values})
-                self.assertFalse(form.has_changed())
+                self.assertIs(form.has_changed(), False)
 
     def test_has_changed_detects_added_and_removed_integer_rows(self):
         """It treats added and removed integer rows as changes."""
@@ -1034,11 +1035,11 @@ class SequenceFieldTestCase(SimpleTestCase):
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), required=False)
 
-        self.assertFalse(Form({"values": []}, initial={"values": []}).has_changed())
-        self.assertTrue(Form({"values": [0]}, initial={"values": []}).has_changed())
-        self.assertTrue(Form({"values": []}, initial={"values": [0]}).has_changed())
-        self.assertFalse(
-            Form({"values": [0, 1]}, initial={"values": [0, 1]}).has_changed()
+        self.assertIs(Form({"values": []}, initial={"values": []}).has_changed(), False)
+        self.assertIs(Form({"values": [0]}, initial={"values": []}).has_changed(), True)
+        self.assertIs(Form({"values": []}, initial={"values": [0]}).has_changed(), True)
+        self.assertIs(
+            Form({"values": [0, 1]}, initial={"values": [0, 1]}).has_changed(), False
         )
 
     def test_has_changed_propagates_child_value_errors(self):
@@ -1066,7 +1067,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
         form = Form({"values": []})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["values"][0].code, "required")
 
     def test_to_python_rejects_errors_as_values(self):
@@ -1099,7 +1100,7 @@ class SequenceFieldTestCase(SimpleTestCase):
 
         form = Form(QueryDict("values-TOTAL_FORMS=1&values-0=9"))
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], [1])
         self.assertInHTML(
             '<input type="number" name="values-0" value="1" disabled id="id_values_0">',
@@ -1115,24 +1116,82 @@ class SequenceFieldTestCase(SimpleTestCase):
             )
 
         data = QueryDict(
-            f"values-{TOTAL_FORM_COUNT}=1&values-{INITIAL_FORM_COUNT}=0&values-0=1",
-            mutable=True,
+            f"values-{TOTAL_FORM_COUNT}=1&values-{INITIAL_FORM_COUNT}=0&values-0=1&"
+            f"initial-values-{TOTAL_FORM_COUNT}=1&"
+            f"initial-values-{INITIAL_FORM_COUNT}=1&"
+            f"initial-values-{MIN_NUM_FORM_COUNT}=0&"
+            f"initial-values-{MAX_NUM_FORM_COUNT}=1000&initial-values-0=1"
         )
-        data.setlist("initial-values", ["1"])
         form = Form(data)
 
-        self.assertFalse(form.has_changed())
+        self.assertIs(form.has_changed(), False)
         self.assertInHTML(
-            '<input type="hidden" name="initial-values" value="1" id="initial-id_values_0">',
+            '<input type="hidden" name="initial-values-TOTAL_FORMS" value="1" id="id_initial-values-TOTAL_FORMS">',
+            form.as_p(),
+        )
+        self.assertInHTML(
+            '<input type="hidden" name="initial-values-INITIAL_FORMS" value="1" id="id_initial-values-INITIAL_FORMS">',
+            form.as_p(),
+        )
+        self.assertInHTML(
+            '<input type="hidden" name="initial-values-MIN_NUM_FORMS" value="0" id="id_initial-values-MIN_NUM_FORMS">',
+            form.as_p(),
+        )
+        self.assertInHTML(
+            '<input type="hidden" name="initial-values-MAX_NUM_FORMS" value="1000" id="id_initial-values-MAX_NUM_FORMS">',
+            form.as_p(),
+        )
+        self.assertInHTML(
+            '<input type="hidden" name="initial-values-0" value="1" id="initial-id_values_0">',
             form.as_p(),
         )
 
         malformed_initial = QueryDict(
+            f"values-{TOTAL_FORM_COUNT}=1&values-{INITIAL_FORM_COUNT}=0&values-0=1&"
+            f"initial-values-{TOTAL_FORM_COUNT}=1&"
+            f"initial-values-{INITIAL_FORM_COUNT}=1&initial-values-0=not-an-integer"
+        )
+        self.assertIs(Form(malformed_initial).has_changed(), True)
+
+        changed = data.copy()
+        changed["values-0"] = "2"
+        self.assertIs(Form(changed).has_changed(), True)
+
+        legacy = QueryDict(
             f"values-{TOTAL_FORM_COUNT}=1&values-{INITIAL_FORM_COUNT}=0&values-0=1",
             mutable=True,
         )
-        malformed_initial.setlist("initial-values", ["not-an-integer"])
-        self.assertTrue(Form(malformed_initial).has_changed())
+        legacy.setlist("initial-values", ["1"])
+        self.assertIs(Form(legacy).has_changed(), False)
+
+    def test_show_hidden_initial_round_trips_mapping_rows(self):
+        """It renders and reads each hidden mapping child by its indexed name."""
+
+        class PointForm(forms.Form):
+            a = forms.IntegerField()
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.MappingField(PointForm),
+                initial=[{"a": 1}],
+                show_hidden_initial=True,
+            )
+
+        html = Form().as_p()
+        self.assertNotIn("{&#x27;a&#x27;: 1}", html)
+        self.assertIn('name="initial-values-TOTAL_FORMS"', html)
+        self.assertIn('name="initial-values-0-a"', html)
+
+        form = Form(
+            QueryDict(
+                "values-TOTAL_FORMS=1&values-INITIAL_FORMS=0&values-0-a=1&"
+                "initial-values-TOTAL_FORMS=1&initial-values-INITIAL_FORMS=1&"
+                "initial-values-MIN_NUM_FORMS=0&initial-values-MAX_NUM_FORMS=1000&"
+                "initial-values-0-a=1"
+            )
+        )
+
+        self.assertIs(form.has_changed(), False)
 
     def test_item_invalid_errors_preserve_child_codes(self):
         """It preserves child error codes inside item errors."""
@@ -1154,7 +1213,7 @@ class SequenceFieldTestCase(SimpleTestCase):
                 f"values-{TOTAL_FORM_COUNT}=1&values-{INITIAL_FORM_COUNT}=0&values-0=x"
             )
         )
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         errors = form.errors.as_data()["values"]
         self.assertEqual([error.message for error in errors], ["first", "second"])
         self.assertEqual(
@@ -1201,7 +1260,7 @@ class SetFieldTestCase(SimpleTestCase):
         cleaned = field.clean(["2", "1", "1"])
         self.assertIsInstance(cleaned, frozenset)
         self.assertEqual(cleaned, frozenset({1, 2}))
-        self.assertFalse(field.has_changed(frozenset({1, 2}), ["2", "1", "1"]))
+        self.assertIs(field.has_changed(frozenset({1, 2}), ["2", "1", "1"]), False)
         with self.assertRaises(ValidationError) as context:
             nestingdolls.FrozenSetField(forms.JSONField()).clean([{"answer": 42}])
         self.assertEqual(context.exception.code, "unhashable")
@@ -1209,7 +1268,7 @@ class SetFieldTestCase(SimpleTestCase):
             nestingdolls.FrozenSetField(forms.IntegerField(), required=False),
             required=False,
         )
-        self.assertFalse(parent.has_changed([frozenset({1, 2})], [["2", "1", "1"]]))
+        self.assertIs(parent.has_changed([frozenset({1, 2})], [["2", "1", "1"]]), False)
 
     def test_oversized_direct_payload_short_circuits_set_comparison(self):
         """It stops set comparison immediately for oversized direct lists."""
@@ -1225,7 +1284,7 @@ class SetFieldTestCase(SimpleTestCase):
             field = field_class(UnreachableField(), max_length=0, required=False)
             values = ["1"] * (field.absolute_max + 1)
             with self.subTest(field_class=field_class.__name__):
-                self.assertTrue(field.has_changed(expected_initial, values))
+                self.assertIs(field.has_changed(expected_initial, values), True)
 
     def test_has_changed_propagates_child_value_errors(self):
         """It preserves child comparison value errors."""
@@ -1257,10 +1316,11 @@ class SetFieldTestCase(SimpleTestCase):
             CountingIntegerField(), max_length=size, required=False
         )
 
-        self.assertFalse(
+        self.assertIs(
             field.has_changed(
                 set(range(size)), [str(value) for value in reversed(range(size))]
-            )
+            ),
+            False,
         )
         self.assertLessEqual(field.child_field.comparisons, size * 3)
 
@@ -1273,10 +1333,10 @@ class SetFieldTestCase(SimpleTestCase):
             required=False,
         )
 
-        self.assertFalse(
-            field.has_changed({("first", "second")}, [["second", "first"]])
+        self.assertIs(
+            field.has_changed({("first", "second")}, [["second", "first"]]), False
         )
-        self.assertTrue(field.has_changed({("first", "second")}, [["first"]]))
+        self.assertIs(field.has_changed({("first", "second")}, [["first"]]), True)
 
     def test_has_changed_keeps_duplicate_blank_invalid_and_json_semantics(self):
         """Indexed matching preserves the child field's semantic edge cases."""
@@ -1285,9 +1345,9 @@ class SetFieldTestCase(SimpleTestCase):
         )
         json_field = nestingdolls.SetField(forms.JSONField(), required=False)
 
-        self.assertFalse(integer_field.has_changed({1}, ["1", "1", ""]))
-        self.assertTrue(integer_field.has_changed({1}, ["invalid"]))
-        self.assertTrue(json_field.has_changed({True}, ["1"]))
+        self.assertIs(integer_field.has_changed({1}, ["1", "1", ""]), False)
+        self.assertIs(integer_field.has_changed({1}, ["invalid"]), True)
+        self.assertIs(json_field.has_changed({True}, ["1"]), True)
 
     def test_tuple_child_set_has_changed_ignores_order_for_equal_members(self):
         """It treats reordered tuple-set members as unchanged."""
@@ -1312,7 +1372,7 @@ class SetFieldTestCase(SimpleTestCase):
             initial={"values": {(1, 0), (1, 1)}},
         )
 
-        self.assertFalse(form.has_changed())
+        self.assertIs(form.has_changed(), False)
 
     def test_splitdatetime_child_set_has_changed_ignores_order_for_equal_members(self):
         """It treats reordered SplitDateTime set members as unchanged."""
@@ -1335,7 +1395,7 @@ class SetFieldTestCase(SimpleTestCase):
             },
         )
 
-        self.assertFalse(form.has_changed())
+        self.assertIs(form.has_changed(), False)
 
     def test_frozenset_tuple_child_has_changed_ignores_order_for_equal_members(self):
         """It keeps frozenset tuple children order-insensitive as well."""
@@ -1360,7 +1420,218 @@ class SetFieldTestCase(SimpleTestCase):
             initial={"values": frozenset({(1, 0), (1, 1)})},
         )
 
-        self.assertFalse(form.has_changed())
+        self.assertIs(form.has_changed(), False)
+
+
+class CompositeHiddenInitialTestCase(SimpleTestCase):
+    def test_blank_mapping_row_with_optional_checkbox_is_omitted(self):
+        """An empty nested mapping row remains absent."""
+
+        class RowForm(forms.Form):
+            active = forms.BooleanField(required=False)
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.MappingField(RowForm), required=False
+            )
+
+        form = Form(QueryDict("values-TOTAL_FORMS=1&values-INITIAL_FORMS=0"))
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["values"], [])
+
+    def test_each_sequence_collection_round_trips_an_integer_child(self):
+        """Each sequence collection reads one indexed hidden integer."""
+        for field_class, initial in (
+            (nestingdolls.ListField, [1]),
+            (nestingdolls.TupleField, (1,)),
+            (nestingdolls.SetField, {1}),
+            (nestingdolls.FrozenSetField, frozenset({1})),
+        ):
+            with self.subTest(field_class=field_class.__name__):
+
+                class Form(forms.Form):
+                    values = field_class(
+                        forms.IntegerField(),
+                        initial=initial,
+                        show_hidden_initial=True,
+                    )
+
+                form = Form(
+                    QueryDict(
+                        "values-TOTAL_FORMS=1&values-INITIAL_FORMS=0&values-0=1&"
+                        "initial-values-TOTAL_FORMS=1&"
+                        "initial-values-INITIAL_FORMS=1&initial-values-0=1"
+                    )
+                )
+
+                self.assertIs(form.has_changed(), False)
+
+    def test_compound_child_uses_its_specialized_hidden_widget(self):
+        """A compound child keeps its hidden subwidgets and change semantics."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.SplitDateTimeField(),
+                initial=[datetime(2024, 1, 2, 3, 4, 5)],  # noqa: DTZ001
+                show_hidden_initial=True,
+            )
+
+        html = Form().as_p()
+        self.assertInHTML(
+            '<input type="hidden" name="initial-values-0_0" value="2024-01-02" id="initial-id_values_0_0">',
+            html,
+        )
+        self.assertInHTML(
+            '<input type="hidden" name="initial-values-0_1" value="03:04:05" id="initial-id_values_0_1">',
+            html,
+        )
+
+        form = Form(
+            QueryDict(
+                "values-TOTAL_FORMS=1&values-INITIAL_FORMS=0&"
+                "values-0_0=2024-01-02&values-0_1=03%3A04%3A05&"
+                "initial-values-TOTAL_FORMS=1&"
+                "initial-values-INITIAL_FORMS=1&"
+                "initial-values-0_0=2024-01-02&"
+                "initial-values-0_1=03%3A04%3A05"
+            )
+        )
+        self.assertIs(form.has_changed(), False)
+
+    def test_file_child_ignores_the_hidden_filename_but_detects_an_upload(self):
+        """File change detection remains based on the visible upload."""
+
+        class Form(forms.Form):
+            files = nestingdolls.ListField(
+                forms.FileField(required=False),
+                initial=["saved.txt"],
+                required=False,
+                show_hidden_initial=True,
+            )
+
+        data = QueryDict(
+            "files-TOTAL_FORMS=1&files-INITIAL_FORMS=1&"
+            "initial-files-TOTAL_FORMS=1&initial-files-INITIAL_FORMS=1&"
+            "initial-files-0=saved.txt"
+        )
+        self.assertIs(Form(data).has_changed(), False)
+
+        upload = SimpleUploadedFile("replacement.txt", b"replacement")
+        form = Form(data, files=MultiValueDict({"files-0": [upload]}))
+        self.assertIs(form.has_changed(), True)
+
+    def test_disabled_outer_composites_ignore_visible_and_hidden_tampering(self):
+        """Disabled composites retain their configured initial values."""
+
+        class PointForm(forms.Form):
+            a = forms.IntegerField()
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(
+                PointForm,
+                initial={"a": 1},
+                disabled=True,
+                show_hidden_initial=True,
+            )
+            values = nestingdolls.ListField(
+                forms.IntegerField(),
+                initial=[1],
+                disabled=True,
+                show_hidden_initial=True,
+            )
+
+        form = Form(
+            QueryDict(
+                "point-a=9&initial-point=malformed&"
+                "values-TOTAL_FORMS=1&values-INITIAL_FORMS=1&values-0=9&"
+                "initial-values-TOTAL_FORMS=malformed&"
+                "initial-values-INITIAL_FORMS=1&initial-values-0=8"
+            )
+        )
+
+        self.assertIs(form.has_changed(), False)
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["point"], {"a": 1})
+        self.assertEqual(form.cleaned_data["values"], [1])
+
+    def test_invalid_redisplay_keeps_the_submitted_hidden_initial(self):
+        """Invalid visible data does not replace the submitted hidden initial."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.IntegerField(), initial=[1], show_hidden_initial=True
+            )
+
+        form = Form(
+            QueryDict(
+                "values-TOTAL_FORMS=1&values-INITIAL_FORMS=0&values-0=bad&"
+                "initial-values-TOTAL_FORMS=1&"
+                "initial-values-INITIAL_FORMS=1&initial-values-0=7"
+            )
+        )
+
+        self.assertIs(form.is_valid(), False)
+        self.assertInHTML(
+            '<input type="hidden" name="initial-values-0" value="7" id="initial-id_values_0">',
+            form.as_p(),
+        )
+
+    def test_mapping_containing_sequence_containing_mapping_round_trips(self):
+        """Hidden initial parsing recurses through alternating composites."""
+
+        class PointForm(forms.Form):
+            a = forms.IntegerField()
+
+        class ContainerForm(forms.Form):
+            rows = nestingdolls.ListField(nestingdolls.MappingField(PointForm))
+
+        class Form(forms.Form):
+            container = nestingdolls.MappingField(
+                ContainerForm,
+                initial={"rows": [{"a": 1}]},
+                show_hidden_initial=True,
+            )
+
+        html = Form().as_p()
+        self.assertIn('name="initial-container-rows-TOTAL_FORMS"', html)
+        self.assertIn('name="initial-container-rows-0-a"', html)
+
+        form = Form(
+            QueryDict(
+                "container-rows-TOTAL_FORMS=1&"
+                "container-rows-INITIAL_FORMS=0&container-rows-0-a=1&"
+                "initial-container-rows-TOTAL_FORMS=1&"
+                "initial-container-rows-INITIAL_FORMS=1&"
+                "initial-container-rows-0-a=1"
+            )
+        )
+
+        self.assertIs(form.has_changed(), False)
+
+    def test_hidden_sequence_markup_is_minimal_in_each_form_layout(self):
+        """Each helper emits one hidden child and no hidden sequence controls."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.IntegerField(), initial=[1], show_hidden_initial=True
+            )
+
+        for helper in ("as_p", "as_div", "as_ul", "as_table"):
+            with self.subTest(helper=helper):
+                html = getattr(Form(), helper)()
+                self.assertEqual(html.count('name="initial-values-0"'), 1)
+                self.assertEqual(html.count('id="initial-id_values_0"'), 1)
+                for name in (
+                    TOTAL_FORM_COUNT,
+                    INITIAL_FORM_COUNT,
+                    MIN_NUM_FORM_COUNT,
+                    MAX_NUM_FORM_COUNT,
+                ):
+                    self.assertEqual(html.count(f'name="initial-values-{name}"'), 1)
+                self.assertNotIn('name="initial-values-0-DELETE"', html)
+                self.assertNotIn('name="initial-values-__prefix__"', html)
+                self.assertNotIn('data-sequence-field="initial-values"', html)
 
 
 class NestedSequenceFieldTestCase(SimpleTestCase):
@@ -1383,7 +1654,7 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
             initial={"values": [[1]]},
         )
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         html = form.as_p()
         self.assertInHTML(
             '<input type="hidden" name="values-INITIAL_FORMS" value="1" id="id_values-INITIAL_FORMS">',
@@ -1405,10 +1676,10 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
             required=False,
         )
 
-        self.assertFalse(field.has_changed([(2, 0)], [[2, 0]]))
-        self.assertTrue(field.has_changed([(2, 0)], [[2, 1]]))
-        self.assertTrue(field.has_changed([(2, 0)], []))
-        self.assertTrue(field.has_changed([], [[2, 0]]))
+        self.assertIs(field.has_changed([(2, 0)], [[2, 0]]), False)
+        self.assertIs(field.has_changed([(2, 0)], [[2, 1]]), True)
+        self.assertIs(field.has_changed([(2, 0)], []), True)
+        self.assertIs(field.has_changed([], [[2, 0]]), True)
 
     def test_list_field_accepts_nested_tuple_children(self):
         """It cleans a list of pair tuples from flat nested keys."""
@@ -1431,7 +1702,7 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
             }
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], [(1, 2), (3, 4)])
 
     def test_list_field_rejects_nested_tuple_children_with_extra_items(self):
@@ -1454,7 +1725,7 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
             }
         )
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["values"][0].code, "item_invalid")
         self.assertEqual(
             form.errors.as_data()["values"][0].params["child_code"], "max_length"
@@ -1479,7 +1750,7 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
             }
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(
             form.cleaned_data["values"],
             [[[1, 2], [3]], [[4], [5, 6]]],
@@ -1517,7 +1788,7 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
 
         form = Form(data)
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(
             form.cleaned_data["values"],
             [
@@ -1548,8 +1819,8 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
         )
         field = nestingdolls.ListField(child, required=False)
 
-        self.assertFalse(field.has_changed([[[[2], [0]]]], [[[[2], [0]]]]))
-        self.assertTrue(field.has_changed([[[[2], [0]]]], [[[[2], [1]]]]))
+        self.assertIs(field.has_changed([[[[2], [0]]]], [[[[2], [0]]]]), False)
+        self.assertIs(field.has_changed([[[[2], [0]]]], [[[[2], [1]]]]), True)
         self.assertEqual(
             field.has_changed([[[[2], [0]]]], [[[[2], [1]]]]),
             child.has_changed([[[2], [0]]], [[[2], [1]]]),
@@ -1736,7 +2007,7 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
             submitted[f"values-{index}-{DELETION_FIELD_NAME}"] = "1"
 
         form = Form(submitted)
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(
             form.cleaned_data["values"], self._undeleted_rows(values, deleted)
         )
@@ -1803,7 +2074,7 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
             )
 
         form = Form(self._boolean_row_data("values", values))
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], values)
 
     @HYPOTHESIS_SETTINGS
@@ -1821,7 +2092,7 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
         form = Form(
             self._json_row_data("values", values, style), initial={"values": values}
         )
-        self.assertFalse(form.has_changed())
+        self.assertIs(form.has_changed(), False)
 
     @HYPOTHESIS_SETTINGS
     @given(values=DATETIME_ROWS)
@@ -1834,7 +2105,7 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
         cleaned_results = []
         for style in self._multiwidget_spelling_names:
             form = Form(self._splitdatetime_row_data("values", values, style))
-            self.assertTrue(form.is_valid(), (style, form.errors))
+            self.assertIs(form.is_valid(), True, (style, form.errors))
             cleaned_results.append(
                 [item.replace(tzinfo=None) for item in form.cleaned_data["values"]]
             )
@@ -2000,7 +2271,7 @@ class SequenceFieldPropertyTestCase(_HypothesisTestCase):
 
         form = Form(data)
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["values"][0].code, "required")
 
 
@@ -2028,7 +2299,7 @@ class SetFieldPropertyTestCase(_HypothesisTestCase):
                 )
             )
         )
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], set(values))
 
     @HYPOTHESIS_SETTINGS
@@ -2071,7 +2342,7 @@ class SetFieldPropertyTestCase(_HypothesisTestCase):
             ),
             initial={"values": initial_set},
         )
-        self.assertFalse(form.has_changed())
+        self.assertIs(form.has_changed(), False)
 
     @HYPOTHESIS_SETTINGS
     @given(
@@ -2102,7 +2373,7 @@ class SetFieldPropertyTestCase(_HypothesisTestCase):
             ),
             initial={"values": set(initial_values)},
         )
-        self.assertTrue(form.has_changed())
+        self.assertIs(form.has_changed(), True)
 
     @HYPOTHESIS_SETTINGS
     @given(
@@ -2133,7 +2404,7 @@ class SetFieldPropertyTestCase(_HypothesisTestCase):
             self._nested_tuple_data("values", list(submitted)),
             initial={"values": set(initial_members)},
         )
-        self.assertFalse(form.has_changed())
+        self.assertIs(form.has_changed(), False)
 
     @HYPOTHESIS_SETTINGS
     @given(
@@ -2168,7 +2439,7 @@ class SetFieldPropertyTestCase(_HypothesisTestCase):
             self._nested_tuple_data("values", submitted_members),
             initial={"values": set(initial_members)},
         )
-        self.assertTrue(form.has_changed())
+        self.assertIs(form.has_changed(), True)
 
     @HYPOTHESIS_SETTINGS
     @given(
@@ -2194,7 +2465,7 @@ class SetFieldPropertyTestCase(_HypothesisTestCase):
             self._splitdatetime_row_data("values", submitted, "dash"),
             initial={"values": set(initial_members)},
         )
-        self.assertFalse(form.has_changed())
+        self.assertIs(form.has_changed(), False)
 
     @HYPOTHESIS_SETTINGS
     @given(
@@ -2226,7 +2497,7 @@ class SetFieldPropertyTestCase(_HypothesisTestCase):
             self._splitdatetime_row_data("values", submitted_members, "dash"),
             initial={"values": set(initial_members)},
         )
-        self.assertTrue(form.has_changed())
+        self.assertIs(form.has_changed(), True)
 
 
 class NestedSequencePropertyTestCase(_HypothesisTestCase):
@@ -2258,7 +2529,7 @@ class NestedSequencePropertyTestCase(_HypothesisTestCase):
         form = Form(
             self._nested_tuple_data("values", submitted_rows), initial={"values": rows}
         )
-        self.assertFalse(form.has_changed())
+        self.assertIs(form.has_changed(), False)
 
     @HYPOTHESIS_SETTINGS
     @given(
@@ -2297,7 +2568,7 @@ class NestedSequencePropertyTestCase(_HypothesisTestCase):
             self._nested_tuple_data("values", [list(row) for row in submitted_rows]),
             initial={"values": initial_rows},
         )
-        self.assertTrue(form.has_changed())
+        self.assertIs(form.has_changed(), True)
 
 
 class NestedParserRegressionTestCase(SimpleTestCase):
@@ -2335,7 +2606,7 @@ class NestedParserRegressionTestCase(SimpleTestCase):
         for label, data in cases:
             with self.subTest(style=label):
                 form = Form(data)
-                self.assertFalse(form.is_valid())
+                self.assertIs(form.is_valid(), False)
                 self.assertIn(
                     form.errors.as_data()["values"][0].code,
                     ("invalid", "item_invalid"),
@@ -2363,7 +2634,7 @@ class NestedParserRegressionTestCase(SimpleTestCase):
         for label, data in cases:
             with self.subTest(style=label):
                 form = Form(data)
-                self.assertFalse(form.is_valid())
+                self.assertIs(form.is_valid(), False)
                 rendered = str(form["values"])
                 self.assertEqual(form["values"].value(), ["1"])
                 self.assertIn("Enter a mapping of values.", rendered)
@@ -2383,7 +2654,7 @@ class NestedParserRegressionTestCase(SimpleTestCase):
 
         form = Form({"values[0]": "1", "values[0][a]": "2"})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         rendered = str(form["values"])
         self.assertEqual(form["values"].value(), ["1"])
         self.assertIn("Enter a mapping of values.", rendered)
@@ -2406,7 +2677,7 @@ class NestedParserRegressionTestCase(SimpleTestCase):
 
         form = Form({"values[0][0]": "1"})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         rendered = str(form["values"])
         self.assertEqual(form["values"].value(), [["1"]])
         self.assertIn("Enter a mapping of values.", rendered)
@@ -2433,7 +2704,7 @@ class NestedParserRegressionTestCase(SimpleTestCase):
 
         form = Form({"values[0]": "hostile"})
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form["values"].value(), ["hostile"])
         self.assertIn('value="hostile"', str(form["values"]))
 
@@ -2460,7 +2731,7 @@ class NestedParserRegressionTestCase(SimpleTestCase):
         for data in cases:
             with self.subTest(data=data):
                 form = Form(data)
-                self.assertTrue(form.is_valid(), form.errors)
+                self.assertIs(form.is_valid(), True, form.errors)
                 self.assertEqual(form.cleaned_data["values"], [{"0": 1}])
                 self.assertEqual(form["values"].value(), [{"0": "1"}])
                 str(form["values"])
@@ -2479,7 +2750,7 @@ class NestedParserRegressionTestCase(SimpleTestCase):
         for data in cases:
             with self.subTest(data=data):
                 form = Form(data)
-                self.assertFalse(form.is_valid())
+                self.assertIs(form.is_valid(), False)
                 self.assertEqual(form.errors.as_data()["values"][0].code, "required")
 
 
@@ -2518,7 +2789,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         )
         form = Form(data)
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], [False, True])
 
     def test_plain_mapping_keeps_unchecked_positions(self):
@@ -2529,7 +2800,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
         form = Form({"values-1": "on"})
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], [False, True])
 
     def test_plain_mapping_list_management_values_use_the_last_submitted_value(self):
@@ -2547,7 +2818,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             }
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], [1, 2])
 
     def test_multiwidget_child_uses_indexed_row_name(self):
@@ -2559,7 +2830,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         data = {"values-0_0": "2024-01-02", "values-0_1": "03:04:05"}
         form = Form(data)
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         cleaned = form.cleaned_data["values"][0]
         self.assertEqual(
             cleaned.replace(tzinfo=None),
@@ -2579,7 +2850,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         for data in data_shapes:
             with self.subTest(data=data):
                 form = Form(data)
-                self.assertTrue(form.is_valid(), form.errors)
+                self.assertIs(form.is_valid(), True, form.errors)
                 cleaned = form.cleaned_data["values"][0]
                 self.assertEqual(
                     cleaned.replace(tzinfo=None),
@@ -2600,8 +2871,8 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             values = nestingdolls.ListField(forms.IntegerField(), widget=CountingWidget)
 
         form = Form({"values.0": "1"})
-        self.assertTrue(form.is_valid(), form.errors)
-        self.assertTrue(form.has_changed())
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertIs(form.has_changed(), True)
         form.as_p()
         self.assertEqual(CountingWidget.normalizations, 1)
 
@@ -2621,9 +2892,9 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         first = Form({"values.0": "1"})
         second = Form({"values.0": "2"})
 
-        self.assertTrue(first.is_valid(), first.errors)
+        self.assertIs(first.is_valid(), True, first.errors)
         self.assertEqual(first.cleaned_data["values"], [1])
-        self.assertTrue(second.is_valid(), second.errors)
+        self.assertIs(second.is_valid(), True, second.errors)
         self.assertEqual(second.cleaned_data["values"], [2])
         self.assertEqual(CountingWidget.normalizations, 2)
 
@@ -2640,7 +2911,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             QueryDict(f"values-{TOTAL_FORM_COUNT}=1&values-{INITIAL_FORM_COUNT}=0"),
             initial={"values": [initial]},
         )
-        self.assertTrue(kept.is_valid(), kept.errors)
+        self.assertIs(kept.is_valid(), True, kept.errors)
         self.assertIs(kept.cleaned_data["values"][0], initial)
         self.assertIs(kept["values"].value()[0], initial)
 
@@ -2650,7 +2921,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         )
         clear_data["values-0-clear"] = "on"
         cleared = Form(clear_data, initial={"values": [initial]})
-        self.assertTrue(cleared.is_valid(), cleared.errors)
+        self.assertIs(cleared.is_valid(), True, cleared.errors)
         self.assertEqual(cleared.cleaned_data["values"], [False])
 
         contradictory = Form(
@@ -2658,7 +2929,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             files={"values-0": SimpleUploadedFile("new.txt", b"new")},
             initial={"values": [initial]},
         )
-        self.assertFalse(contradictory.is_valid())
+        self.assertIs(contradictory.is_valid(), False)
         self.assertEqual(
             contradictory.errors.as_data()["values"][0].code, "item_invalid"
         )
@@ -2671,7 +2942,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             ),
             initial={"values": [initial]},
         )
-        self.assertTrue(deleted.is_valid(), deleted.errors)
+        self.assertIs(deleted.is_valid(), True, deleted.errors)
         self.assertEqual(deleted.cleaned_data["values"], [])
 
     def test_omitted_file_rows_keep_all_initial_values(self):
@@ -2694,14 +2965,14 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             form = Form({}, initial={"values": uploads})
 
             with self.subTest(required=required):
-                self.assertTrue(form.is_valid(), form.errors)
+                self.assertIs(form.is_valid(), True, form.errors)
                 self.assertEqual(form.cleaned_data["values"], uploads)
 
         class OptionalForm(forms.Form):
             values = nestingdolls.ListField(forms.FileField(), required=False)
 
         deleted = OptionalForm({"values": []}, initial={"values": uploads})
-        self.assertTrue(deleted.is_valid(), deleted.errors)
+        self.assertIs(deleted.is_valid(), True, deleted.errors)
         self.assertEqual(deleted.cleaned_data["values"], [])
 
     def test_file_uploads_use_child_widget_extraction(self):
@@ -2716,7 +2987,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             files={"values-0": upload},
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"][0].name, "one.txt")
 
     def test_reused_widget_derives_multipart_requirement_from_the_new_child(self):
@@ -2730,8 +3001,8 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         class TextForm(forms.Form):
             values = nestingdolls.ListField(forms.CharField(), widget=file_widget)
 
-        self.assertTrue(UploadForm().is_multipart())
-        self.assertFalse(TextForm().is_multipart())
+        self.assertIs(UploadForm().is_multipart(), True)
+        self.assertIs(TextForm().is_multipart(), False)
 
     def test_splitdatetime_initial_microseconds_do_not_report_a_change(self):
         """It applies Django's initial microsecond normalization to each row."""
@@ -2750,7 +3021,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
                     {"values-0_0": "2024-01-02", "values-0_1": "03:04:05"},
                     initial=initial_data,
                 )
-                self.assertFalse(form.has_changed())
+                self.assertIs(form.has_changed(), False)
 
     def test_flat_file_uploads_without_management_data_are_accepted(self):
         """It accepts flat file uploads without management fields."""
@@ -2761,7 +3032,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         upload = SimpleUploadedFile("one.txt", b"one")
         form = Form({}, files={"values.1": upload})
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"][0].name, "one.txt")
 
     def test_form_required_attribute_opt_out_is_preserved(self):
@@ -2782,8 +3053,8 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         with translation.override("de"):
             form = Form({"values-0": "1,5"})
 
-        self.assertTrue(Form.base_fields["values"].child_field.localize)
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(Form.base_fields["values"].child_field.localize, True)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], [Decimal("1.5")])
 
     def test_widget_uses_management_data_and_exposes_media(self):
@@ -2894,7 +3165,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             {"values-0": "bad", "values-TOTAL_FORMS": "1", "values-INITIAL_FORMS": "0"}
         )
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         html = form.as_div()
         self.assertInHTML(
             '<input type="number" name="values-0" value="bad" aria-describedby="existing-description id_values_0_error" aria-invalid="true" id="id_values_0">',
@@ -2920,7 +3191,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             auto_id=False,
         )
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         html = form.as_div()
         self.assertInHTML(
             '<input type="number" name="values-0" value="bad" aria-describedby="existing-description" aria-invalid="true">',
@@ -2944,7 +3215,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             }
         )
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         html = form.as_div()
         self.assertInHTML(
             '<input type="text" name="values-0_0" value="2026-08-05" aria-invalid="true" aria-describedby="id_values_0_error" id="id_values_0_0">',
@@ -2963,7 +3234,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             {"values-0": "bad", "values-TOTAL_FORMS": "1", "values-INITIAL_FORMS": "0"}
         )
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         with self.assertTemplateUsed("nestingdolls/sequence/p.html"):
             html = form.as_p()
 
@@ -3069,30 +3340,43 @@ class PublicApiTestCase(SimpleTestCase):
     def test_public_aliases_and_bounds(self):
         """It keeps the public aliases and constructor bounds intact."""
         self.assertIs(nestingdolls.SequenceField, nestingdolls.ListField)
-        self.assertTrue(issubclass(nestingdolls.TupleField, nestingdolls.SequenceField))
-        self.assertTrue(issubclass(nestingdolls.SetField, nestingdolls.SequenceField))
+        self.assertIs(
+            issubclass(nestingdolls.TupleField, nestingdolls.SequenceField), True
+        )
+        self.assertIs(
+            issubclass(nestingdolls.SetField, nestingdolls.SequenceField), True
+        )
         self.assertIs(nestingdolls.FrozenSequenceField, nestingdolls.TupleField)
-        self.assertTrue(issubclass(nestingdolls.FrozenSetField, nestingdolls.SetField))
-        self.assertTrue(issubclass(nestingdolls.InvalidInitialValueError, ValueError))
-        self.assertTrue(
+        self.assertIs(
+            issubclass(nestingdolls.FrozenSetField, nestingdolls.SetField), True
+        )
+        self.assertIs(
+            issubclass(nestingdolls.InvalidInitialValueError, ValueError), True
+        )
+        self.assertIs(
             issubclass(
                 nestingdolls.SequenceInputValidationError,
                 ValidationError,
-            )
+            ),
+            True,
         )
-        self.assertTrue(
+        self.assertIs(
             issubclass(
                 nestingdolls.MissingManagementFormValidationError,
                 ValidationError,
-            )
+            ),
+            True,
         )
-        self.assertTrue(
+        self.assertIs(
             issubclass(
                 nestingdolls.TooManyFormsValidationError,
                 ValidationError,
-            )
+            ),
+            True,
         )
-        self.assertTrue(issubclass(nestingdolls.ItemValidationError, ValidationError))
+        self.assertIs(
+            issubclass(nestingdolls.ItemValidationError, ValidationError), True
+        )
         self.assertEqual(
             nestingdolls.ListField(forms.IntegerField(), initial=range(2)).initial,
             range(2),
@@ -3170,7 +3454,7 @@ class PublicApiTestCase(SimpleTestCase):
         data[f"values-{INITIAL_FORM_COUNT}"] = "0"
         form = Form(data)
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertIsInstance(
             form.errors.as_data()["values"][0],
             nestingdolls.TooManyFormsValidationError,
@@ -3196,7 +3480,7 @@ class PublicApiTestCase(SimpleTestCase):
             )
         )
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertIsInstance(form["values"], CustomBoundField)
         self.assertIn("Enter a whole number.", form.as_p())
 
@@ -3225,10 +3509,10 @@ class SequenceParserPropertyTestCase(SimpleTestCase):
         for key in normalized:
             if key == "values" or key in management_names:
                 continue
-            self.assertTrue(key.startswith("values-"), key)
+            self.assertIs(key.startswith("values-"), True, key)
             suffix = key.removeprefix("values-")
             digits = suffix[: len(suffix) - len(suffix.lstrip("0123456789"))]
-            self.assertTrue(digits, key)
+            self.assertIs(bool(digits), True, key)
             self.assertLess(int(digits), PARSER_WIDGET.absolute_max)
 
         unrelated = {f"other:{key}": value for key, value in data.items()}

@@ -1,4 +1,7 @@
 {% spaceless %}
+{% if widget.is_hidden %}
+  {% include "nestingdolls/sequence/hidden.html" with widget=widget only %}
+{% else %}
 <div
   data-widget="sequence"
   data-sequence-field="{{ widget.name }}"
@@ -25,4 +28,5 @@
   </template>
   {% include "nestingdolls/sequence/actions.html" with widget=widget only %}
 </div>
+{% endif %}
 {% endspaceless %}

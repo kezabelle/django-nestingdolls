@@ -1,0 +1,2 @@
+{% for management_field in widget.management_form.hidden_fields %}{{ management_field }}{% endfor %}
+{% for row in widget.rows %}{% include row.subwidget.template_name with widget=row.subwidget only %}{% endfor %}

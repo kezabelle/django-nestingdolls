@@ -124,7 +124,7 @@ class DictFieldTestCase(SimpleTestCase):
         nested.setlist("tags", ["one", "two"])
         form = Form({"point": nested})
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["point"], {"tags": ["one", "two"]})
 
     def test_flattened_initial_mapping_uses_child_widget_values(self):
@@ -163,7 +163,7 @@ class DictFieldTestCase(SimpleTestCase):
             files={"point[upload]": upload},
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["point"]["a"], 1)
         self.assertIs(form.cleaned_data["point"]["upload"], upload)
 
@@ -193,7 +193,7 @@ class DictFieldTestCase(SimpleTestCase):
         for style, data in cases.items():
             with self.subTest(style=style):
                 form = Form(data)
-                self.assertTrue(form.is_valid(), form.errors)
+                self.assertIs(form.is_valid(), True, form.errors)
                 self.assertEqual(form.cleaned_data["point"], {"a": 2, "label": "east"})
 
     def test_widget_returns_a_mapping_instead_of_an_internal_transport(self):
@@ -222,9 +222,9 @@ class DictFieldTestCase(SimpleTestCase):
         field = nestingdolls.MappingField(ChildForm)
 
         self.assertEqual(field.to_python({"a": "2"}), {"a": "2"})
-        self.assertFalse(cleaned)
+        self.assertIs(cleaned, False)
         self.assertEqual(field.clean({"a": "2"}), {"a": 2})
-        self.assertTrue(cleaned)
+        self.assertIs(cleaned, True)
 
     def test_cleans_querydict_bracket_input(self):
         """It preserves QueryDict behavior while removing the outer prefix."""
@@ -234,7 +234,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form(QueryDict("point[a]=3&point[label]=west"))
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["point"], {"a": 3, "label": "west"})
 
     def test_direct_mapping_takes_precedence_over_flat_aliases(self):
@@ -245,7 +245,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({"point": {"a": "4"}, "point-a": "99"})
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["point"], {"a": 4, "label": ""})
 
     def test_dynamic_child_fields_use_instantiated_form_fields(self):
@@ -273,8 +273,8 @@ class DictFieldTestCase(SimpleTestCase):
         self.assertIn('type="number" name="point-number"', html)
         self.assertIn('type="file" name="point-upload"', html)
         self.assertIn('name="point-nested-a"', html)
-        self.assertFalse(unbound["point"].field.widget.is_hidden)
-        self.assertTrue(unbound["point"].field.widget.needs_multipart_form)
+        self.assertIs(unbound["point"].field.widget.is_hidden, False)
+        self.assertIs(unbound["point"].field.widget.needs_multipart_form, True)
 
         upload = SimpleUploadedFile("dynamic.txt", b"dynamic")
         bound = Form(
@@ -286,7 +286,7 @@ class DictFieldTestCase(SimpleTestCase):
             },
             files={"point": {"upload": upload}},
         )
-        self.assertTrue(bound.is_valid(), bound.errors)
+        self.assertIs(bound.is_valid(), True, bound.errors)
         self.assertEqual(
             bound.cleaned_data["point"],
             {
@@ -304,7 +304,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({"point": {"a": "4", "label": "east", "junk": "ignored"}})
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["point"], {"a": 4, "label": "east"})
 
     def test_last_flat_alias_wins(self):
@@ -315,7 +315,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({"point-a": "1", "point.a": "2", "point[a]": "3"})
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["point"]["a"], 3)
 
     def test_malformed_bracket_suffix_cannot_name_another_child(self):
@@ -329,7 +329,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({"point[a]junk": "2"})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["point"][0].code, "required")
 
     def test_rejects_non_mapping_input(self):
@@ -340,7 +340,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({"point": "not a mapping"})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertIsInstance(
             form.errors.as_data()["point"][0],
             nestingdolls.InvalidMappingInputError,
@@ -356,7 +356,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({"required_point": {}, "optional_point": {}})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertFormError(form, "required_point", "This field is required.")
         self.assertEqual(form.cleaned_data["optional_point"], {})
 
@@ -368,7 +368,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({"point-label": "missing a"})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         error = form.errors.as_data()["point"][0]
         self.assertEqual(error.code, "item_invalid")
         self.assertEqual(error.params["child_code"], "required")
@@ -392,7 +392,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({"value-a": "2"})
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["value"], {"a": 3, "double": 6})
 
     def test_non_field_errors_keep_the_leaf_code(self):
@@ -412,7 +412,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({"value-a": "2"})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         error = form.errors.as_data()["value"][0]
         self.assertIsInstance(error, nestingdolls.ItemValidationError)
         self.assertEqual(error.code, "item_invalid")
@@ -432,7 +432,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({"point-a": "2"})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["point"][0].code, "no_two")
         self.assertFormError(form, "point", "No two.")
 
@@ -451,7 +451,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({"point-a": "2"})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(list(form["point"].errors), ["Outer mapping error."])
         self.assertEqual(form.as_p().count("Outer mapping error."), 1)
 
@@ -463,7 +463,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({"outer-point-a": "5"}, prefix="outer")
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["point"]["a"], 5)
         self.assertIn('name="outer-point-a"', str(form["point"]))
 
@@ -493,7 +493,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({"point-a": "99"})
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["point"], {"a": 8, "label": "initial"})
         self.assertInHTML(
             '<input type="number" name="point-a" value="8" required disabled id="id_point-a">',
@@ -508,9 +508,9 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({}, initial={"point": {"a": 8, "label": "saved"}})
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["point"], {})
-        self.assertTrue(form.has_changed())
+        self.assertIs(form.has_changed(), True)
 
     def test_as_hidden_uses_child_hidden_widgets(self):
         """A hidden mapping renders every child through its hidden widget."""
@@ -548,8 +548,8 @@ class DictFieldTestCase(SimpleTestCase):
             },
             initial=initial,
         )
-        self.assertTrue(bound.is_valid(), bound.errors)
-        self.assertFalse(bound.has_changed())
+        self.assertIs(bound.is_valid(), True, bound.errors)
+        self.assertIs(bound.has_changed(), False)
 
         malformed_initial = Form(
             {
@@ -560,7 +560,36 @@ class DictFieldTestCase(SimpleTestCase):
             },
             initial=initial,
         )
-        self.assertTrue(malformed_initial.has_changed())
+        self.assertIs(malformed_initial.has_changed(), True)
+
+    def test_show_hidden_initial_file_child_detects_only_a_new_upload(self):
+        """A hidden filename does not replace FileField change detection."""
+
+        class FileForm(forms.Form):
+            document = forms.FileField(required=False)
+
+        class Form(forms.Form):
+            asset = nestingdolls.MappingField(
+                FileForm,
+                initial={"document": "saved.txt"},
+                required=False,
+                show_hidden_initial=True,
+            )
+
+        data = QueryDict("initial-asset-document=saved.txt")
+        self.assertIs(Form(data).has_changed(), False)
+
+        form = Form(
+            data,
+            files=MultiValueDict(
+                {
+                    "asset-document": [
+                        SimpleUploadedFile("replacement.txt", b"replacement")
+                    ]
+                }
+            ),
+        )
+        self.assertIs(form.has_changed(), True)
 
     def test_has_changed_uses_child_field_semantics(self):
         """Equivalent raw and Python child values are unchanged."""
@@ -577,8 +606,8 @@ class DictFieldTestCase(SimpleTestCase):
             initial={"point": {"a": 2, "label": ""}},
         )
 
-        self.assertFalse(unchanged.has_changed())
-        self.assertTrue(changed.has_changed())
+        self.assertIs(unchanged.has_changed(), False)
+        self.assertIs(changed.has_changed(), True)
 
     def test_has_changed_always_consults_file_children(self):
         """A submitted upload remains a change even when it is also the initial object."""
@@ -596,7 +625,7 @@ class DictFieldTestCase(SimpleTestCase):
             initial={"point": {"upload": upload}},
         )
 
-        self.assertTrue(form.has_changed())
+        self.assertIs(form.has_changed(), True)
 
     def test_rejects_wrong_form_widget_and_bound_field_types(self):
         """Constructor extension points require compatible Django types."""
@@ -641,7 +670,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({"point[a]junk": "1"})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["point"][0].code, "required")
 
     def test_custom_bound_field_keeps_mapping_error_integration(self):
@@ -657,7 +686,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         form = Form({"point-a": "bad"})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertIsInstance(form["point"], CustomBoundField)
         self.assertIn("Enter a whole number.", form.as_p())
 
@@ -671,7 +700,7 @@ class DictFieldRenderingTestCase(SimpleTestCase):
 
         form = Form({"point-label": "missing a"})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(list(form["point"].errors), [])
         rendered = str(form["point"])
         self.assertEqual(rendered.count("This field is required."), 1)
@@ -683,7 +712,7 @@ class DictFieldRenderingTestCase(SimpleTestCase):
 
         form = Form({"point-label": "missing a"})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         html = form.as_p()
         self.assertIn('aria-describedby="id_point-a_error"', html)
         self.assertInHTML(
@@ -769,7 +798,7 @@ class DictFieldRenderingTestCase(SimpleTestCase):
 
         field = nestingdolls.MappingField(ChildForm)
 
-        self.assertTrue(field.widget.needs_multipart_form)
+        self.assertIs(field.widget.needs_multipart_form, True)
         self.assertIn("child.js", field.widget.media._js)
 
     def test_normalizes_bound_data_once(self):
@@ -786,8 +815,8 @@ class DictFieldRenderingTestCase(SimpleTestCase):
             point = nestingdolls.MappingField(PointForm, widget=CountingWidget)
 
         form = Form({"point.a": "1"})
-        self.assertTrue(form.is_valid(), form.errors)
-        self.assertTrue(form.has_changed())
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertIs(form.has_changed(), True)
         form.as_p()
         self.assertEqual(CountingWidget.normalizations, 1)
 
@@ -827,7 +856,7 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
         data.setlist("filters[choices]", ["a", "c"])
         form = Form(data)
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["filters"]["choices"], ["a", "c"])
 
     def test_direct_json_list_remains_one_child_value(self):
@@ -841,7 +870,7 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
 
         form = Form({"value": {"payload": [1, {"answer": 42}]}})
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["value"]["payload"], [1, {"answer": 42}])
 
     def test_splitdatetime_uses_child_widget_extraction(self):
@@ -860,7 +889,7 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
             }
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(
             form.cleaned_data["event"]["happened_at"].replace(tzinfo=None).isoformat(),
             "2026-08-01T10:30:00",
@@ -907,7 +936,7 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
             files={"asset": {"upload": upload}},
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["asset"]["title"], "report")
         self.assertIs(form.cleaned_data["asset"]["upload"], upload)
 
@@ -925,21 +954,21 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
         initial = {"asset": {"title": "old", "upload": initial_upload}}
 
         kept = Form({"asset-title": "old"}, initial=initial)
-        self.assertTrue(kept.is_valid(), kept.errors)
+        self.assertIs(kept.is_valid(), True, kept.errors)
         self.assertIs(kept.cleaned_data["asset"]["upload"], initial_upload)
 
         cleared = Form(
             {"asset-title": "old", "asset-upload-clear": "1"}, initial=initial
         )
-        self.assertTrue(cleared.is_valid(), cleared.errors)
-        self.assertFalse(cleared.cleaned_data["asset"]["upload"])
+        self.assertIs(cleared.is_valid(), True, cleared.errors)
+        self.assertIs(cleared.cleaned_data["asset"]["upload"], False)
 
         contradictory = Form(
             {"asset-title": "old", "asset-upload-clear": "1"},
             files={"asset-upload": SimpleUploadedFile("new.txt", b"new")},
             initial=initial,
         )
-        self.assertFalse(contradictory.is_valid())
+        self.assertIs(contradictory.is_valid(), False)
         self.assertEqual(
             contradictory.errors.as_data()["asset"][0].params["child_code"],
             "contradiction",
@@ -964,7 +993,7 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
             form = Form({}, initial=initial)
 
             with self.subTest(required=required):
-                self.assertTrue(form.is_valid(), form.errors)
+                self.assertIs(form.is_valid(), True, form.errors)
                 self.assertIs(form.cleaned_data["asset"]["upload"], initial_upload)
 
     def test_mixed_file_subforms_keep_initial_uploads_when_untouched(self):
@@ -987,7 +1016,7 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
             form = Form({}, initial=initial)
 
             with self.subTest(required=required):
-                self.assertTrue(form.is_valid(), form.errors)
+                self.assertIs(form.is_valid(), True, form.errors)
                 self.assertEqual(form.cleaned_data["asset"]["title"], "")
                 self.assertIs(form.cleaned_data["asset"]["upload"], initial_upload)
 
@@ -1006,7 +1035,7 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
         initial_upload = SimpleUploadedFile("old.txt", b"old")
         form = Form({}, initial={"payload": {"asset": {"upload": initial_upload}}})
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertIs(form.cleaned_data["payload"]["asset"]["upload"], initial_upload)
 
 
@@ -1022,7 +1051,7 @@ class NestedDictFieldTestCase(SimpleTestCase):
 
         form = Form({"value[point][a]": "2", "value[point][label]": "nested"})
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(
             form.cleaned_data["value"], {"point": {"a": 2, "label": "nested"}}
         )
@@ -1038,7 +1067,7 @@ class NestedDictFieldTestCase(SimpleTestCase):
 
         form = Form({"value.values.0": "1", "value.values.1": "2"})
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["value"], {"values": [1, 2]})
 
     def test_sequence_field_accepts_dict_children(self):
@@ -1056,7 +1085,7 @@ class NestedDictFieldTestCase(SimpleTestCase):
             }
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(
             form.cleaned_data["values"],
             [{"a": 1, "label": "first"}, {"a": 2, "label": "second"}],
@@ -1078,7 +1107,7 @@ class NestedDictFieldTestCase(SimpleTestCase):
             }
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(
             form.cleaned_data["events"][0]["happened_at"]
             .replace(tzinfo=None)
@@ -1094,7 +1123,7 @@ class NestedDictFieldTestCase(SimpleTestCase):
 
         form = Form({"values[0][label]": "missing a"})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         rendered = str(form["values"])
         self.assertEqual(rendered.count("This field is required."), 1)
         self.assertEqual(list(form["values"].errors), [])
@@ -1115,7 +1144,7 @@ class NestedDictFieldTestCase(SimpleTestCase):
             files={"values.0.upload": upload},
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"][0]["title"], "asset")
         self.assertIs(form.cleaned_data["values"][0]["upload"], upload)
 
@@ -1150,7 +1179,7 @@ class NestedDictFieldTestCase(SimpleTestCase):
             }
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(
             form.cleaned_data["payload"],
             {
@@ -1272,7 +1301,7 @@ class DictFieldPropertyTestCase(SimpleTestCase):
             data[key] = str(value)
         form = Form(data)
 
-        self.assertTrue(form.is_valid(), (styles, form.errors))
+        self.assertIs(form.is_valid(), True, (styles, form.errors))
         self.assertEqual(
             form.cleaned_data["payload"],
             {"rows": [{"point": {"a": value, "label": ""}} for value in values]},
@@ -1323,7 +1352,7 @@ class DictFieldPropertyTestCase(SimpleTestCase):
             data.setlist("filters[choices]", values)
         form = Form(data)
 
-        self.assertTrue(form.is_valid(), (style, form.errors))
+        self.assertIs(form.is_valid(), True, (style, form.errors))
         self.assertEqual(form.cleaned_data["filters"]["choices"], values)
 
     @HYPOTHESIS_SETTINGS
@@ -1350,7 +1379,7 @@ class DictFieldPropertyTestCase(SimpleTestCase):
             }
         )
 
-        self.assertTrue(form.is_valid(), (style, form.errors))
+        self.assertIs(form.is_valid(), True, (style, form.errors))
         self.assertEqual(
             form.cleaned_data["event"]["happened_at"].replace(tzinfo=None), value
         )
@@ -1365,7 +1394,7 @@ class DictFieldPropertyTestCase(SimpleTestCase):
 
         form = Form({f"pointer{suffix}": str(value)})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["point"][0].code, "required")
 
     @HYPOTHESIS_SETTINGS
@@ -1566,7 +1595,7 @@ class DictFieldPropertyTestCase(SimpleTestCase):
 
         form = Form(data)
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["point"][0].code, "required")
 
     @PARSER_HYPOTHESIS_SETTINGS
@@ -1598,7 +1627,7 @@ class DictFieldPropertyTestCase(SimpleTestCase):
             self.assertEqual(widget._normalize_mapping(normalized, "point"), normalized)
             self.assertLessEqual(len(normalized), max(len(source), child_count))
             for key in normalized:
-                self.assertTrue(key == "point" or key.startswith("point-"), key)
+                self.assertIs(key == "point" or key.startswith("point-"), True, key)
 
             unrelated = {f"other:{key}": value for key, value in source.items()}
             self.assertEqual(
@@ -1634,7 +1663,7 @@ class DictFieldRegressionTestCase(SimpleTestCase):
                 str(form["point"])
 
         disabled = DisabledForm({}, initial={"point": ["bad"]})
-        self.assertFalse(disabled.is_valid())
+        self.assertIs(disabled.is_valid(), False)
         self.assertEqual(disabled.errors.as_data()["point"][0].code, "invalid")
         str(disabled["point"])
 
@@ -1659,7 +1688,7 @@ class DictFieldRegressionTestCase(SimpleTestCase):
         for data in cases:
             with self.subTest(data=data):
                 form = Form(data, initial=initial)
-                self.assertFalse(form.is_valid())
+                self.assertIs(form.is_valid(), False)
                 self.assertIn("Enter a mapping of values.", form.as_p())
 
     def test_child_rebinding_rejections_use_mapping_fallbacks(self):
@@ -1696,7 +1725,7 @@ class DictFieldRegressionTestCase(SimpleTestCase):
 
         form = Form(data={}, files={"point": False})
 
-        self.assertFalse(form.is_valid())
+        self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["point"][0].code, "invalid")
         self.assertIs(form["point"].value(), False)
         str(form["point"])
@@ -1718,7 +1747,7 @@ class DictFieldRegressionTestCase(SimpleTestCase):
         for label, data in cases:
             with self.subTest(style=label):
                 form = Form(data)
-                self.assertFalse(form.is_valid())
+                self.assertIs(form.is_valid(), False)
                 self.assertIn(
                     form.errors.as_data()["payload"][0].code,
                     ("invalid", "item_invalid"),
@@ -1743,7 +1772,7 @@ class DictFieldRegressionTestCase(SimpleTestCase):
         for label, data in cases:
             with self.subTest(style=label):
                 form = Form(data)
-                self.assertTrue(form.is_valid(), (label, form.errors))
+                self.assertIs(form.is_valid(), True, (label, form.errors))
                 self.assertEqual(form.cleaned_data["payload"]["rows"], [1])
                 rendered = str(form["payload"])
                 self.assertIn("name=", rendered)
@@ -1767,7 +1796,7 @@ class DictFieldRegressionTestCase(SimpleTestCase):
                 else:
                     data = {"point[0]": "1"}
                 form = Form(data)
-                self.assertTrue(form.is_valid(), form.errors)
+                self.assertIs(form.is_valid(), True, form.errors)
                 self.assertEqual(form.cleaned_data["point"], {"0": 1})
 
 
@@ -1783,9 +1812,11 @@ class PublicApiTestCase(SimpleTestCase):
         self.assertIs(nestingdolls.DictField, nestingdolls.MappingField)
         self.assertIs(nestingdolls.FormField, nestingdolls.MappingField)
         self.assertIs(nestingdolls.Subform, nestingdolls.MappingField)
-        self.assertTrue(issubclass(nestingdolls.ItemValidationError, ValidationError))
-        self.assertTrue(
-            issubclass(nestingdolls.InvalidMappingInputError, ValidationError)
+        self.assertIs(
+            issubclass(nestingdolls.ItemValidationError, ValidationError), True
+        )
+        self.assertIs(
+            issubclass(nestingdolls.InvalidMappingInputError, ValidationError), True
         )
 
     def test_mapping_bound_field_rejects_non_mapping_field(self):

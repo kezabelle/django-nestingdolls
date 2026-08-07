@@ -8,7 +8,8 @@ from itertools import islice
 from typing import Any, Self, cast
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.forms import BaseForm, Field
+from django.core.files.uploadedfile import UploadedFile
+from django.forms import BaseForm, BaseFormSet, Field
 from django.forms.boundfield import BoundField
 from django.forms.fields import BooleanField, FileField
 from django.forms.formsets import (
@@ -19,12 +20,11 @@ from django.forms.formsets import (
     MAX_NUM_FORM_COUNT,
     MIN_NUM_FORM_COUNT,
     TOTAL_FORM_COUNT,
-    BaseFormSet,
     ManagementForm,
 )
 from django.forms.utils import ErrorList
 from django.forms.widgets import Media as WidgetMedia
-from django.forms.widgets import MultipleHiddenInput, Widget
+from django.forms.widgets import Widget
 from django.utils.datastructures import MultiValueDict
 from django.utils.functional import Promise, cached_property
 from django.utils.safestring import SafeString
@@ -95,77 +95,110 @@ class SequenceBoundField(BoundField):
         attrs: dict[str, str | bool] | None = None,
         only_initial: bool = False,
     ) -> SafeString:
-        """Delegate normal rendering to Django and only patch sequence rows when needed."""
+        """Render submitted hidden initials or patch visible sequence rows."""
         widget = widget or self.field.widget
-        if only_initial or not isinstance(widget, SequenceWidget):
+        if not isinstance(widget, SequenceWidget):
             return super().as_widget(widget, attrs, only_initial)
-        errors = super().errors
-        item_errors: dict[int, list[object]] = defaultdict(list)
-        for error in errors.as_data():
-            if isinstance(error, ItemValidationError) and isinstance(error.item, int):
-                item_errors[error.item].extend([error.message])
-        deleted_indexes = self._deleted_indexes
-        if not deleted_indexes and not errors:
-            return super().as_widget(widget, attrs, only_initial)
+
+        if not only_initial:
+            errors = super().errors
+            deleted_indexes = self._deleted_indexes
+            if not deleted_indexes and not errors:
+                return super().as_widget(widget, attrs, only_initial)
 
         if self.field.localize:
             widget.is_localized = True
         attrs = self.build_widget_attrs(dict(attrs or {}), widget)
         if self.auto_id and "id" not in widget.attrs:
-            attrs.setdefault("id", self.auto_id)
+            attrs.setdefault(
+                "id", self.html_initial_id if only_initial else self.auto_id
+            )
 
-        context = widget.get_context(
-            self.html_name,
-            self.value(),
-            attrs,
-            management_data=self._data_input,
-        )
+        if only_initial:
+            name = self.html_initial_name
+            data_input = widget._normalize_mapping(self.form.data, name)
+            file_input = (
+                widget._normalize_mapping(self.form.files, name)
+                if self.form.files
+                else MultiValueDict()
+            )
+            if data_input or file_input:
+                value = widget._value_from_normalized_data(data_input, file_input, name)
+                management_data: Mapping[str, object] | None = data_input
+            else:
+                value = self.value()
+                management_data = None
+            context = widget.get_context(
+                name,
+                value,
+                attrs,
+                management_data=management_data,
+            )
+        else:
+            item_errors: dict[int, list[object]] = defaultdict(list)
+            for error in errors.as_data():
+                if isinstance(error, ItemValidationError) and isinstance(
+                    error.item, int
+                ):
+                    item_errors[error.item].append(error.message)
 
-        # A simple widget stores its HTML attributes in this context. A MultiWidget
-        # also creates one child context for each rendered input. Changes to the
-        # parent context do not update those child contexts. Walk the complete tree
-        # so every rendered input is invalid and refers to the same row error. Keep
-        # existing descriptions, and add no error reference when Django has no ID.
-        def set_error_attributes(
-            widget_context: dict[str, Any], error_id: str | None
-        ) -> None:
-            child_attrs = widget_context["attrs"]
-            child_attrs["aria-invalid"] = "true"
-            if error_id:
-                described_by = child_attrs.get("aria-describedby")
-                child_attrs["aria-describedby"] = (
-                    f"{described_by} {error_id}" if described_by else error_id
-                )
-            for child_context in widget_context.get("subwidgets", []):
-                set_error_attributes(child_context, error_id)
+            context = widget.get_context(
+                self.html_name,
+                self.value(),
+                attrs,
+                management_data=self._data_input,
+            )
 
-        rows = []
-        for row in context["widget"]["rows"]:
-            if row["index"] in deleted_indexes:
-                continue
-            row["errors"] = item_errors[row["index"]]
-            if row["errors"]:
-                subwidget = row["subwidget"]
-                child_id = subwidget["attrs"].get("id")
-                error_id = f"{child_id}_error" if child_id else None
+            # A MultiWidget copies the parent attributes into each child context.
+            # Walk the tree so every input refers to the same row error.
+            def set_error_attributes(
+                widget_context: dict[str, Any], error_id: str | None
+            ) -> None:
+                child_attrs = widget_context["attrs"]
+                child_attrs["aria-invalid"] = "true"
                 if error_id:
-                    row["error_id"] = error_id
-                set_error_attributes(subwidget, error_id)
-            rows.append(row)
-        context["widget"]["rows"] = rows
-        if deleted_indexes:
-            context["widget"]["deleted_rows"] = [
-                {"delete_name": f"{self.html_name}-{index}-{DELETION_FIELD_NAME}"}
-                for index in sorted(deleted_indexes)
-            ]
+                    described_by = child_attrs.get("aria-describedby")
+                    child_attrs["aria-describedby"] = (
+                        f"{described_by} {error_id}" if described_by else error_id
+                    )
+                for child_context in widget_context.get("subwidgets", []):
+                    set_error_attributes(child_context, error_id)
 
-        # Widget.render() builds a new context and would lose the row changes above.
-        # Django has no public API for a prepared widget context, so use _render().
+            rows = []
+            for row in context["widget"]["rows"]:
+                if row["index"] in deleted_indexes:
+                    continue
+                row["errors"] = item_errors[row["index"]]
+                if row["errors"]:
+                    subwidget = row["subwidget"]
+                    child_id = subwidget["attrs"].get("id")
+                    error_id = f"{child_id}_error" if child_id else None
+                    if error_id:
+                        row["error_id"] = error_id
+                    set_error_attributes(subwidget, error_id)
+                rows.append(row)
+            context["widget"]["rows"] = rows
+            if deleted_indexes:
+                context["widget"]["deleted_rows"] = [
+                    {"delete_name": f"{self.html_name}-{index}-{DELETION_FIELD_NAME}"}
+                    for index in sorted(deleted_indexes)
+                ]
+
+        # Widget.render() would rebuild and lose this prepared row or management
+        # context. Django has no public API for rendering it, so use _render().
         return widget._render(  # type: ignore[attr-defined, no-any-return]
             f"nestingdolls/sequence/{FormLayout.current().value}.html",
             context,
             self.form.renderer,
         )
+
+    def as_hidden(
+        self,
+        attrs: dict[str, str | bool] | None = None,
+        **kwargs: Any,
+    ) -> SafeString:
+        """Render management inputs and recursively hidden child widgets."""
+        return self.as_widget(self.field.widget.hidden_widget(), attrs, **kwargs)
 
     @cached_property
     def _data_input(self) -> MultiValueDict[str, object]:
@@ -276,16 +309,18 @@ class SequenceBoundField(BoundField):
 
     def _has_changed(self) -> bool:
         """Treat deleted initial rows as a real change."""
+        if self.field.disabled:
+            return False
         if self.field.show_hidden_initial:
-            hidden_widget = self.field.hidden_widget()
+            hidden_widget = self.field.widget.hidden_widget()
             try:
-                initial = self.field.to_python(
+                initial = hidden_widget._normalize_hidden_initial(
+                    self.field,
                     hidden_widget.value_from_datadict(
                         self.form.data, self.form.files, self.html_initial_name
-                    )
+                    ),
                 )
-                initial = [self.field.child_field.to_python(value) for value in initial]
-            except ValidationError:
+            except (TypeError, ValidationError):
                 return True
             changed = self.field.has_changed(initial, self.data)
         else:
@@ -322,7 +357,6 @@ class SequenceField(Field):
         ),
     }
     bound_field_class: type[SequenceBoundField] = SequenceBoundField
-    hidden_widget = MultipleHiddenInput
     widget: SequenceWidget
 
     def __init__(
@@ -794,6 +828,28 @@ class SequenceWidget(CompositeWidget):
             name,
         )
 
+    def _child_widget(self) -> Widget:
+        """Return the child widget for this composite widget's current mode."""
+        return (
+            self._hidden_child_widget(self.child_field)
+            if super().is_hidden
+            else self.child_field.widget
+        )
+
+    def _normalize_hidden_initial(self, field: Field, value: object) -> object:
+        """Normalize submitted hidden child values recursively."""
+        values = field.to_python(value)
+        if not isinstance(values, list) or isinstance(self.child_field, FileField):
+            return values
+        if isinstance(self.child_field.widget, CompositeWidget):
+            return [
+                self.child_field.widget._normalize_hidden_initial(
+                    self.child_field, item
+                )
+                for item in values
+            ]
+        return [self.child_field.to_python(item) for item in values]
+
     def _value_from_normalized_data(
         self,
         data: Mapping[str, object],
@@ -836,8 +892,10 @@ class SequenceWidget(CompositeWidget):
         form_count = max(counts)
         if form_count < 0 or form_count > self.absolute_max:
             return []
+        child_widget = self._child_widget()
+        file_data = cast(MultiValueDict[str, UploadedFile], files)
         return [
-            self.child_field.widget.value_from_datadict(data, files, f"{name}-{index}")
+            child_widget.value_from_datadict(data, file_data, f"{name}-{index}")
             for index in range(form_count)
         ]
 
@@ -977,7 +1035,7 @@ class SequenceWidget(CompositeWidget):
         context["widget"]["template_name"] = (
             f"nestingdolls/sequence/{FormLayout.current().value}.html"
         )
-        child_widget = self.child_field.widget
+        child_widget = self._child_widget()
         if self.is_localized:
             child_widget.is_localized = True
 
@@ -1033,9 +1091,10 @@ class SequenceWidget(CompositeWidget):
                 "errors": [],
             }
 
-        management_form.fields[TOTAL_FORM_COUNT].widget.attrs["data-sequence-total"] = (
-            ""
-        )
+        if not self.is_hidden:
+            management_form.fields[TOTAL_FORM_COUNT].widget.attrs[
+                "data-sequence-total"
+            ] = ""
         if disabled:
             for management_field in management_form.fields.values():
                 management_field.widget.attrs["disabled"] = True
@@ -1050,6 +1109,7 @@ class SequenceWidget(CompositeWidget):
                 "maximum_forms": self.max_length,
                 "absolute_maximum_forms": self.absolute_max,
                 "disabled": disabled or management_invalid,
+                "is_hidden": self.is_hidden,
             }
         )
         return context
@@ -1057,7 +1117,7 @@ class SequenceWidget(CompositeWidget):
     @property
     def is_hidden(self) -> bool:
         """Expose whether the child widget is hidden."""
-        return bool(self.child_field.widget.is_hidden)
+        return super().is_hidden or bool(self.child_field.widget.is_hidden)
 
     @property
     def needs_multipart_form(self) -> bool:  # type: ignore[override]

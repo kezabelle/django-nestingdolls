@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import copy
 from collections.abc import Mapping
+from typing import Self
 
+from django.forms import Field
 from django.forms.widgets import Widget
 
 from nestingdolls.rendering import FormLayout
@@ -9,6 +12,25 @@ from nestingdolls.rendering import FormLayout
 
 class CompositeWidget(Widget):
     _template_name: str
+    input_type: str | None = None
+
+    def hidden_widget(self) -> Self:
+        """Return an independent hidden copy of this composite widget."""
+        widget: Self = copy.deepcopy(self)
+        widget.input_type = "hidden"
+        return widget
+
+    @staticmethod
+    def _hidden_child_widget(field: Field) -> Widget:
+        """Return the field's hidden widget, preserving composite behavior."""
+        widget: Widget = field.widget
+        if isinstance(widget, CompositeWidget):
+            return widget.hidden_widget()
+        return field.hidden_widget()
+
+    def _normalize_hidden_initial(self, field: Field, value: object) -> object:
+        """Convert one submitted hidden value to its Python form."""
+        return field.to_python(value)
 
     @property
     def template_name(self) -> str:
