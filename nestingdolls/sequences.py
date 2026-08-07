@@ -247,6 +247,7 @@ class SequenceBoundField(BoundField):
             if normalized_value is not None:
                 value = normalized_value
         try:
+            # Keep runtime initial values from growing rendering without a limit.
             value = self.field._initial_values(value, limit=self.field.absolute_max)
         except InvalidInitialValueError:
             value = [value]
@@ -296,13 +297,19 @@ class SequenceBoundField(BoundField):
         if self.html_name in data_input or self.html_name in file_input:
             return frozenset()
         initial_count = len(self.field._initial_values(self.initial))
+        row_data = self.field.widget._partition_normalized_rows(
+            data_input, self.html_name, len(self.data)
+        )
+        row_files = self.field.widget._partition_normalized_rows(
+            file_input, self.html_name, len(self.data)
+        )
         return frozenset(
             index
             for index in range(len(self.data))
             if index >= initial_count
             and self.field.widget.child_field.widget.value_omitted_from_data(
-                data_input,
-                file_input,
+                row_data[index],
+                row_files[index],
                 f"{self.html_name}-{index}",
             )
         )
@@ -458,6 +465,7 @@ class SequenceField(Field):
             and not isinstance(value, (str, bytes, bytearray))
         ):
             if limit is not None:
+                # Keep collection initials from using unbounded memory while rendering.
                 return list(islice(value, limit))
             return list(value)
         raise InvalidInitialValueError("initial must be a collection of values")
@@ -479,6 +487,7 @@ class SequenceField(Field):
     ) -> list[object]:
         """Clean each submitted row and return the cleaned row list."""
         if len(values) > self.absolute_max:
+            # Reject oversized direct input before it multiplies child validation work.
             raise TooManyFormsValidationError(
                 self.error_messages["too_many_forms"], num=self.max_length
             )
@@ -864,6 +873,7 @@ class SequenceWidget(CompositeWidget):
             if name not in source:
                 return None
             value = source.get(name)
+            # Keep direct Python or JSON input from multiplying child work past the limit.
             return value[: self.absolute_max + 1] if isinstance(value, list) else []
 
         def submitted_total_forms(source: Mapping[str, object]) -> int | None:
@@ -891,11 +901,17 @@ class SequenceWidget(CompositeWidget):
             return []
         form_count = max(counts)
         if form_count < 0 or form_count > self.absolute_max:
+            # Reject forged totals before they allocate rows or call child widgets.
             return []
         child_widget = self._child_widget()
-        file_data = cast(MultiValueDict[str, UploadedFile], files)
+        row_data = self._partition_normalized_rows(data, name, form_count)
+        row_files = self._partition_normalized_rows(files, name, form_count)
         return [
-            child_widget.value_from_datadict(data, file_data, f"{name}-{index}")
+            child_widget.value_from_datadict(
+                row_data[index],
+                cast(MultiValueDict[str, UploadedFile], row_files[index]),
+                f"{name}-{index}",
+            )
             for index in range(form_count)
         ]
 
@@ -922,6 +938,7 @@ class SequenceWidget(CompositeWidget):
             index = 0
             while index_end < len(suffix) and "0" <= suffix[index_end] <= "9":
                 digit = ord(suffix[index_end]) - ord("0")
+                # Avoid an unbounded integer from a hostile row index.
                 index = min(self.absolute_max, index * 10 + digit)
                 index_end += 1
             if not index_end:
@@ -936,6 +953,23 @@ class SequenceWidget(CompositeWidget):
                 return None
             return (f"{name}-{index}{suffix}", index)
         return None
+
+    def _partition_normalized_rows(
+        self, data: Mapping[str, object], name: str, form_count: int
+    ) -> list[MultiValueDict[str, object]]:
+        """Avoid repeated full-input scans when rows use composite child widgets."""
+        rows = [MultiValueDict[str, object]() for _ in range(form_count)]
+        for key, value in data.items():
+            row_key = self._normalized_row_key(key, name)
+            if row_key is None:
+                continue
+            row_name, index = row_key
+            if index < form_count:
+                rows[index].setlist(
+                    row_name,
+                    data.getlist(key) if isinstance(data, MultiValueDict) else [value],
+                )
+        return rows
 
     def _normalize_mapping(
         self, data: Mapping[str, object], name: str
@@ -987,13 +1021,22 @@ class SequenceWidget(CompositeWidget):
                 continue
             row_name, index = row_key
             if index >= self.absolute_max:
-                # Keep this overflow so Django rejects too many rows.
+                # Do not let a forged index bypass the row limit.
                 overflowed_index = True
                 continue
+            if len(row_inputs) >= self.absolute_max:
+                # Prevent many matching keys from growing memory without limit.
+                overflowed_index = True
+                break
             row_inputs.append((index, row_name, values_for(key)))
 
         if management_keys:
-            # Trust submitted row numbers when control fields are present.
+            # Keep Django's management validation authoritative for managed rows.
+            if overflowed_index:
+                # Reject excess input through Django's standard validation error.
+                normalized.setlist(
+                    f"{name}-{TOTAL_FORM_COUNT}", [str(self.absolute_max + 1)]
+                )
             for _, row_name, values in row_inputs:
                 normalized.setlist(row_name, values)
             return normalized
@@ -1016,7 +1059,7 @@ class SequenceWidget(CompositeWidget):
 
         total_forms = max(remapped_indexes.values(), default=-1) + 1
         if overflowed_index:
-            # Keep one extra row count so Django raises too_many_forms.
+            # Reject excess input through Django's standard validation error.
             total_forms = self.absolute_max + 1
         normalized[f"{name}-{TOTAL_FORM_COUNT}"] = str(total_forms)
         normalized[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
@@ -1039,6 +1082,7 @@ class SequenceWidget(CompositeWidget):
         if self.is_localized:
             child_widget.is_localized = True
 
+        # Keep runtime initials from expanding rendering without a bound.
         value = [] if value is None else list(islice(value, self.absolute_max))
         if management_data is not None and any(
             key in management_data for key in self.management_names(name)

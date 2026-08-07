@@ -76,17 +76,30 @@ class MappingWidget(CompositeWidget):
                 return None
             for prefix in flat_prefixes:
                 if key.startswith(prefix) and len(key) > len(prefix):
-                    return f"{name}-{key.removeprefix(prefix)}"
-            if not key.startswith(bracket_prefix):
-                return None
-            end = key.find("]", len(bracket_prefix))
-            if end < 0:
-                return None
-            child_name = key[len(bracket_prefix) : end]
-            suffix = key[end + 1 :]
-            if not child_name or suffix and suffix[0] not in "_-.[":
-                return None
-            return f"{name}-{child_name}{suffix}"
+                    key = f"{name}-{key.removeprefix(prefix)}"
+                    break
+            else:
+                if not key.startswith(bracket_prefix):
+                    return None
+                end = key.find("]", len(bracket_prefix))
+                if end < 0:
+                    return None
+                child_name = key[len(bracket_prefix) : end]
+                suffix = key[end + 1 :]
+                if not child_name or suffix and suffix[0] not in "_-.[":
+                    return None
+                key = f"{name}-{child_name}{suffix}"
+            # Drop undeclared keys so a matching prefix cannot retain untrusted data.
+            return (
+                key
+                if any(
+                    key == f"{name}-{child_name}"
+                    or key.startswith(f"{name}-{child_name}{separator}")
+                    for child_name in self.fields
+                    for separator in "_-.["
+                )
+                else None
+            )
 
         if name in data:
             # Use the direct mapping value when both shapes are present.
@@ -103,7 +116,7 @@ class MappingWidget(CompositeWidget):
                             f"{name}-{child_name}", value.getlist(child_name)
                         )
                 return normalized
-            # Ignore keys that are not declared on the child form.
+            # Keep direct mapping input from retaining undeclared data.
             return {
                 f"{name}-{child_name}": value[child_name]
                 for child_name in child_names

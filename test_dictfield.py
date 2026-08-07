@@ -915,6 +915,21 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["value"]["payload"], [1, {"answer": 42}])
 
+    def test_flat_input_ignores_undeclared_child_fields(self):
+        """It does not retain matching keys that no child field can consume."""
+
+        class ChildForm(forms.Form):
+            title = forms.CharField(required=False)
+
+        widget = nestingdolls.MappingWidget(ChildForm)
+
+        self.assertEqual(
+            widget._normalize_mapping(
+                {"value-title": "kept", "value-untrusted": "ignored"}, "value"
+            ),
+            {"value-title": "kept"},
+        )
+
     def test_splitdatetime_uses_child_widget_extraction(self):
         """Compound child widgets retain all submitted parts."""
 

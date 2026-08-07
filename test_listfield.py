@@ -689,6 +689,52 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["values"][0].code, "too_many_forms")
 
+    def test_flat_mapping_limits_matching_entries(self):
+        """It rejects more matching entries than its total input limit allows."""
+        widget = nestingdolls.SequenceWidget(
+            forms.CharField(), max_length=1, absolute_max=2
+        )
+        data = {
+            f"values-{TOTAL_FORM_COUNT}": "2",
+            f"values-{INITIAL_FORM_COUNT}": "0",
+            **{f"values-0-{index}": "value" for index in range(3)},
+        }
+
+        normalized = widget._normalize_mapping(data, "values")
+
+        self.assertEqual(normalized[f"values-{TOTAL_FORM_COUNT}"], "3")
+
+    def test_nested_mapping_rows_are_partitioned_before_extraction(self):
+        """It gives each nested mapping only its own normalized row inputs."""
+
+        class RowForm(forms.Form):
+            value = forms.IntegerField()
+
+        class CountingWidget(nestingdolls.MappingWidget):
+            key_visits = 0
+
+            def _normalize_mapping(self, data, name):
+                type(self).key_visits += len(data)
+                return super()._normalize_mapping(data, name)
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.MappingField(RowForm, widget=CountingWidget),
+                required=False,
+            )
+
+        row_count = 50
+        form = Form(
+            {
+                f"values-{TOTAL_FORM_COUNT}": str(row_count),
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                **{f"values-{index}-value": str(index) for index in range(row_count)},
+            }
+        )
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertLessEqual(CountingWidget.key_visits, row_count * 2)
+
     def test_indexes_are_ascii_only_and_do_not_use_unbounded_integer_parsing(self):
         """It ignores Unicode digits, densifies sparse rows, and bounds overflow."""
 
