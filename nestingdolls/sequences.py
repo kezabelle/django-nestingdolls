@@ -888,6 +888,21 @@ class SequenceWidget(CompositeWidget):
                 return None
             return (f"{name}-{index}{suffix}", index)
 
+        @staticmethod
+        def densified(indexes: Collection[int]) -> dict[int, int]:
+            """Return a new index for each row index, without the gaps.
+
+            A plain mapping can have gaps between the indexes, for example 0 and
+            1999. An index that is dense already keeps its place. A larger index
+            moves down to one place after the row before it, so at most one empty
+            row stays in front of it. The order of the rows survives, and a
+            forged index cannot make thousands of rows.
+            """
+            return {
+                original_index: min(original_index, dense_index + 1)
+                for dense_index, original_index in enumerate(sorted(indexes))
+            }
+
         def rows(
             self, data: Mapping[str, object], name: str, form_count: int
         ) -> list[MultiValueDict[str, object]]:
@@ -989,24 +1004,17 @@ class SequenceWidget(CompositeWidget):
             if not row_inputs and not overflowed_index:
                 return normalized
 
-            # A plain mapping can have gaps between the indexes, for example 0
-            # and 1999. An index that is dense already keeps its place. A larger
-            # index moves down to one place after the row before it, so at most
-            # one empty row stays in front of it. The order of the rows
-            # survives, and a forged index cannot make thousands of rows.
-            row_indexes = sorted({index for index, _, _ in row_inputs})
-            remapped_indexes = {
-                original_index: min(original_index, dense_index + 1)
-                for dense_index, original_index in enumerate(row_indexes)
-            }
+            dense_indexes = self.densified({index for index, _, _ in row_inputs})
             for original_index, row_name, values in row_inputs:
+                # Keep the text after the index, as in ``values-2-name``, so
+                # that a composite child keeps its own key.
                 suffix = row_name.removeprefix(f"{name}-{original_index}")
                 normalized.setlist(
-                    f"{name}-{remapped_indexes[original_index]}{suffix}",
+                    f"{name}-{dense_indexes[original_index]}{suffix}",
                     values,
                 )
 
-            total_forms = max(remapped_indexes.values(), default=-1) + 1
+            total_forms = max(dense_indexes.values(), default=-1) + 1
             if overflowed_index:
                 # Set a total above the limit, so that the field reports the
                 # usual too_many_forms error.

@@ -232,6 +232,7 @@ It inherits `SetField` behavior.
 - `total_forms`
 - `direct_rows`
 - `canonical`
+- `densified`
 - `rows`
 
 ### CompositeBoundField
