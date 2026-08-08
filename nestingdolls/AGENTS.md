@@ -228,6 +228,9 @@ It inherits `SetField` behavior.
 ##### Methods introduced here
 
 - `management_names`
+- `manages`
+- `total_forms`
+- `direct_rows`
 - `canonical`
 - `rows`
 

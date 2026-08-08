@@ -90,28 +90,23 @@ class SequenceBoundField(CompositeBoundField):
             Return None when the input holds no management key. The field then
             uses the normal Django path and does no formset work.
             """
-            bound_field = self.bound_field
-            data_input = bound_field._data_input
-            names = bound_field.field.widget.keys.management_names(
-                bound_field.html_name
-            )
-            if not any(name in data_input for name in names):
+            bf = self.bound_field
+            data = bf._data_input
+            if not bf.field.widget.keys.manages(data, bf.html_name):
                 return None
-            management_form = ManagementForm(data_input, prefix=bound_field.html_name)
+            management_form = ManagementForm(data, prefix=bf.html_name)
             management_form.full_clean()
             return management_form
 
         @cached_property
         def deleted(self) -> frozenset[int]:
             """Return submitted deleted rows, as ``BaseFormSet.deleted_forms`` does."""
-            bound_field = self.bound_field
+            bf = self.bound_field
             return frozenset(
                 index
-                for index in range(len(bound_field.data))
-                if bound_field.field.widget.deletion_field.clean(
-                    bound_field._data_input.get(
-                        f"{bound_field.html_name}-{index}-{DELETION_FIELD_NAME}"
-                    )
+                for index in range(len(bf.data))
+                if bf.field.widget.deletion_field.clean(
+                    bf._data_input.get(f"{bf.html_name}-{index}-{DELETION_FIELD_NAME}")
                 )
             )
 
@@ -838,6 +833,36 @@ class SequenceWidget(CompositeWidget):
                 f"{name}-{MAX_NUM_FORM_COUNT}",
             }
 
+        def manages(self, data: Mapping[str, object], name: str) -> bool:
+            """Report whether the data carries a management key of this field."""
+            return any(key in data for key in self.management_names(name))
+
+        def total_forms(self, data: Mapping[str, object], name: str) -> int | None:
+            """Return the submitted number of rows, or None when there is none."""
+            value = data.get(f"{name}-{TOTAL_FORM_COUNT}")
+            if value is None or not isinstance(value, (str, int)):
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        def direct_rows(
+            self, data: Mapping[str, object], name: str
+        ) -> list[object] | None:
+            """Return the rows of a direct list value, or None.
+
+            Keep one row more than the limit. The clean step then sees that the
+            input is too large, and it reports too_many_forms instead of silent
+            truncation.
+            """
+            if name not in data:
+                return None
+            value = data.get(name)
+            if not isinstance(value, list):
+                return []
+            return value[: self.absolute_max + 1]
+
         def canonical(self, key: object, name: str) -> tuple[str, int] | None:
             """Return the canonical row key and the row index, or None.
 
@@ -1028,39 +1053,14 @@ class SequenceWidget(CompositeWidget):
         name: str,
     ) -> list[object]:
         """Extract row values from canonicalized data and files."""
-
-        def direct_sequence_value(
-            source: Mapping[str, object],
-        ) -> list[object] | None:
-            """Return the rows of a direct list value, or None."""
-            if name not in source:
-                return None
-            value = source.get(name)
-            # Keep one row more than the limit. The clean step then sees that
-            # the input is too large, and it reports too_many_forms instead of
-            # silent truncation.
-            return (
-                value[: self.limits.absolute_max + 1] if isinstance(value, list) else []
-            )
-
-        def submitted_total_forms(source: Mapping[str, object]) -> int | None:
-            """Return the submitted total row count, or None."""
-            value = source.get(f"{name}-{TOTAL_FORM_COUNT}")
-            if value is None or not isinstance(value, (str, int)):
-                return None
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return None
-
         for source in (data, files):
-            if (direct_value := direct_sequence_value(source)) is not None:
-                return direct_value
+            if (direct_rows := self.keys.direct_rows(source, name)) is not None:
+                return direct_rows
 
         counts = [
             count
             for source in (data, files)
-            if (count := submitted_total_forms(source)) is not None
+            if (count := self.keys.total_forms(source, name)) is not None
         ]
         if not counts:
             return []
@@ -1106,9 +1106,8 @@ class SequenceWidget(CompositeWidget):
             value = cast(Sequence[object] | None, self.bound.hidden_initial_value)
         # Keep runtime initials from expanding rendering without a bound.
         value = [] if value is None else list(islice(value, self.limits.absolute_max))
-        if self.bound.management_data is not None and any(
-            key in self.bound.management_data
-            for key in self.keys.management_names(name)
+        if self.bound.management_data is not None and self.keys.manages(
+            self.bound.management_data, name
         ):
             management_form = ManagementForm(self.bound.management_data, prefix=name)
             # Bad management input means that the row count is not trustworthy.
