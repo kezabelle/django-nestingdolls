@@ -32,7 +32,13 @@ __all__ = [
 
 
 class _ValueBoundField(BoundField):
-    """Read one already-extracted value from a mapping."""
+    """Read one child value that the mapping field extracted already.
+
+    ``MappingField.clean()`` builds the child Form from a dict of Python
+    values, and that dict has no prefixed input names. Django's
+    ``BoundField.data`` reads the widget of the child, so it would find
+    nothing. This class reads the child name from the dict instead.
+    """
 
     @property
     def data(self) -> object:
@@ -40,7 +46,7 @@ class _ValueBoundField(BoundField):
 
 
 class MappingWidget(CompositeWidget):
-    """Render one child Form as a mapping-shaped widget."""
+    """Render one child Form as the widget of a mapping field."""
 
     _template_name = "nestingdolls/mapping/{layout}.html"
     use_fieldset = True
@@ -50,9 +56,10 @@ class MappingWidget(CompositeWidget):
     class Bound(CompositeWidget.Bound):
         """Hold the child Form that one render of a mapping widget needs.
 
-        The bound field builds the child Form, because only it holds the
-        submitted data and the errors of that Form. A render without one builds
-        its own Form from the value it is given.
+        The bound field builds the child Form, because only the bound field
+        holds the data that the browser sent and the errors of that Form. A
+        render that gets no child Form builds a new one from the value that it
+        gets.
         """
 
         subform: BaseForm | None = None
@@ -61,13 +68,14 @@ class MappingWidget(CompositeWidget):
 
     @dataclasses.dataclass(frozen=True)
     class Keys(CompositeWidget.Keys):
-        """Read the submitted input keys of one mapping field as child keys.
+        """Read the input keys of one mapping field as child keys.
 
         Every child of a mapping has a declared name. This object changes each
-        accepted key spelling into one canonical child key, and drops a key
-        that no child declares. It holds the child Form class, so it can read
-        those names, including the names a Form adds when it is built. It keeps
-        those names in its own instance dictionary, so it takes no slots.
+        accepted key format into one canonical child key. It drops a key that
+        no child declares. It holds the child Form class, and it reads the
+        child names from an instance of that class, so the names contain the
+        fields that ``__init__`` adds. This dataclass has no ``slots``, because
+        ``cached_property`` needs the instance dictionary.
         """
 
         form_class: type[BaseForm]
@@ -78,12 +86,13 @@ class MappingWidget(CompositeWidget):
             return tuple(self.form_class().fields)
 
         def canonical(self, key: object, name: str) -> str | None:
-            """Normalize one supported child key into its canonical declared name."""
+            """Return the canonical child key of one accepted key, or None."""
             if (child_key := self.split(key, name)) is None:
                 return None
             token, suffix = child_key
             key = f"{name}-{token}{suffix}"
-            # Drop undeclared keys so a matching prefix cannot retain untrusted data.
+            # A key that only starts with the field name is not a child key.
+            # Refuse it, so that forged input cannot stay in the value.
             return (
                 key
                 if any(
@@ -98,17 +107,23 @@ class MappingWidget(CompositeWidget):
         def normalized(
             self, data: Mapping[str, object], name: str
         ) -> Mapping[str, object]:
-            """Canonicalize accepted child names while preserving source values."""
+            """Return the data of the children under canonical keys.
+
+            The values stay as the caller gave them.
+            """
             if not data:
                 return {}
 
             if name in data:
-                # Use the direct mapping value when both shapes are present.
+                # A direct mapping value and flat child keys can both be
+                # present. The direct value has priority, because a caller that
+                # passes Python data must not compete with the browser.
                 value = data.get(name)
                 if not isinstance(value, Mapping):
                     return {name: value}
                 if isinstance(value, MultiValueDict):
-                    # Keep repeated child values for widgets that read all values.
+                    # Keep every repeated value, because a child widget can
+                    # read all values of one key.
                     normalized = MultiValueDict[str, object]()
                     for child_name in self.names:
                         if child_name in value:
@@ -116,7 +131,8 @@ class MappingWidget(CompositeWidget):
                                 f"{name}-{child_name}", value.getlist(child_name)
                             )
                     return normalized
-                # Keep direct mapping input from retaining undeclared data.
+                # Copy the declared children only, so that forged keys do not
+                # stay in the value.
                 return {
                     f"{name}-{child_name}": value[child_name]
                     for child_name in self.names
@@ -124,7 +140,8 @@ class MappingWidget(CompositeWidget):
                 }
 
             if isinstance(data, MultiValueDict):
-                # Keep repeated flat input values in Django's multi-value shape.
+                # Keep repeated values in a MultiValueDict, as Django request
+                # data does.
                 normalized = MultiValueDict[str, object]()
                 for source_key in data:
                     key = self.canonical(source_key, name)
@@ -146,27 +163,28 @@ class MappingWidget(CompositeWidget):
         form_class: type[BaseForm] | None = None,
         attrs: Mapping[str, object] | None = None,
     ) -> None:
-        """Store the child Form class this widget renders.
+        """Store the child Form class that this widget renders.
 
-        Django builds this widget from its class, and gives it no Form class,
-        when a field supplies only the class. The field configures the copy.
+        A field can supply the widget class only. Django then builds the widget
+        with no Form class, and the field configures that copy.
         """
         if form_class is not None:
             self.configure(form_class)
         super().__init__(dict(attrs) if attrs is not None else None)
 
     def configure(self, form_class: type[BaseForm]) -> None:
-        """Take the child Form class of the field that owns this widget.
+        """Store the configuration of the field that owns this widget.
 
-        Django copies a widget before a field can use it, so the field calls
-        this on its own copy. The key reader is built here, because it reads the
-        child names of this Form class and must never read another one.
+        Django copies a widget before a field uses it, so the field calls this
+        method on its own copy. This method makes a new key reader, because a
+        key reader must read the child names of this Form class only.
         """
         self.form_class = form_class
         self.keys = self.Keys(form_class)
 
     @cached_property
     def fields(self) -> dict[str, Field]:
+        """Return the fields of one instance of the child Form."""
         return self.form_class().fields
 
     def _value_from_normalized_data(
@@ -176,6 +194,8 @@ class MappingWidget(CompositeWidget):
         name: str,
     ) -> object:
         """Extract child values from canonical data and files."""
+        # A direct value holds the whole mapping. Return it, because the caller
+        # gave Python data and no child widget must read it again.
         if name in data:
             return data.get(name)
         if name in files:
@@ -185,6 +205,9 @@ class MappingWidget(CompositeWidget):
 
         file_data = cast(MultiValueDict[str, UploadedFile], files)
         value: dict[str, object] = {}
+        # Only a child widget knows how to read its own input, and only it
+        # knows when the browser sent nothing. A child that sent nothing stays
+        # out of the value, so that its initial value survives.
         for child_name, field in self.fields.items():
             child_widget = self._child_widget(field)
             child_input_name = f"{name}-{child_name}"
@@ -198,10 +221,17 @@ class MappingWidget(CompositeWidget):
     def get_context(
         self, name: str, value: object, attrs: dict[str, Any] | None
     ) -> dict[str, Any]:
-        """Build widget context with a prefixed child Form."""
+        """Build the context of the widget, with a prefixed child Form.
+
+        The bound field supplies the child Form when the outer form is bound.
+        An unbound render gets no Form, and it builds one from the value.
+        """
         context = super().get_context(name, value, attrs)
         subform = self.bound.subform
         if subform is None:
+            # A hidden initial render must show the initial value, because
+            # change detection compares it with the value that the browser
+            # sent.
             if self.bound.hidden_initial_value is not None:
                 value = self.bound.hidden_initial_value
             subform = self.form_class(
@@ -237,13 +267,17 @@ class MappingWidget(CompositeWidget):
 
     @property
     def media(self) -> WidgetMedia:
-        """Return this widget's media with the child Form media."""
+        """Return the media of this widget and of the child Form."""
         media: WidgetMedia = super().media + self.form_class().media
         return media
 
 
 class MappingBoundField(CompositeBoundField):
-    """Render child Form errors without duplicating them on the parent field."""
+    """Bind and render the child Form of a mapping field.
+
+    The child Form keeps its own errors beside its own fields. The outer field
+    does not repeat them.
+    """
 
     field: MappingField
 
@@ -254,7 +288,12 @@ class MappingBoundField(CompositeBoundField):
 
     @cached_property
     def initial(self) -> object:
-        """Normalize recognized mapping initials and preserve invalid ones."""
+        """Return the initial mapping, and keep an unusable value as it is.
+
+        Initial data can use flat child keys, for example ``address-city``.
+        Read those keys when the initial data of the form has no key for this
+        field.
+        """
         if self.form.initial and self.name not in self.form.initial:
             value = self._flat_initial_value(self.form.initial)
             if isinstance(value, Mapping) and value:
@@ -263,11 +302,18 @@ class MappingBoundField(CompositeBoundField):
         try:
             return self.field._initial_value(value)
         except InvalidInitialValueError:
+            # Do not raise during a render. The widget can render a wrong
+            # initial value, and validation reports the problem to the user.
             return value
 
     @cached_property
     def _is_bound_subform(self) -> bool:
-        """Return whether the child form should bind submitted data/files."""
+        """Report whether the child Form must bind the data and the files.
+
+        A browser sends no file input when the user selects no file. If the
+        initial data holds files, the Form still binds, so that the child
+        ``FileField`` can keep the file or clear it.
+        """
         if not self.form.is_bound:
             return False
         if self.field.disabled:
@@ -284,7 +330,7 @@ class MappingBoundField(CompositeBoundField):
 
     @cached_property
     def subform(self) -> BaseForm:
-        """Return the child Form used for bound cleaning and rendering."""
+        """Return the child Form for the clean step and for the render."""
         is_bound = self._is_bound_subform
         initial = self.initial
         subform = self.field.form_class(
@@ -298,6 +344,8 @@ class MappingBoundField(CompositeBoundField):
             ),
             renderer=self.form.renderer,
         )
+        # Django does not give ``disabled`` to a child field, so set it on each
+        # one. A disabled child keeps its initial value and ignores the input.
         if self.field.disabled:
             for field in subform.fields.values():
                 field.disabled = True
@@ -307,7 +355,8 @@ class MappingBoundField(CompositeBoundField):
         """Give the mapping widget the child Form that holds the bound data."""
         if not isinstance(widget, MappingWidget):
             return super()._prepare_widget(widget, only_initial)
-        # A hidden initial render builds its own Form, with the initial prefix.
+        # A hidden initial render must not use the bound child Form, because
+        # that Form holds the prefix and the data of the visible render.
         value, _ = self._hidden_initial_value(widget) if only_initial else (None, None)
         widget.bound = widget.Bound(
             hidden_initial_value=value,
@@ -316,7 +365,7 @@ class MappingBoundField(CompositeBoundField):
 
 
 class MappingField(CompositeField):
-    """Validate a fixed mapping shape with one child Form class."""
+    """Clean and validate the fixed set of children that one Form declares."""
 
     widget: MappingWidget
     default_error_messages = {  # noqa: RUF012
@@ -348,6 +397,9 @@ class MappingField(CompositeField):
             raise ImproperlyConfigured(
                 "form_class argument for MappingField must be a BaseForm subclass"
             )
+        # Build the Form one time now. A Form class that needs arguments would
+        # fail later, in the middle of a render, and the reason would be hard
+        # to find.
         try:
             form_class()
         except TypeError as exc:
@@ -363,8 +415,8 @@ class MappingField(CompositeField):
             raise TypeError("bound_field_class must inherit from MappingBoundField")
         super().__init__(
             required=required,
-            # Django builds a widget class and copies a widget instance. The
-            # configuration below then makes that copy match this field.
+            # Django accepts a widget class and copies the instance. The call
+            # to configure() below makes that copy match this field.
             widget=widget or MappingWidget,
             label=label,  # type: ignore[arg-type]
             initial=initial,
@@ -380,12 +432,13 @@ class MappingField(CompositeField):
         )
         if not isinstance(self.widget, MappingWidget):
             raise TypeError("widget must be a MappingWidget instance or subclass")
-        # Django copies the widget. Configure that copy to match this field.
+        # Configure the copy that Django made, not the widget that the caller
+        # gave.
         self.widget.configure(form_class)
 
     @staticmethod
     def _initial_value(value: object) -> dict[str, object]:
-        """Normalize a supported initial mapping."""
+        """Return the initial value as a dict, or raise ``InvalidInitialValueError``."""
         if value is None or value == "":
             return {}
         if isinstance(value, Mapping):
@@ -393,7 +446,11 @@ class MappingField(CompositeField):
         raise InvalidInitialValueError("initial must be a mapping of values")
 
     def to_python(self, value: object) -> dict[str, object]:
-        """Require input to be mapping-shaped."""
+        """Return the value as a dict, and refuse a value that is not a mapping.
+
+        The widget extracted the children already, so this method does no work
+        on keys.
+        """
         if value is None or value == "":
             return {}
         if not isinstance(value, Mapping):
@@ -405,12 +462,19 @@ class MappingField(CompositeField):
         # to_python() gives a mapping of members here, or raises for other input.
         value = cast(dict[str, object], super().children_from_hidden_initial(value))
         for name, child_field in self.form_class().fields.items():
+            # A file has no text form in a hidden input, so keep the value of a
+            # FileField child as it is.
             if name in value and not isinstance(child_field, FileField):
                 value[name] = self.hidden_initial_to_python(child_field, value[name])
         return value
 
     def _clean_form(self, form: BaseForm) -> dict[str, object]:
-        """Return child cleaned data or raise its leaf errors."""
+        """Return the cleaned data of the child Form, or raise its errors.
+
+        Django keeps the leaf messages of a composite error only, so this
+        method makes one ``ItemValidationError`` for each message. Each message
+        then keeps the name of the child that it came from.
+        """
         if not form.is_valid():
             raise ValidationError(
                 [
@@ -426,7 +490,11 @@ class MappingField(CompositeField):
         return result
 
     def clean(self, value: object) -> dict[str, object]:
-        """Clean an already-collected mapping value."""
+        """Clean a mapping of values that a caller collected.
+
+        The child Form gets ``_ValueBoundField``, because this input holds
+        Python values under child names and no prefixed input names.
+        """
         value = self.to_python(value)
         if not value:
             return cast(dict[str, object], super().clean(value))
@@ -438,7 +506,12 @@ class MappingField(CompositeField):
         )
 
     def _clean_bound_field(self, bound_field: BoundField) -> dict[str, object]:
-        """Clean the prefixed child Form when bound input or file-only initials apply."""
+        """Clean the prefixed child Form of a bound outer form.
+
+        The child Form cleans the input when the browser sent data, and also
+        when the initial data holds files only. In all other conditions, use
+        the normal path of the field.
+        """
         assert isinstance(bound_field, MappingBoundField)
         if self.disabled:
             return cast(
@@ -467,8 +540,9 @@ class MappingField(CompositeField):
                 for name, field in self.form_class().fields.items()
             }
         except (InvalidInitialValueError, ValidationError):
-            # BoundField.value() calls this while rendering an invalid form.
-            # Keep hostile input in Django's normal rendering channel.
+            # BoundField.value() calls this method during a render of an
+            # invalid form. Keep forged input in the normal Django channel, so
+            # that the user sees what the browser sent.
             return super().bound_data(data, initial)
 
     def prepare_value(self, value: object) -> object:
@@ -487,6 +561,8 @@ class MappingField(CompositeField):
         """Compare mapping members using child-field change semantics."""
         if self.disabled:
             return False
+        # A value that no field can read counts as a change. A change that the
+        # form misses would lose data, and an extra change costs one save.
         try:
             initial = self._initial_value(initial)
             data = self.to_python(data)
