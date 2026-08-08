@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, cast
+from typing import Any, Self, cast
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.core.files.uploadedfile import UploadedFile
@@ -38,6 +38,11 @@ class _ValueBoundField(BoundField):
     values, and that dict has no prefixed input names. Django's
     ``BoundField.data`` reads the widget of the child, so it would find
     nothing. This class reads the child name from the dict instead.
+
+    Only two callers reach this path: a direct ``field.clean(dict)`` call,
+    or a ``SequenceField`` parent that cleans one row. A bound outer form
+    uses ``_clean_bound_field`` and the prefixed subform instead. So this
+    path is not a hot path.
     """
 
     @property
@@ -114,10 +119,9 @@ class MappingWidget(CompositeWidget):
             if not data:
                 return {}
 
-            if name in data:
+            if name in data and self.prefers_direct(data, name):
                 # A direct mapping value and flat child keys can both be
-                # present. The direct value has priority, because a caller that
-                # passes Python data must not compete with the browser.
+                # present. See prefers_direct() for which one wins.
                 value = data.get(name)
                 if not isinstance(value, Mapping):
                     return {name: value}
@@ -187,7 +191,7 @@ class MappingWidget(CompositeWidget):
         """Return the fields of one instance of the child Form."""
         return self.form_class().fields
 
-    def _value_from_normalized_data(
+    def value_from_normalized_data(
         self,
         data: Mapping[str, object],
         files: Mapping[str, object],
@@ -203,7 +207,7 @@ class MappingWidget(CompositeWidget):
         if not data and not files:
             return {}
 
-        file_data = cast(MultiValueDict[str, UploadedFile], files)
+        files = cast(MultiValueDict[str, UploadedFile], files)
         value: dict[str, object] = {}
         # Only a child widget knows how to read its own input, and only it
         # knows when the browser sent nothing. A child that sent nothing stays
@@ -211,10 +215,10 @@ class MappingWidget(CompositeWidget):
         for child_name, field in self.fields.items():
             child_widget = self._child_widget(field)
             child_input_name = f"{name}-{child_name}"
-            if child_widget.value_omitted_from_data(data, file_data, child_input_name):
+            if child_widget.value_omitted_from_data(data, files, child_input_name):
                 continue
             value[child_name] = child_widget.value_from_datadict(
-                data, file_data, child_input_name
+                data, files, child_input_name
             )
         return value
 
@@ -265,11 +269,28 @@ class MappingWidget(CompositeWidget):
         """Report whether any child widget accepts files."""
         return any(field.widget.needs_multipart_form for field in self.fields.values())
 
-    @property
-    def media(self) -> WidgetMedia:
-        """Return the media of this widget and of the child Form."""
-        media: WidgetMedia = super().media + self.form_class().media
-        return media
+    def _child_media(self) -> WidgetMedia:
+        """Return the media of the child Form.
+
+        ``BaseForm.media`` already aggregates every child widget's media.
+        """
+        return self.form_class().media
+
+    def __deepcopy__(self, memo: dict[int, object]) -> Self:
+        """Copy this widget. Do not share its cached child widgets.
+
+        ``Widget.__deepcopy__`` makes only a shallow ``copy.copy``. A
+        warmed ``fields`` cache holds child ``Field`` and ``Widget``
+        objects. This method clears that cache, so no two forms share it.
+
+        ``ClearableFileInput.value_from_datadict`` changes
+        ``self.checked`` on its widget. A shared cache turns that change
+        into a cross-request bug. ``MultiValueField.__deepcopy__`` clears
+        its own cache for the same reason.
+        """
+        result = super().__deepcopy__(memo)
+        result.__dict__.pop("fields", None)
+        return result
 
 
 class MappingBoundField(CompositeBoundField):
@@ -292,27 +313,34 @@ class MappingBoundField(CompositeBoundField):
 
         Initial data can use flat child keys, for example ``address-city``.
         Read those keys when the initial data of the form has no key for this
-        field.
+        field. Initial data uses the field's own ``name`` as its key.
+        Submitted data uses ``html_name`` instead. So this method reads
+        ``self.name``, while ``_data_input`` reads ``self.html_name``.
         """
         if self.form.initial and self.name not in self.form.initial:
-            value = self._flat_initial_value(self.form.initial)
+            value = self._initial_from_flat_keys(self.form.initial)
             if isinstance(value, Mapping) and value:
-                return self.field._initial_value(value)
+                return self.field.initial_value(value)
         value = super().initial
         try:
-            return self.field._initial_value(value)
+            return self.field.initial_value(value)
         except InvalidInitialValueError:
             # Do not raise during a render. The widget can render a wrong
             # initial value, and validation reports the problem to the user.
             return value
 
     @cached_property
-    def _is_bound_subform(self) -> bool:
+    def is_bound_subform(self) -> bool:
         """Report whether the child Form must bind the data and the files.
 
         A browser sends no file input when the user selects no file. If the
         initial data holds files, the Form still binds, so that the child
         ``FileField`` can keep the file or clear it.
+
+        A value that is not a ``Mapping`` means the caller sent a scalar
+        under this field's name. There are no children to distribute that
+        scalar over. So the subform must not bind. ``to_python`` reports
+        the "invalid" error instead.
         """
         if not self.form.is_bound:
             return False
@@ -331,7 +359,7 @@ class MappingBoundField(CompositeBoundField):
     @cached_property
     def subform(self) -> BaseForm:
         """Return the child Form for the clean step and for the render."""
-        is_bound = self._is_bound_subform
+        is_bound = self.is_bound_subform
         initial = self.initial
         subform = self.field.form_class(
             data=self._data_input if is_bound else None,
@@ -407,7 +435,7 @@ class MappingField(CompositeField):
                 "form_class argument for MappingField must be default-constructible"
             ) from exc
         if initial is not None and not callable(initial):
-            self._initial_value(initial)
+            self.initial_value(initial)
 
         self.form_class = form_class
         bound_field_class = bound_field_class or self.bound_field_class
@@ -437,7 +465,7 @@ class MappingField(CompositeField):
         self.widget.configure(form_class)
 
     @staticmethod
-    def _initial_value(value: object) -> dict[str, object]:
+    def initial_value(value: object) -> dict[str, object]:
         """Return the initial value as a dict, or raise ``InvalidInitialValueError``."""
         if value is None or value == "":
             return {}
@@ -461,11 +489,11 @@ class MappingField(CompositeField):
         """Convert each member back from its hidden initial value."""
         # to_python() gives a mapping of members here, or raises for other input.
         value = cast(dict[str, object], super().children_from_hidden_initial(value))
-        for name, child_field in self.form_class().fields.items():
+        for name, child_field in self.widget.fields.items():
             # A file has no text form in a hidden input, so keep the value of a
             # FileField child as it is.
             if name in value and not isinstance(child_field, FileField):
-                value[name] = self.hidden_initial_to_python(child_field, value[name])
+                value[name] = self._hidden_initial_to_python(child_field, value[name])
         return value
 
     def _clean_form(self, form: BaseForm) -> dict[str, object]:
@@ -508,11 +536,16 @@ class MappingField(CompositeField):
     def _clean_bound_field(self, bound_field: BoundField) -> dict[str, object]:
         """Clean the prefixed child Form of a bound outer form.
 
-        The child Form cleans the input when the browser sent data, and also
-        when the initial data holds files only. In all other conditions, use
-        the normal path of the field.
+        The child Form cleans the input when the browser sent data. It
+        also cleans the input when the initial data holds files only.
+        Two other cases go back to the normal Django path:
+
+        - A value that is not a mapping. The base field turns this into
+          the "invalid" error.
+        - An empty value with no bound subform. The base field turns
+          this into "required", or into the empty default.
         """
-        assert isinstance(bound_field, MappingBoundField)
+        assert isinstance(bound_field, MappingBoundField), "for mypy"
         if self.disabled:
             return cast(
                 dict[str, object],
@@ -520,7 +553,7 @@ class MappingField(CompositeField):
             )
         value = bound_field.data
         if not isinstance(value, Mapping) or (
-            not value and not bound_field._is_bound_subform
+            not value and not bound_field.is_bound_subform
         ):
             return cast(
                 dict[str, object],
@@ -531,13 +564,13 @@ class MappingField(CompositeField):
     def bound_data(self, data: object, initial: object) -> object:
         """Bind submitted members with their matching initial values."""
         try:
-            initial = self._initial_value(initial)
+            initial = self.initial_value(initial)
             if self.disabled:
                 return initial
             data = self.to_python(data)
             return {
                 name: field.bound_data(data.get(name), initial.get(name))
-                for name, field in self.form_class().fields.items()
+                for name, field in self.widget.fields.items()
             }
         except (InvalidInitialValueError, ValidationError):
             # BoundField.value() calls this method during a render of an
@@ -548,10 +581,10 @@ class MappingField(CompositeField):
     def prepare_value(self, value: object) -> object:
         """Prepare each mapping member for widget rendering."""
         try:
-            value = self._initial_value(value)
+            value = self.initial_value(value)
             return {
                 name: field.prepare_value(value[name])
-                for name, field in self.form_class().fields.items()
+                for name, field in self.widget.fields.items()
                 if name in value
             }
         except (InvalidInitialValueError, ValidationError):
@@ -564,11 +597,11 @@ class MappingField(CompositeField):
         # A value that no field can read counts as a change. A change that the
         # form misses would lose data, and an extra change costs one save.
         try:
-            initial = self._initial_value(initial)
+            initial = self.initial_value(initial)
             data = self.to_python(data)
         except (InvalidInitialValueError, ValidationError):
             return True
-        for name, field in self.form_class().fields.items():
+        for name, field in self.widget.fields.items():
             try:
                 if field.has_changed(initial.get(name), data.get(name)):
                     return True

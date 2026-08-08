@@ -37,7 +37,7 @@ def actual_mapping_direct_precedence(
 ) -> tuple[str, int]:
     data: dict[str, object] = {"value": data_value} if direct_data else {"value-a": 1}
     files: dict[str, object] = {"value": file_value} if direct_files else {"value-a": 2}
-    result = _MAPPING_WIDGET._value_from_normalized_data(data, files, "value")
+    result = _MAPPING_WIDGET.value_from_normalized_data(data, files, "value")
     if isinstance(result, int):
         return ("direct", result)
     return (

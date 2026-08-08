@@ -6,6 +6,12 @@
     data-sequence-field="{{ widget.name }}"
     {% if widget.attrs.id %}id="{{ widget.attrs.id }}___prefix___remove"{% endif %}
     {% if widget.disabled %} disabled{% endif %}
+    {% comment %}
+    Without this, every remove button reads "Remove" to a screen reader,
+    with no way to tell the rows apart. This replaces __prefix__ with the
+    row index, so the script can give each button its own row number.
+    {% endcomment %}
+    aria-label="{% translate "Remove row" %} __prefix__"
   >{% translate "Remove" %}</button>
 </template>
 <template data-sequence-add-button data-sequence-field="{{ widget.name }}">
@@ -17,3 +23,11 @@
     {% if widget.disabled %} disabled{% endif %}
   >{% translate "Add another" %}</button>
 </template>
+{% comment %}
+A host page already has its own way to show a message: a toast
+library, a live region, or something else. This widget must not force
+one choice on every page that uses it. So the script fires a bubbling
+`nestingdolls:sequence-change` event instead, after it adds or removes
+a row. The host page can listen for the event and show its own
+message. Do not add a status element here again: see README.md.
+{% endcomment %}

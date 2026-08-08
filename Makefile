@@ -3,43 +3,61 @@ PYTHON := $(UV_RUN) python
 RUFF := $(UV_RUN) ruff
 MYPY := $(UV_RUN) mypy
 CROSSHAIR := $(UV_RUN) crosshair
-TSC := ./node_modules/typescript/bin/tsc
+NPM := npm --silent
 
-DEFAULT_GOAL := help
+PYTHON_FILES := demo.py nestingdolls test_composite.py test_dictfield.py test_listfield.py test_patches.py mypy_settings.py proof_dictfield.py proof_listfield.py
+COMPILED_JS := nestingdolls/static/nestingdolls/sequence.js
 
-.PHONY: js tscheck jstest format ruff mypy test agents check crosshair
+.PHONY: js jsdrift tscheck jstest format formatcheck ruff rufffix mypy test check fix crosshair
 
-.DEFAULT_GOAL := $(DEFAULT_GOAL)
+.DEFAULT_GOAL := help
 
 help: ## Show targets and short task text. (This command)
 	@awk 'BEGIN {FS = ": ## " ; print "Available targets\n-----------------"} /^[[:alnum:]_-]+: ## / {print $$1 " → " $$2}' $(MAKEFILE_LIST)
 
 js: ## Build JavaScript from TypeScript.
-	$(TSC) -p tsconfig.json
+	$(NPM) run build
+
+jsdrift: ## Fail when the committed JavaScript is not the current build.
+	@cp $(COMPILED_JS) $(COMPILED_JS).drift
+	@$(NPM) run build
+	@if cmp -s $(COMPILED_JS) $(COMPILED_JS).drift; then \
+		rm -f $(COMPILED_JS).drift; \
+	else \
+		mv $(COMPILED_JS).drift $(COMPILED_JS); \
+		echo "$(COMPILED_JS) is stale: run 'make js' and commit the result."; \
+		exit 1; \
+	fi
 
 tscheck: ## Check TypeScript. Do not write files.
-	$(TSC) -p tsconfig.json --noEmit
+	$(NPM) run typecheck
 
 jstest: ## Run JavaScript DOM tests.
-	node --test test_sequence.mjs
+	$(NPM) test
 
 format: ## Run Ruff formatter on maintained Python files.
-	$(RUFF) format demo.py nestingdolls test_dictfield.py test_listfield.py test_patches.py test_settings.py proof_dictfield.py proof_listfield.py scripts/update_package_agents.py
+	$(RUFF) format $(PYTHON_FILES)
 
-ruff: ## Run Ruff with auto-fixes on kept Python files.
-	$(RUFF) check --fix demo.py nestingdolls test_dictfield.py test_listfield.py test_patches.py test_settings.py proof_dictfield.py proof_listfield.py scripts/update_package_agents.py
+formatcheck: ## Check formatting without writing files.
+	$(RUFF) format --check $(PYTHON_FILES)
+
+ruff: ## Lint the maintained Python files.
+	$(RUFF) check $(PYTHON_FILES)
+
+rufffix: ## Lint with auto-fixes.
+	$(RUFF) check --fix $(PYTHON_FILES)
 
 mypy: ## Run mypy with strict checks.
-	$(MYPY) demo.py nestingdolls/__init__.py nestingdolls/errors.py nestingdolls/mappings.py nestingdolls/sequences.py
+	$(MYPY) demo.py nestingdolls
 
 test: ## Run the Django test files.
-	$(PYTHON) -W error::DeprecationWarning -W error::PendingDeprecationWarning -m unittest test_listfield test_dictfield test_patches
+	$(PYTHON) -W error::DeprecationWarning -W error::PendingDeprecationWarning -m unittest test_composite test_listfield test_dictfield test_patches
 
-agents: ## Update the generated method reference in nestingdolls/AGENTS.md.
-	$(PYTHON) scripts/update_package_agents.py
+check: ## Run every fast check. Writes nothing, so CI can gate on it.
+check: tscheck jsdrift jstest ruff formatcheck test mypy
 
-check: ## Update generated docs and run all fast checks.
-check: tscheck jstest ruff format test mypy agents
+fix: ## Apply the formatter and the lint auto-fixes.
+fix: rufffix format
 
 crosshair: ## Confirm the small set of independent semantic models.
 	$(CROSSHAIR) check --report_all --max_uninteresting_iterations=25 --per_condition_timeout=12 proof_listfield.prove_sequence_direct_extraction proof_dictfield.prove_mapping_direct_precedence proof_dictfield.prove_mapping_hostile_fallback

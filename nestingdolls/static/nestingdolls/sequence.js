@@ -1,5 +1,10 @@
 "use strict";
 (() => {
+    // The server renders every per-row name, id, and reference with this
+    // placeholder, in place of the row index. SequenceWidget.get_context
+    // builds the row under the "__prefix__" index. This file only
+    // substitutes the placeholder. It never rebuilds the
+    // "<field>-<index>" convention itself.
     const prefix = "__prefix__";
     const sequenceWidgetSelector = '[data-widget="sequence"]';
     const enhancedWidgets = new WeakSet();
@@ -10,8 +15,7 @@
         "aria-describedby",
         "aria-labelledby",
         "aria-controls",
-        "list",
-        "form",
+        "aria-label",
         "data-sequence-field",
     ];
     const prefixAttributeSelector = prefixAttributes
@@ -57,7 +61,11 @@
         const fragment = template.content.cloneNode(true);
         const index = parseRequiredInteger(row.dataset.sequenceIndex, "data-sequence-index");
         replacePrefixAttributes(fragment, index);
-        row.append(fragment);
+        // The row template renders an explicit slot. Appending directly to
+        // the row places a <button> inside a <tr>. The HTML content model
+        // forbids that placement.
+        const slot = ownedElements(root, row, "[data-sequence-actions]")[0];
+        (slot ?? row).append(fragment);
     }
     function ensureAddButton(root) {
         const existing = ownedElements(root, root, "[data-sequence-add]")[0];
@@ -70,6 +78,9 @@
         root.append(fragment);
         return button;
     }
+    // These limits are a hint for the browser only. The server re-checks
+    // every limit in SequenceField.Limits. SequenceField.Limits is the
+    // authority. Nothing in this file guarantees correctness.
     function canAddRow(root, rowCount, nextIndex) {
         const maximum = parseRequiredInteger(root.dataset.sequenceMaximum, "data-sequence-maximum");
         const absoluteMaximum = parseRequiredInteger(root.dataset.sequenceAbsoluteMaximum, "data-sequence-absolute-maximum");
@@ -85,13 +96,20 @@
         const rows = activeRows(root);
         const totalInput = ownedElement(root, root, "[data-sequence-total]");
         const nextIndex = parseRequiredInteger(totalInput.value, "data-sequence-total");
-        ensureAddButton(root).hidden = !canAddRow(root, rows.length, nextIndex);
-        const removeButtonsHidden = rows.length <= minimumRows(root);
+        // Disable the button, instead of hiding it. A hidden control
+        // leaves the accessibility tree entirely. A screen-reader user
+        // cannot tell unavailable from absent.
+        setAvailability(ensureAddButton(root), canAddRow(root, rows.length, nextIndex));
+        const removeAvailable = rows.length > minimumRows(root);
         for (const row of rows) {
             for (const button of ownedElements(root, row, "[data-sequence-remove]")) {
-                button.hidden = removeButtonsHidden;
+                setAvailability(button, removeAvailable);
             }
         }
+    }
+    function setAvailability(button, available) {
+        button.disabled = !available;
+        button.setAttribute("aria-disabled", available ? "false" : "true");
     }
     function focusFirstControl(parent) {
         const control = parent.querySelector(focusableControlSelector);
@@ -101,6 +119,11 @@
         control.focus();
         return true;
     }
+    // A host page already has its own way to show a message: a toast
+    // library, a live region, or something else. This file must not
+    // force one choice on every page that uses it. So this function
+    // fires a bubbling "nestingdolls:sequence-change" event instead.
+    // The host page can listen for the event and show its own message.
     function dispatchSequenceChange(root, row, action) {
         const index = parseRequiredInteger(row.dataset.sequenceIndex, "data-sequence-index");
         root.dispatchEvent(new CustomEvent("nestingdolls:sequence-change", {
@@ -118,6 +141,11 @@
         const deleteInput = ownedElement(root, row, "[data-sequence-delete]");
         deleteInput.value = "1";
         row.hidden = true;
+        // [hidden] is only a UA `display: none` rule. Any framework
+        // selector with higher specificity can override it. This line
+        // also sets the inline style, so a removed row cannot stay
+        // visible with disabled inputs.
+        row.style.display = "none";
         for (const control of row.querySelectorAll("input, select, textarea, button")) {
             // Deletion flags are the only fields the server still needs from a
             // removed row, so they keep posting while the stale values stop.
@@ -159,8 +187,11 @@
         replacePrefixAttributes(fragment, index);
         const row = requiredElement(fragment.querySelector("[data-sequence-row]"), "[data-sequence-row]");
         row.dataset.sequenceIndex = String(index);
-        ensureRemoveButton(root, row);
         ownedElement(root, root, "[data-sequence-rows]").append(fragment);
+        // This call must come after the append. ownedElements() filters
+        // with closest(). closest() returns null for a detached subtree.
+        // So the duplicate guard cannot work before this point.
+        ensureRemoveButton(root, row);
         totalInput.value = String(index + 1);
         row
             .querySelectorAll(sequenceWidgetSelector)

@@ -7,6 +7,10 @@
   {% if delete_id %}id="{{ delete_id }}_{{ row.index }}_DELETE"{% endif %}
   {% if delete_disabled %} disabled{% endif %}
 >
+{% comment %}
+The include path here is a variable, but it always comes from Widget.template_name. 
+Never let this path come from submitted data; an attacker could then load any template.
+{% endcomment %}
 {% include row.subwidget.template_name with widget=row.subwidget only %}
 {% if row.errors %}
   <ul class="errorlist"{% if row.error_id %} id="{{ row.error_id }}"{% endif %}>{% for error in row.errors %}<li>{{ error }}</li>{% endfor %}</ul>

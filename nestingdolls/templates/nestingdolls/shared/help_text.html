@@ -1,3 +1,8 @@
+{% comment %}
+The `|safe` filter matches Django's own form templates: 
+div.html, p.html, table.html, and ul.html all mark help_text safe. 
+Do not remove it.
+{% endcomment %}
 {% if field.help_text %}
   <{{ tag }} class="helptext"{% if field.auto_id %} id="{{ field.auto_id }}_helptext"{% endif %}>{{ field.help_text|safe }}</{{ tag }}>
 {% endif %}

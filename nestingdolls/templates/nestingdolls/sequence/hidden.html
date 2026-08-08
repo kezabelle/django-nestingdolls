@@ -1,2 +1,6 @@
 {% for management_field in widget.management_form.hidden_fields %}{{ management_field }}{% endfor %}
+{% comment %}
+The include path here is a variable, but it always comes from Widget.template_name. 
+Never let this path come from submitted data; an attacker could then load any template.
+{% endcomment %}
 {% for row in widget.rows %}{% include row.subwidget.template_name with widget=row.subwidget only %}{% endfor %}

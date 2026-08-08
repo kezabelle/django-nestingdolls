@@ -1,3 +1,9 @@
+{% comment %}
+This file shadows django/forms/p.html (copied from Django 5.2). A <p>
+element cannot nest, and Django has no as_p hook without the <p> tag. So
+this file repeats the field loop here, with <span> tags instead. Check
+this file against django/forms/p.html after every Django upgrade.
+{% endcomment %}
 {% spaceless %}
 {% if widget.is_hidden %}
   {% for field in widget.hidden_fields %}{{ field }}{% endfor %}

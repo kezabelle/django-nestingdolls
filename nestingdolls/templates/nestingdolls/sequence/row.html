@@ -1,3 +1,8 @@
+{% comment %}
+row_tag and body_tag become HTML tags directly. Every caller must pass
+a fixed value from a closed set, set in Python. Never take them from
+widget.attrs or from data passed in by the caller.
+{% endcomment %}
 <{{ row_tag }}
   data-sequence-row
   data-sequence-field="{{ widget_name }}"
@@ -6,5 +11,12 @@
 >
   {% if body_tag %}<{{ body_tag }}>{% endif %}
   {% include "nestingdolls/sequence/row_content.html" with row=row widget_name=widget_name delete_id=widget_id delete_disabled=delete_disabled only %}
+  {% comment %}
+  The browser script puts this row's remove button here. Without this
+  slot, the script would add the button as a direct child of the row
+  element. In the table layout, that puts a <button> directly inside a
+  <tr>, which HTML does not allow.
+  {% endcomment %}
+  <span data-sequence-actions data-sequence-field="{{ widget_name }}"></span>
   {% if body_tag %}</{{ body_tag }}>{% endif %}
 </{{ row_tag }}>

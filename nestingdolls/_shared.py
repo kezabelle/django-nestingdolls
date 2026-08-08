@@ -9,7 +9,9 @@ from django.core.exceptions import ValidationError
 from django.forms import Field
 from django.forms.boundfield import BoundField
 from django.forms.utils import ErrorList
+from django.forms.widgets import Media as WidgetMedia
 from django.forms.widgets import Widget
+from django.http import QueryDict
 from django.utils.functional import cached_property
 from django.utils.safestring import SafeString
 
@@ -59,6 +61,27 @@ class CompositeWidget(Widget):
                 return (remainder[:end], suffix)
             return None
 
+        def canonical(self, key: object, name: str) -> object | None:
+            """Return the canonical key for one accepted key spelling, or None."""
+            raise NotImplementedError
+
+        def prefers_direct(self, data: Mapping[str, object], name: str) -> bool:
+            """Report whether a value stored under ``name`` outranks flat child keys.
+
+            A ``QueryDict`` holds the browser's own input. There, a key that is
+            only spelled like the field name can be a submit button or a forged
+            key. That key must not discard the real child keys. The direct
+            value wins in two cases:
+
+            1. The data is not a ``QueryDict``. A programmer built the data,
+               and direct values win by design.
+            2. The data has no canonical child key for ``name``. A real
+               control named after the field is the only input present.
+            """
+            if not isinstance(data, QueryDict):
+                return True
+            return not any(self.canonical(key, name) is not None for key in data)
+
         def normalized(
             self, data: Mapping[str, object], name: str
         ) -> Mapping[str, object]:
@@ -100,11 +123,37 @@ class CompositeWidget(Widget):
 
     @property
     def template_name(self) -> str:
+        # A developer can set any template name. Only a name with the
+        # {layout} placeholder needs substitution. Formatting a name
+        # without the placeholder can raise an error on its own braces.
+        if "{layout}" not in self._template_name:
+            return self._template_name
         return self._template_name.format(layout=FormLayout.current().value)
 
     @template_name.setter
     def template_name(self, value: str) -> None:
         self._template_name = value
+
+    @property
+    def media(self) -> WidgetMedia:
+        """Merge every ``class Media`` in the MRO. Then add the children's media.
+
+        ``MediaDefiningClass`` installs ``media_property`` only for a class
+        that omits ``media`` from its body.
+        A composite widget must add media from the child form or the child
+        field. The metaclass cannot know about that media. So this class
+        must define ``media`` itself, and must merge the declarations that
+        the metaclass normally merges.
+        """
+        media = WidgetMedia()
+        for klass in reversed(type(self).__mro__):
+            if (definition := klass.__dict__.get("Media")) is not None:
+                media += WidgetMedia(definition)
+        return media + self._child_media()
+
+    def _child_media(self) -> WidgetMedia:
+        """Return the media of the children this widget renders."""
+        raise NotImplementedError
 
     def value_from_datadict(
         self,
@@ -113,7 +162,7 @@ class CompositeWidget(Widget):
         name: str,
     ) -> object:
         """Return the submitted composite value extracted by child widgets."""
-        return self._value_from_normalized_data(
+        return self.value_from_normalized_data(
             self.keys.normalized(data, name),
             self.keys.normalized(files, name) if files else {},
             name,
@@ -130,7 +179,7 @@ class CompositeWidget(Widget):
             self.keys.normalized(data, name) or self.keys.normalized(files, name)
         )
 
-    def _value_from_normalized_data(
+    def value_from_normalized_data(
         self,
         data: Mapping[str, object],
         files: Mapping[str, object],
@@ -162,7 +211,7 @@ class CompositeField(Field):
         return widget
 
     @staticmethod
-    def hidden_initial_to_python(field: Field, value: object, /) -> object:
+    def _hidden_initial_to_python(field: Field, value: object, /) -> object:
         """Convert what one child's hidden initial widget submitted."""
         if isinstance(field, CompositeField):
             return field.children_from_hidden_initial(value)
@@ -183,18 +232,25 @@ class CompositeBoundField(BoundField):
         """Return every error recorded for this field, child item errors included."""
         return super().errors
 
-    @property
+    @cached_property
     def errors(self) -> ErrorList:
-        """Return only errors owned by the outer composite field."""
+        """Return only errors owned by the outer composite field.
+
+        An item error belongs to one child. The subform or the row renders
+        that error next to the input that caused it. This method removes
+        child item errors from the outer field, so the user does not see
+        the same problem twice.
+        """
         errors = self._all_errors
         if not errors:
             return errors
-        field_errors = []
-        for error in errors.as_data():
-            if isinstance(error, ItemValidationError):
-                continue
-            field_errors.append(error)
-        if len(field_errors) == len(errors):
+        stored = errors.as_data()
+        field_errors = [
+            error for error in stored if not isinstance(error, ItemValidationError)
+        ]
+        # Compare against as_data(). ErrorList.__len__ counts rendered
+        # messages. One stored error can carry several messages.
+        if len(field_errors) == len(stored):
             return errors
         return self.form.error_class(
             field_errors,
@@ -217,7 +273,7 @@ class CompositeBoundField(BoundField):
     @cached_property
     def data(self) -> object:
         """Return the bound value extracted from normalized data and files."""
-        return self.field.widget._value_from_normalized_data(
+        return self.field.widget.value_from_normalized_data(
             self._data_input,
             self._file_input,
             self.html_name,
@@ -252,6 +308,11 @@ class CompositeBoundField(BoundField):
         the submitted data. A composite submits child names instead, so read the
         value here. Django's value would be the current data, which would replace
         the hidden initial and hide a change.
+
+        Only ``SequenceBoundField._prepare_widget`` uses the second element.
+        It passes that normalized input into ``SequenceWidget.Bound`` as
+        the management data for the hidden initial render. Every other
+        caller discards the second element.
         """
         name = self.html_initial_name
         data_input = widget.keys.normalized(self.form.data, name)
@@ -260,17 +321,17 @@ class CompositeBoundField(BoundField):
         )
         if data_input or file_input:
             return (
-                widget._value_from_normalized_data(data_input, file_input, name),
+                widget.value_from_normalized_data(data_input, file_input, name),
                 data_input,
             )
         return self.value(), None
 
-    def _flat_initial_value(self, source: Mapping[str, object]) -> object | None:
+    def _initial_from_flat_keys(self, source: Mapping[str, object]) -> object | None:
         """Return an initial value rebuilt from flattened child keys, if any match."""
         normalized = self.field.widget.keys.normalized(source, self.name)
         if not normalized:
             return None
-        value: object = self.field.widget._value_from_normalized_data(
+        value: object = self.field.widget.value_from_normalized_data(
             normalized, {}, self.name
         )
         return value
@@ -283,11 +344,11 @@ class CompositeBoundField(BoundField):
             return cast(bool, super()._has_changed())  # type: ignore[misc]
         widget = self.field.hidden_widget()
         try:
-            initial_value = self.field.children_from_hidden_initial(
+            initial = self.field.children_from_hidden_initial(
                 widget.value_from_datadict(
                     self.form.data, self.form.files, self.html_initial_name
                 )
             )
-        except (TypeError, ValidationError):
+        except ValidationError:
             return True
-        return self.field.has_changed(initial_value, self.data)
+        return self.field.has_changed(initial, self.data)

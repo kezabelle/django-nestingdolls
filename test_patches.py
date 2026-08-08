@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import wraps
@@ -34,48 +33,52 @@ if not settings.configured:
 @contextmanager
 def without_form_rendering_patch() -> Iterator[None]:
     original_render = BaseForm.render
+    original_str = BaseForm.__str__
+    original_html = BaseForm.__html__
     original_patch_target = BaseForm.nestingdolls_original_render
     original_flag = bool(
         getattr(BaseForm, "nestingdolls_render_patch_installed", False)
     )
     BaseForm.render = original_patch_target
+    BaseForm.__str__ = original_patch_target
+    BaseForm.__html__ = original_patch_target
     BaseForm.nestingdolls_render_patch_installed = False
     try:
         yield
     finally:
         BaseForm.render = original_render
+        BaseForm.__str__ = original_str
+        BaseForm.__html__ = original_html
         BaseForm.nestingdolls_original_render = original_patch_target
         BaseForm.nestingdolls_render_patch_installed = original_flag
 
 
+def squashed(html: str) -> str:
+    """Collapse runs of whitespace so multi-line attributes compare as one line."""
+    return " ".join(html.split())
+
+
 class FormRenderingPatchTestCase(SimpleTestCase):
-    def test_app_ready_is_idempotent(self):
+    def test_installation_is_idempotent(self):
+        """Installing again, by either entry point, never wraps the wrapper.
+
+        ``AppConfig.ready()`` can run more than once in one process, and it
+        only calls ``install_form_rendering_patch()``, so both entry points are
+        the same assertion.
+        """
         app_config = apps.get_app_config("nestingdolls")
         installed_render = BaseForm.render
         original_render = BaseForm.nestingdolls_original_render
 
         app_config.ready()
-        app_config.ready()
+        install_form_rendering_patch()
 
         self.assertIs(BaseForm.render, installed_render)
-        self.assertIs(BaseForm.nestingdolls_original_render, original_render)
-
-    def test_installation_is_idempotent(self):
-        original_render = BaseForm.nestingdolls_original_render
-
-        install_form_rendering_patch()
-        install_form_rendering_patch()
-
+        self.assertIs(BaseForm.__str__, installed_render)
+        self.assertIs(BaseForm.__html__, installed_render)
         self.assertIs(BaseForm.nestingdolls_render_patch_installed, True)
         self.assertIs(BaseForm.nestingdolls_original_render, original_render)
-
-    def test_patch_preserves_wrapped_method(self):
-        original_render = BaseForm.nestingdolls_original_render
-
         self.assertIs(getattr(BaseForm.render, "__wrapped__", None), original_render)
-        self.assertEqual(
-            inspect.signature(BaseForm.render), inspect.signature(original_render)
-        )
 
     def test_patch_wraps_an_existing_render_customization(self):
         wrapper_layouts = []
@@ -189,3 +192,37 @@ class FormRenderingPatchTestCase(SimpleTestCase):
         self.assertIn("<div", html)
         self.assertIn('name="values-0"', html)
         self.assertIn('name="values-1"', html)
+
+    def test_default_render_uses_the_renderer_form_template(self):
+        """``{{ form }}`` picks the layout of the renderer's own form template."""
+
+        class PRenderer(DjangoTemplates):
+            form_template_name = "django/forms/p.html"
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), min_length=1)
+
+        html = squashed(str(Form(renderer=PRenderer())))
+
+        self.assertIn('<span data-widget="sequence"', html)
+        self.assertNotIn('<div data-widget="sequence"', html)
+
+    def test_nested_default_render_does_not_inherit_the_outer_layout(self):
+        """A ``{{ inner_form }}`` inside ``as_table()`` renders its own div layout."""
+
+        class InnerForm(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), min_length=1)
+
+        inner_form = InnerForm()
+
+        class EmbeddingWidget(forms.TextInput):
+            def render(self, *args: object, **kwargs: object) -> str:
+                return str(inner_form)
+
+        class OuterForm(forms.Form):
+            embedded = forms.CharField(widget=EmbeddingWidget)
+
+        html = squashed(OuterForm().as_table())
+
+        self.assertIn('<div data-widget="sequence"', html)
+        self.assertNotIn('<table role="presentation">', html)

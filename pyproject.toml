@@ -5,10 +5,33 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "django-nesting-dolls"
 version = "0.1.0"
+description = "Composite Django form fields for nested mappings and sequences."
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
+authors = [{ name = "Keryn Knight" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: Django",
+    "Framework :: Django :: 5.2",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Typing :: Typed",
+]
 dependencies = [
     "django>=5.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/kezabelle/django-nesting-dolls"
+Source = "https://github.com/kezabelle/django-nesting-dolls"
+Issues = "https://github.com/kezabelle/django-nesting-dolls/issues"
 
 [dependency-groups]
 dev = [
@@ -27,6 +50,7 @@ include-package-data = false
 
 [tool.setuptools.package-data]
 nestingdolls = [
+    "py.typed",
     "static/**/*.js",
     "static/**/*.ts",
     "templates/**/*.html",
@@ -39,4 +63,4 @@ warn_unused_configs = true
 enable_error_code = ["ignore-without-code"]
 
 [tool.django-stubs]
-django_settings_module = "test_settings"
+django_settings_module = "mypy_settings"

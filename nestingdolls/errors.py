@@ -15,6 +15,7 @@ __all__ = [
     "MappingInputValidationError",
     "MissingManagementFormValidationError",
     "SequenceInputValidationError",
+    "TooManyComparisonsError",
     "TooManyFormsValidationError",
 ]
 
@@ -88,6 +89,18 @@ class MissingManagementFormValidationError(ValidationError):
             code="missing_management_form",
             params={"field_names": field_names},
         )
+
+
+class TooManyComparisonsError(RuntimeError):
+    """A set field's change detection gave up after too many comparisons.
+
+    ``SetField.has_changed()`` compares each submitted row against the
+    initial members. Each comparison calls the child field's own
+    ``has_changed()`` method, and that method can be slow. The number of
+    rows comes from the submitted data, not from the server. This error
+    stops the comparison at a fixed limit. Past that limit, the field
+    reports a change and does not finish the comparison.
+    """
 
 
 class TooManyFormsValidationError(ValidationError):

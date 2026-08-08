@@ -37,7 +37,7 @@ def actual_sequence_direct_extraction(
     submitted_data: dict[str, object] = {"values": data} if data_present else {}
     submitted_files: dict[str, object] = {"values": files} if files_present else {}
     return tuple(
-        _PARSER_WIDGET._value_from_normalized_data(
+        _PARSER_WIDGET.value_from_normalized_data(
             submitted_data, submitted_files, "values"
         )
     )

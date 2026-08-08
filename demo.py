@@ -13,6 +13,7 @@ from django.core.handlers.wsgi import WSGIRequest
 from django.http import HttpResponse
 from django.template import Context, Template
 from django.urls import path
+from django.utils.safestring import SafeString
 from django.views import View
 
 import nestingdolls
@@ -129,6 +130,15 @@ PAGES = (
     ("collection-types", "Tuple and set"),
 )
 
+# Query-string value -> BaseForm render helper. Three of the four shipped
+# layouts have no other manual smoke path.
+LAYOUT_HELPERS = {
+    "div": "as_div",
+    "p": "as_p",
+    "table": "as_table",
+    "ul": "as_ul",
+}
+
 DEMO_TEMPLATE = Template(
     textwrap.dedent("""\
 <!DOCTYPE html>
@@ -183,9 +193,13 @@ DEMO_TEMPLATE = Template(
     </nav>
     <h1>{{ title }}</h1>
     <p>{{ description }}</p>
+    <p>Layout:
+      <a href="?">default</a>{% for layout in layouts %}
+      <a href="?layout={{ layout }}">{{ layout }}</a>{% endfor %}
+    </p>
 
     <form method="GET" action="" autocomplete="off">
-    {{ form }}
+    {{ form_html }}
     {{ form.media }}
     <button type="submit" name="do-it" value="yep">Submit</button>
     <a href="{{ reset_url }}">Reset</a>
@@ -209,7 +223,24 @@ class DemoView(View):
     initial: ClassVar[dict[str, object]]
 
     def get_form(self, request: WSGIRequest) -> forms.Form:
-        return self.form_class(data=request.GET or None, initial=self.initial)
+        # `layout` selects the render helper. It is not form input, so it must
+        # not bind the form on its own.
+        data = request.GET.copy()
+        data.pop("layout", None)
+        return self.form_class(data=data or None, initial=self.initial)
+
+    def get_form_html(self, form: forms.Form, request: WSGIRequest) -> SafeString:
+        """Render the form with the helper the query string asks for.
+
+        An unknown value falls back to the default render: the demo is a smoke
+        harness, not a validated surface. That fallback is also the path worth
+        eyeballing, because it is the one the layout patch has to infer.
+        """
+        helper = LAYOUT_HELPERS.get(request.GET.get("layout", ""))
+        if helper is None:
+            return form.render()
+        rendered: SafeString = getattr(form, helper)()
+        return rendered
 
     def get_output(self, form: forms.Form) -> str:
         if form.is_bound and form.is_valid():
@@ -222,6 +253,8 @@ class DemoView(View):
         return {
             "description": self.description,
             "form": form,
+            "form_html": self.get_form_html(form, request),
+            "layouts": tuple(LAYOUT_HELPERS),
             "output": self.get_output(form),
             "pages": PAGES,
             "reset_url": request.path,

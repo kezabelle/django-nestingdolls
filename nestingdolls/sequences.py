@@ -6,7 +6,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import datetime, time
 from itertools import islice
 from types import MappingProxyType
-from typing import Any, Self, cast
+from typing import Any, ClassVar, Self, cast
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.core.files.uploadedfile import UploadedFile
@@ -47,6 +47,7 @@ from nestingdolls.errors import (
     ItemValidationError,
     MissingManagementFormValidationError,
     SequenceInputValidationError,
+    TooManyComparisonsError,
     TooManyFormsValidationError,
 )
 
@@ -82,6 +83,10 @@ class SequenceBoundField(CompositeBoundField):
         """
 
         bound_field: SequenceBoundField
+        # to_python() is a pure function of value; required=False is
+        # unused by it. One shared instance avoids rebuilding a Field
+        # for every row.
+        deletion_field: ClassVar[BooleanField] = BooleanField(required=False)
 
         @cached_property
         def management_form(self) -> ManagementForm | None:
@@ -92,7 +97,7 @@ class SequenceBoundField(CompositeBoundField):
             """
             bf = self.bound_field
             data = bf._data_input
-            if not bf.field.widget.keys.manages(data, bf.html_name):
+            if not bf.field.widget.keys.has_management_data(data, bf.html_name):
                 return None
             management_form = ManagementForm(data, prefix=bf.html_name)
             management_form.full_clean()
@@ -105,7 +110,7 @@ class SequenceBoundField(CompositeBoundField):
             return frozenset(
                 index
                 for index in range(len(bf.data))
-                if bf.field.widget.deletion_field.clean(
+                if self.deletion_field.to_python(
                     bf._data_input.get(f"{bf.html_name}-{index}-{DELETION_FIELD_NAME}")
                 )
             )
@@ -119,15 +124,15 @@ class SequenceBoundField(CompositeBoundField):
             same. A row that matches an initial row stays, because its value
             must not disappear.
             """
-            bound_field = self.bound_field
-            field = bound_field.field
-            name = bound_field.html_name
-            data_input = bound_field._data_input
-            file_input = bound_field._file_input
+            bf = self.bound_field
+            field = bf.field
+            name = bf.html_name
+            data_input = bf._data_input
+            file_input = bf._file_input
             if name in data_input or name in file_input:
                 return frozenset()
-            initial_count = len(field._initial_values(bound_field.initial))
-            row_count = len(bound_field.data)
+            initial_count = len(field.initial_values(bf.initial))
+            row_count = len(bf.data)
             row_data = field.widget.keys.rows(data_input, name, row_count)
             row_files = field.widget.keys.rows(file_input, name, row_count)
             return frozenset(
@@ -172,6 +177,10 @@ class SequenceBoundField(CompositeBoundField):
         else:
             widget.bound = widget.Bound(
                 management_data=self._data_input,
+                # The hidden initial branch above must not reuse this
+                # field. Its data is the initial input, under a different
+                # name.
+                management_form=self.submitted.management_form,
                 row_errors=self.submitted.errors,
                 deleted_indexes=self.submitted.deleted,
             )
@@ -186,17 +195,17 @@ class SequenceBoundField(CompositeBoundField):
         """
         value: object = None
         if self.form.initial and self.name not in self.form.initial:
-            value = self._flat_initial_value(self.form.initial)
+            value = self._initial_from_flat_keys(self.form.initial)
         if value is None:
             value = super().initial
         if isinstance(value, Mapping) and (
-            (normalized := self._flat_initial_value(value)) is not None
+            (normalized := self._initial_from_flat_keys(value)) is not None
         ):
             value = normalized
         try:
             # Read no more than absolute_max rows. A large initial collection
             # must not make a large page.
-            value = self.field._initial_values(
+            value = self.field.initial_values(
                 value, limit=self.field.limits.absolute_max
             )
         except InvalidInitialValueError:
@@ -223,10 +232,8 @@ class SequenceBoundField(CompositeBoundField):
         changed = super()._has_changed()
         if changed or self.field.disabled or not self.submitted.deleted:
             return changed
-        try:
-            initial_length = len(self.field._initial_values(self.initial))
-        except InvalidInitialValueError:
-            return True
+        # `initial` is a list on every path, so it needs no re-wrapping.
+        initial_length = len(self.initial)
         return any(index < initial_length for index in self.submitted.deleted)
 
 
@@ -269,9 +276,11 @@ class SequenceField(CompositeField):
         absolute_max: int
 
         def __post_init__(self) -> None:
-            if self.min_length < 0 or self.max_length < self.min_length:
+            if self.min_length < 0:
+                raise ValueError("min_length must be non-negative")
+            if self.max_length < self.min_length:
                 raise ValueError(
-                    "min_length and max_length must be non-negative integers"
+                    "max_length must be greater than or equal to min_length"
                 )
             if self.max_length > self.absolute_max:
                 raise ValueError(
@@ -291,13 +300,9 @@ class SequenceField(CompositeField):
                 absolute_max = max_length + DEFAULT_MAX_NUM
             return cls(min_length, max_length, absolute_max)
 
-        def exceeded_by(self, count: int) -> bool:
+        def over_hard_cap(self, count: int) -> bool:
             """Report whether a row count is above the limit on submitted rows."""
             return count > self.absolute_max
-
-        def bounded_count(self, count: int) -> int:
-            """Return a submitted row count inside the limit on submitted rows."""
-            return max(0, min(count, self.absolute_max))
 
         def empty_count(self, required: bool) -> int:
             """Return the number of empty rows for a field that has no value.
@@ -353,13 +358,28 @@ class SequenceField(CompositeField):
                 "child_field argument for SequenceField must be a forms.Field instance"
             )
         self.limits = self.Limits.build(min_length, max_length, absolute_max)
+        if required and max_length == 0:
+            # empty_count() renders zero rows and zero controls when
+            # max_length is 0. A required field can never be satisfied
+            # then. Limits does not know about `required`. So this check
+            # belongs here.
+            raise ValueError("max_length=0 requires required=False")
         if (
             initial is not None
             and not callable(initial)
+            # A mapping initial holds flat row keys, not a collection of
+            # rows. SequenceBoundField.initial reads those flat keys.
             and not isinstance(initial, Mapping)
-            and len(self._initial_values(initial)) > max_length
         ):
-            raise ValueError("initial must not contain more than max_length values")
+            try:
+                initial_values = self.initial_values(initial)
+            except InvalidInitialValueError:
+                # Agree with the render path. That path wraps a scalar
+                # into one row instead of raising an error during a
+                # render.
+                initial_values = [initial]
+            if len(initial_values) > max_length:
+                raise ValueError("initial must not contain more than max_length values")
 
         # Copy the child field. Two fields must not share one field instance,
         # because a field holds its widget and its own configuration.
@@ -395,9 +415,16 @@ class SequenceField(CompositeField):
     def __deepcopy__(self, memo: dict[int, object]) -> Self:
         """Copy this field, its child field, and the link between them.
 
-        Django deep-copies each field for each form. The widget of the copy
-        must point at the new child field, and not at the child field of the
-        original.
+        Django deep-copies each field for each form. ``Widget.__deepcopy__``
+        makes only a shallow copy. It does not follow ``child_field``.
+        ``Field.__deepcopy__`` alone returns a widget that still points
+        at the original child field. Two forms then share one child
+        field and its widget. This method re-points the copy, to break
+        that sharing.
+
+        ``result.widget.limits`` and ``.keys`` need no such fix. Both
+        are frozen ``slots`` dataclasses, and neither holds per-form
+        state.
         """
         result = super().__deepcopy__(memo)
         result.child_field = copy.deepcopy(self.child_field, memo)
@@ -405,7 +432,7 @@ class SequenceField(CompositeField):
         return result
 
     @staticmethod
-    def _initial_values(value: object, *, limit: int | None = None) -> list[object]:
+    def initial_values(value: object, *, limit: int | None = None) -> list[object]:
         """Return the initial value as a list, or raise ``InvalidInitialValueError``."""
         if value is None or value == "":
             return []
@@ -441,7 +468,7 @@ class SequenceField(CompositeField):
         # FileField child as they are.
         if isinstance(self.child_field, FileField):
             return value
-        return [self.hidden_initial_to_python(self.child_field, row) for row in value]
+        return [self._hidden_initial_to_python(self.child_field, row) for row in value]
 
     def _clean_values(
         self,
@@ -451,7 +478,7 @@ class SequenceField(CompositeField):
         omitted_indexes: frozenset[int] = frozenset(),
     ) -> Collection[object]:
         """Clean each row, then validate the result, as ``MultiValueField`` does."""
-        if self.limits.exceeded_by(len(values)):
+        if self.limits.over_hard_cap(len(values)):
             # Refuse too many rows before the field cleans them, because each
             # row costs one full child validation.
             raise TooManyFormsValidationError(
@@ -500,7 +527,7 @@ class SequenceField(CompositeField):
         and for a contradiction between them. Each other child field gets its
         normal ``clean(value)``.
         """
-        assert isinstance(bound_field, SequenceBoundField)
+        assert isinstance(bound_field, SequenceBoundField), "for mypy"
         if self.disabled:
             return cast(
                 Collection[object],
@@ -529,14 +556,15 @@ class SequenceField(CompositeField):
                     ),
                 )
             submitted_total = management_form.cleaned_data[TOTAL_FORM_COUNT]
-            if isinstance(submitted_total, int) and self.limits.exceeded_by(
+            if isinstance(submitted_total, int) and self.limits.over_hard_cap(
                 submitted_total
             ):
                 raise TooManyFormsValidationError(
                     self.error_messages["too_many_forms"], num=self.limits.max_length
                 )
 
-        initial = self._initial_values(bound_field.initial)
+        # `initial` is a list on every path, so it needs no re-wrapping.
+        initial = bound_field.initial
         data = self.to_python(bound_field.data)
         if (
             management_form is None
@@ -569,23 +597,23 @@ class SequenceField(CompositeField):
                 params={"limit_value": self.limits.max_length, "show_value": length},
             )
 
-    def compress(self, data_list: list[object]) -> Collection[object]:
+    def compress(self, data: list[object]) -> Collection[object]:
         """Return the cleaned rows as a list.
 
         A subclass changes the type of the collection here.
         """
-        return data_list
+        return data
 
     def bound_data(self, data: object, initial: object) -> Collection[object]:
         """Bind each submitted row against its matching initial value."""
         if self.disabled:
-            return self._initial_values(initial)
+            return self.initial_values(initial)
         # Show no rows for a submission that is too large. The clean step
         # records the too_many_forms error, and no row must reach a child
         # widget.
-        if isinstance(data, list) and self.limits.exceeded_by(len(data)):
+        if isinstance(data, list) and self.limits.over_hard_cap(len(data)):
             return []
-        initial = self._initial_values(initial)
+        initial = self.initial_values(initial)
         values = []
         for index, value in enumerate(self.to_python(data)):
             initial_value = initial[index] if index < len(initial) else None
@@ -593,10 +621,12 @@ class SequenceField(CompositeField):
                 value = self.child_field.bound_data(value, initial_value)
             except (InvalidInitialValueError, ValidationError):
                 # BoundField.value() calls this method during a render. A
-                # composite child can refuse a bad row here, after the clean
-                # step recorded the error. Django shows the value of an enabled
-                # field again, so use the base behavior. prepare_value() does
-                # the same.
+                # composite child can refuse a bad row here, for example a
+                # nested MappingField row submitted as a scalar. The clean
+                # step already recorded that error. Django shows the
+                # value of an enabled field again, so this method falls
+                # back to the base behavior. prepare_value() does the
+                # same.
                 value = super().bound_data(value, initial_value)
             values.append(value)
         return values
@@ -604,10 +634,15 @@ class SequenceField(CompositeField):
     def prepare_value(self, value: object) -> list[object]:
         """Prepare each row for widget rendering."""
         values = []
-        for row in self._initial_values(value, limit=self.limits.absolute_max):
+        for row in self.initial_values(value, limit=self.limits.absolute_max):
             try:
                 row = self.child_field.prepare_value(row)
             except (InvalidInitialValueError, ValidationError):
+                # Same render-time fallback as bound_data(). A composite
+                # child can refuse a bad row, for example a nested
+                # MappingField row given as a scalar. Show the row the
+                # way Django does, instead of raising an error
+                # mid-render.
                 row = super().prepare_value(row)
             values.append(row)
         return values
@@ -616,12 +651,12 @@ class SequenceField(CompositeField):
         """Compare submitted rows using child-field change semantics."""
         if self.disabled:
             return False
-        if isinstance(data, list) and self.limits.exceeded_by(len(data)):
+        if isinstance(data, list) and self.limits.over_hard_cap(len(data)):
             return True
         # A value that no field can read counts as a change. A change that the
         # form misses would lose data, and an extra change costs one save.
         try:
-            initial = self._initial_values(initial)
+            initial = self.initial_values(initial)
         except InvalidInitialValueError:
             return True
         try:
@@ -688,50 +723,91 @@ class SetField(SequenceField):
         each row that it can match, and it reports whether the rows claimed
         every member. A field builds a new object for each comparison, because
         a claim changes the object. This is the one holder that is not frozen.
+
+        ``budget`` caps the number of child comparisons. An attacker
+        controls the rows, up to ``absolute_max``. The members come from
+        the server. Without a budget, the scan cost is quadratic in a
+        value the attacker picks.
         """
 
         child_field: Field
         members: list[object]
+        budget: int = 0
         claimed: set[int] = dataclasses.field(default_factory=set)
-        indexed: dict[object, list[int]] = dataclasses.field(init=False, repr=False)
+        # Members come from a set. They are unique under __hash__/__eq__.
+        # So one index per key is enough.
+        indexed: dict[object, int] = dataclasses.field(init=False, repr=False)
 
         def __post_init__(self) -> None:
             # compress() refused an unhashable member already, so every member
             # can go into the index.
-            self.indexed = {}
-            for index, member in enumerate(self.members):
-                self.indexed.setdefault(member, []).append(index)
+            self.indexed = {member: index for index, member in enumerate(self.members)}
 
-        def candidates(self, value: object) -> Collection[int]:
-            """Return the members that hash equal to one row.
+        def candidate(self, value: object) -> int | None:
+            """Return the member index that hashes equal to one row, if there is one.
 
-            Return nothing when the row is unhashable. ``claim()`` then reads
-            every member.
+            The index only helps when the child's ``to_python()`` agrees with
+            its ``clean()``. Members hold cleaned values, and this lookup uses
+            the converted row. A coercing child, such as ``TypedChoiceField``
+            or ``ModelChoiceField``, always misses the index. It falls back to
+            the full scan.
+
+            Return None when the row is unhashable, or matches no member.
+            ``claim()`` then reads every member.
             """
             try:
-                return self.indexed.get(value, ())
+                return self.indexed.get(value)
             except TypeError:
                 # A compound child value can be unhashable. Give no candidate,
                 # and let claim() do the full scan.
-                return ()
+                return None
 
-        def claim(self, row: object, candidates: Collection[int]) -> bool:
+        def claim(self, row: object, candidate: int | None) -> bool:
             """Claim one member for a row, and report whether it found one.
 
-            Try a member that no row claimed first, because two equal rows must
-            not claim one member. Try the hash candidates first, because
-            ``has_changed()`` against every member is expensive. A claimed
-            member can answer a second time, because a set removes duplicates.
+            Look at an unclaimed member first, so two equal rows never
+            compete for the same member. If none of those match, look at
+            the claimed members too: duplicate rows collapse into one set
+            member, so a repeat of an already-matched row must still count
+            as matched, even though it claims nothing new.
+
+            Raise ``TooManyComparisonsError`` when the comparison budget
+            runs out.
             """
-            for claimed in (False, True):
-                for indexes in (candidates, range(len(self.members))):
-                    for index in indexes:
-                        if (index in self.claimed) != claimed:
-                            continue
-                        if not self.child_field.has_changed(self.members[index], row):
-                            self.claimed.add(index)
-                            return True
+            order = self.scan_order(candidate)
+            for index in order:
+                if index in self.claimed:
+                    continue
+                if self.member_matches(index, row):
+                    self.claimed.add(index)
+                    return True
+            for index in order:
+                if index not in self.claimed:
+                    continue
+                if self.member_matches(index, row):
+                    return True
             return False
+
+        def scan_order(self, candidate: int | None) -> tuple[int, ...]:
+            """Return every member index, with the hash candidate checked first.
+
+            ``has_changed()`` against every member is expensive, so
+            claim() checks the hash candidate first. It is usually the
+            only comparison a row needs.
+            """
+            if candidate is None:
+                return tuple(range(len(self.members)))
+            return (
+                candidate,
+                *(i for i in range(len(self.members)) if i != candidate),
+            )
+
+        def member_matches(self, index: int, row: object) -> bool:
+            """Report whether one member equals a row, and spend one comparison."""
+            if self.budget <= 0:
+                raise TooManyComparisonsError("comparison limit reached")
+            self.budget -= 1
+            return not self.child_field.has_changed(self.members[index], row)
 
         @property
         def complete(self) -> bool:
@@ -748,10 +824,10 @@ class SetField(SequenceField):
         """
         if self.disabled:
             return False
-        if isinstance(data, list) and self.limits.exceeded_by(len(data)):
+        if isinstance(data, list) and self.limits.over_hard_cap(len(data)):
             return True
         try:
-            members = list(self.compress(self._initial_values(initial)))
+            members = list(self.compress(self.initial_values(initial)))
         except (InvalidInitialValueError, ValidationError):
             return True
         try:
@@ -759,18 +835,26 @@ class SetField(SequenceField):
         except ValidationError:
             return True
 
+        match = self.Match(
+            self.child_field,
+            members,
+            # Headroom over the hash fast path. A submission that spends
+            # more than this budget counts as changed. That is the safe
+            # direction. A missed change loses data. An extra change
+            # only costs one save.
+            budget=4 * (len(members) + len(data)) + 32,
+        )
         try:
-            match = self.Match(self.child_field, members)
             for row in data:
                 try:
                     value = self.child_field.to_python(row)
                 except (TypeError, ValidationError):
                     return True
-                if not match.claim(row, match.candidates(value)) and (
+                if not match.claim(row, match.candidate(value)) and (
                     self.child_field.has_changed(None, row)
                 ):
                     return True
-        except (TypeError, ValidationError):
+        except (TypeError, ValidationError, TooManyComparisonsError):
             return True
         return not match.complete
 
@@ -786,7 +870,6 @@ class SequenceWidget(CompositeWidget):
 
     _template_name = "nestingdolls/sequence/{layout}.html"
     use_fieldset = True
-    deletion_field = BooleanField(required=False)
     child_field: Field
     keys: Keys
     limits: SequenceField.Limits
@@ -795,12 +878,15 @@ class SequenceWidget(CompositeWidget):
     class Bound(CompositeWidget.Bound):
         """Hold the submitted rows that one render of a sequence widget needs.
 
-        management_data holds the submitted management inputs, which limit how
-        many rows to render. row_errors holds the errors of each row, and
-        deleted_indexes holds the rows the user deleted.
+        ``management_data`` holds the submitted management inputs. These
+        inputs limit how many rows to render. ``management_form`` is the
+        form the bound field already built from that input, so one
+        render parses it only once. ``row_errors`` holds the errors of
+        each row. ``deleted_indexes`` holds the rows the user deleted.
         """
 
         management_data: Mapping[str, object] | None = None
+        management_form: ManagementForm | None = None
         row_errors: Mapping[int, list[object]] = MappingProxyType({})
         deleted_indexes: Collection[int] = frozenset()
 
@@ -822,6 +908,10 @@ class SequenceWidget(CompositeWidget):
         """
 
         absolute_max: int
+        # The longest digit run that can name a row. ``absolute_max`` stays
+        # under ten million, so an eighth digit never names a real row. A
+        # longer run is forged input, refused before it becomes an integer.
+        max_index_digits: ClassVar[int] = 7
 
         @staticmethod
         def management_names(name: str) -> set[str]:
@@ -833,7 +923,7 @@ class SequenceWidget(CompositeWidget):
                 f"{name}-{MAX_NUM_FORM_COUNT}",
             }
 
-        def manages(self, data: Mapping[str, object], name: str) -> bool:
+        def has_management_data(self, data: Mapping[str, object], name: str) -> bool:
             """Report whether the data carries a management key of this field."""
             return any(key in data for key in self.management_names(name))
 
@@ -852,11 +942,19 @@ class SequenceWidget(CompositeWidget):
         ) -> list[object] | None:
             """Return the rows of a direct list value, or None.
 
-            Keep one row more than the limit. The clean step then sees that the
-            input is too large, and it reports too_many_forms instead of silent
-            truncation.
+            The return value has three states, and each state matters:
+
+            - ``None`` means there is no usable direct value. The
+              caller must read the flat row keys instead.
+            - ``[]`` means a direct value is present, but is not a
+              list. The sequence is then empty.
+            - A list holds the rows themselves.
+
+            Keep one row more than the limit. The clean step then sees
+            that the input is too large. It reports too_many_forms,
+            instead of silently truncating the input.
             """
-            if name not in data:
+            if name not in data or not self.prefers_direct(data, name):
                 return None
             value = data.get(name)
             if not isinstance(value, list):
@@ -866,22 +964,30 @@ class SequenceWidget(CompositeWidget):
         def canonical(self, key: object, name: str) -> tuple[str, int] | None:
             """Return the canonical row key and the row index, or None.
 
-            Read the digits one at a time. ``int()`` cannot do this work,
-            because the token can carry a suffix, as in ``values-2-name``.
+            This method slices the digit run, instead of parsing it one
+            digit at a time. The token can carry a suffix, as in
+            ``values-2-name``. A digit run longer than
+            ``max_index_digits`` is refused outright. A forged key of
+            thousands of digits never becomes an integer.
+
+            An index at or past ``absolute_max`` names no row, so this
+            method refuses it. It does not clamp the index. A clamped
+            index returns a plausible-looking canonical key, and two
+            different forged keys can then collide on it.
             """
             if (child_key := self.split(key, name)) is None:
                 return None
             token, suffix = child_key
             index_end = 0
-            index = 0
             while index_end < len(token) and "0" <= token[index_end] <= "9":
-                digit = ord(token[index_end]) - ord("0")
-                # Stop the index at absolute_max. A forged key can hold
-                # thousands of digits, and a large integer costs memory and
-                # time.
-                index = min(self.absolute_max, index * 10 + digit)
                 index_end += 1
             if not index_end:
+                return None
+            digits = token[:index_end].lstrip("0")
+            if len(digits) > self.max_index_digits:
+                return None
+            index = int(digits) if digits else 0
+            if index >= self.absolute_max:
                 return None
             suffix = token[index_end:] + suffix
             if suffix and suffix[0] not in "_-.[":
@@ -889,14 +995,21 @@ class SequenceWidget(CompositeWidget):
             return (f"{name}-{index}{suffix}", index)
 
         @staticmethod
-        def densified(indexes: Collection[int]) -> dict[int, int]:
+        def dense_index_map(indexes: Collection[int]) -> dict[int, int]:
             """Return a new index for each row index, without the gaps.
+
+            Only the unmanaged flat-key path calls this. When the
+            browser sends management input, Django's management form
+            owns the row count. The original indexes then stay
+            unchanged.
 
             A plain mapping can have gaps between the indexes, for example 0 and
             1999. An index that is dense already keeps its place. A larger index
             moves down to one place after the row before it, so at most one empty
             row stays in front of it. The order of the rows survives, and a
-            forged index cannot make thousands of rows.
+            forged index cannot make thousands of rows. An index that
+            ``canonical()`` discarded never reaches this map. It
+            disappears from the dense mapping on its own.
             """
             return {
                 original_index: min(original_index, dense_index + 1)
@@ -931,11 +1044,11 @@ class SequenceWidget(CompositeWidget):
         ) -> MultiValueDict[str, object]:
             """Canonicalize accepted row spellings into Django-style keys and dense rows.
 
-            post[]:
-                implies(not data, not __return__)
-                implies(name in data, name in __return__)
-                all(key == name or key.startswith(f"{name}-") for key in __return__)
-                len(__return__) <= len(data) + 2
+            The result is empty for empty input. A direct value under
+            ``name`` survives under that same key. Every other key of
+            the result is ``name`` itself, or starts with ``name-``.
+            The result holds at most two keys more than the input: the
+            two management keys this method can add.
             """
             normalized = MultiValueDict[str, object]()
             if not data:
@@ -956,10 +1069,9 @@ class SequenceWidget(CompositeWidget):
             for key in management_keys:
                 normalized.setlist(key, values_for(key))
 
-            if name in data:
-                # A direct list and flat row keys can both be present. The
-                # direct value has priority, because a caller that passes
-                # Python data must not compete with the browser.
+            if name in data and self.prefers_direct(data, name):
+                # A direct list and flat row keys can both be present. See
+                # prefers_direct() for which one wins.
                 direct_value = values_for(name)
                 normalized[name] = direct_value
                 if not management_keys:
@@ -977,10 +1089,9 @@ class SequenceWidget(CompositeWidget):
                 if (row_key := self.canonical(key, name)) is None:
                     continue
                 row_name, index = row_key
-                if index >= self.absolute_max:
-                    # A forged index must not go past the row limit.
-                    overflowed_index = True
-                    continue
+                # An index past the row limit never reaches here.
+                # canonical() discards it. Only the row-count cap below
+                # can overflow.
                 if len(row_inputs) >= self.absolute_max:
                     # Stop here. Many matching keys must not use memory without
                     # a limit.
@@ -1004,7 +1115,7 @@ class SequenceWidget(CompositeWidget):
             if not row_inputs and not overflowed_index:
                 return normalized
 
-            dense_indexes = self.densified({index for index, _, _ in row_inputs})
+            dense_indexes = self.dense_index_map({index for index, _, _ in row_inputs})
             for original_index, row_name, values in row_inputs:
                 # Keep the text after the index, as in ``values-2-name``, so
                 # that a composite child keeps its own key.
@@ -1054,13 +1165,26 @@ class SequenceWidget(CompositeWidget):
         self.limits = limits
         self.keys = self.Keys(limits.absolute_max)
 
-    def _value_from_normalized_data(
+    def value_from_normalized_data(
         self,
         data: Mapping[str, object],
         files: Mapping[str, object],
         name: str,
     ) -> list[object]:
-        """Extract row values from canonicalized data and files."""
+        """Extract row values from canonicalized data and files.
+
+        Four shapes leave early, in this order:
+
+        1. A direct list under ``name``, in data before files.
+        2. A direct list under ``name``, in files.
+        3. No management total in either source. No rows were
+           submitted.
+        4. A total that is negative or past ``absolute_max``. This
+           total is forged, and this method must not build rows for
+           it.
+
+        Everything else goes row by row through the child widget.
+        """
         for source in (data, files):
             if (direct_rows := self.keys.direct_rows(source, name)) is not None:
                 return direct_rows
@@ -1099,6 +1223,10 @@ class SequenceWidget(CompositeWidget):
         context = super().get_context(name, value, attrs)
         child_widget = self._child_widget(self.child_field)
         if self.is_localized:
+            # Sticky by design. The child widget belongs to this field
+            # alone. is_localized comes from the field's own
+            # `localize` value. SequenceField.__init__ sets that value
+            # once.
             child_widget.is_localized = True
 
         final_attrs = context["widget"]["attrs"]
@@ -1114,16 +1242,24 @@ class SequenceWidget(CompositeWidget):
             value = cast(Sequence[object] | None, self.bound.hidden_initial_value)
         # Keep runtime initials from expanding rendering without a bound.
         value = [] if value is None else list(islice(value, self.limits.absolute_max))
-        if self.bound.management_data is not None and self.keys.manages(
+        if self.bound.management_data is not None and self.keys.has_management_data(
             self.bound.management_data, name
         ):
-            management_form = ManagementForm(self.bound.management_data, prefix=name)
+            # The bound field parsed this input already. Reuse that
+            # form, instead of building a second, independent set of
+            # errors.
+            management_form = self.bound.management_form or ManagementForm(
+                self.bound.management_data, prefix=name
+            )
             # Bad management input means that the row count is not trustworthy.
             # Turn off the add and remove controls.
             management_invalid = not management_form.is_valid()
             total_forms = cast(int, management_form.cleaned_data[TOTAL_FORM_COUNT])
             # Show the rows that the management input declares, and no more.
-            value = value[: self.limits.bounded_count(total_forms)]
+            # ManagementForm.clean() defaults a bad total to 0. So this
+            # line needs no lower clamp. BaseFormSet.total_form_count
+            # does the same.
+            value = value[: min(total_forms, self.limits.absolute_max)]
         else:
             initial_forms = len(value)
             # An unbound field with no value still needs empty rows, so that
@@ -1183,17 +1319,25 @@ class SequenceWidget(CompositeWidget):
                 self._mark_row_invalid(subwidget, error_id)
             return row
 
+        try:
+            rows = [
+                make_row(index, item)
+                for index, item in enumerate(value)
+                if index not in self.bound.deleted_indexes
+            ]
+            # The template renders one inert row under the __prefix__ index.
+            # The browser script copies that row when the user adds a row.
+            empty_row = make_row("__prefix__", None)
+        finally:
+            if isinstance(child_widget, SequenceWidget):
+                # make_row() put this render's management data on the shared
+                # child widget. Clear it, so no later render inherits it.
+                child_widget.bound = child_widget.Bound()
+
         context["widget"].update(
             {
-                "rows": [
-                    make_row(index, item)
-                    for index, item in enumerate(value)
-                    if index not in self.bound.deleted_indexes
-                ],
-                # The template renders one inert row under the __prefix__
-                # index. The browser script copies that row when the user adds
-                # a row.
-                "empty_row": make_row("__prefix__", None),
+                "rows": rows,
+                "empty_row": empty_row,
                 "management_form": management_form,
                 "minimum_forms": self.limits.min_length,
                 "maximum_forms": self.limits.max_length,
@@ -1238,9 +1382,6 @@ class SequenceWidget(CompositeWidget):
         """Report whether the child widget needs multipart form data."""
         return bool(self.child_field.widget.needs_multipart_form)
 
-    @property
-    def media(self) -> WidgetMedia:
-        """Return the media of this widget, the script, and the child widget."""
-        media: WidgetMedia = super().media + WidgetMedia(self.Media)
-        media += self.child_field.widget.media
-        return media
+    def _child_media(self) -> WidgetMedia:
+        """Return the media of the widget that renders each row."""
+        return cast(WidgetMedia, self.child_field.widget.media)
