@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 from collections.abc import Mapping
 from typing import cast
 
@@ -17,12 +18,75 @@ from nestingdolls.patches import FormLayout
 
 
 class CompositeWidget(Widget):
+    class Keys:
+        """Read the submitted input keys of one composite field.
+
+        A composite field accepts a dash, a dot, or a bracket between its own
+        name and the name of a child. This object changes each accepted
+        spelling into one canonical key. It is the base for the row keys of a
+        sequence and for the child keys of a mapping. It holds only the
+        configuration of the field that owns it, and it does no widget work.
+
+        This base holds no state, so each subclass can keep its own state in
+        slots.
+        """
+
+        __slots__ = ()
+
+        @staticmethod
+        def split(key: object, name: str) -> tuple[str, str] | None:
+            """Split one supported child key spelling into its token and suffix.
+
+            The dash, dot, and bracket spellings all name one child of ``name``.
+            This returns the text that identifies the child and the text that
+            follows it, which each composite widget reads in its own way.
+            """
+            if not isinstance(key, str):
+                return None
+            for separator in ("-", ".", "["):
+                prefix = f"{name}{separator}"
+                if not key.startswith(prefix):
+                    continue
+                remainder = key.removeprefix(prefix)
+                if separator != "[":
+                    return (remainder, "") if remainder else None
+                end = remainder.find("]")
+                if end <= 0:
+                    return None
+                suffix = remainder[end + 1 :]
+                if suffix and suffix[0] not in "_-.[":
+                    return None
+                return (remainder[:end], suffix)
+            return None
+
+        def normalized(
+            self, data: Mapping[str, object], name: str
+        ) -> Mapping[str, object]:
+            """Return the submitted data under canonical child keys."""
+            raise NotImplementedError
+
+    @dataclasses.dataclass(frozen=True, slots=True)
+    class Bound:
+        """Hold the submitted state that one render of a composite widget needs.
+
+        Widget.render() cannot give this state to get_context(), so the bound
+        field puts it here first. Each render replaces the whole object, because
+        a hidden initial render must not keep the state of a visible render. A
+        Form deep-copies its fields, so this state stays with one field of one
+        form.
+        """
+
+        hidden_initial_value: object = None
+
     _template_name: str
     input_type: str | None = None
-    # Submitted state that Widget.render() cannot pass to get_context(). The
-    # bound field sets it before each render. A Form deep-copies its fields, so
-    # this state stays with one field of one form.
-    hidden_initial_value: object = None
+    # The key reader of this widget. Each composite widget builds one when a
+    # field configures it.
+    keys: Keys
+    # The state of the current render. Every widget starts with this one frozen
+    # default. A render replaces it with a new object, and nothing can change a
+    # frozen object, so no widget can pass its state to another widget.
+    bound: Bound = Bound()
 
     def _child_widget(self, field: Field) -> Widget:
         """Return the widget one child renders with, hidden when this widget is."""
@@ -50,8 +114,8 @@ class CompositeWidget(Widget):
     ) -> object:
         """Return the submitted composite value extracted by child widgets."""
         return self._value_from_normalized_data(
-            self._normalized_datadict(data, name),
-            self._normalized_datadict(files, name) if files else {},
+            self.keys.normalized(data, name),
+            self.keys.normalized(files, name) if files else {},
             name,
         )
 
@@ -63,14 +127,8 @@ class CompositeWidget(Widget):
     ) -> bool:
         """Report whether all supported composite inputs are absent."""
         return not (
-            self._normalized_datadict(data, name)
-            or self._normalized_datadict(files, name)
+            self.keys.normalized(data, name) or self.keys.normalized(files, name)
         )
-
-    def _normalized_datadict(
-        self, data: Mapping[str, object], name: str
-    ) -> Mapping[str, object]:
-        raise NotImplementedError
 
     def _value_from_normalized_data(
         self,
@@ -79,32 +137,6 @@ class CompositeWidget(Widget):
         name: str,
     ) -> object:
         raise NotImplementedError
-
-    @staticmethod
-    def _split_child_key(key: object, name: str) -> tuple[str, str] | None:
-        """Split one supported child key spelling into its child token and suffix.
-
-        The dash, dot, and bracket spellings all name one child of ``name``. This
-        returns the text that identifies the child and the text that follows it,
-        which each composite widget reads in its own way.
-        """
-        if not isinstance(key, str):
-            return None
-        for separator in ("-", ".", "["):
-            prefix = f"{name}{separator}"
-            if not key.startswith(prefix):
-                continue
-            remainder = key.removeprefix(prefix)
-            if separator != "[":
-                return (remainder, "") if remainder else None
-            end = remainder.find("]")
-            if end <= 0:
-                return None
-            suffix = remainder[end + 1 :]
-            if suffix and suffix[0] not in "_-.[":
-                return None
-            return (remainder[:end], suffix)
-        return None
 
     def use_required_attribute(self, initial: object) -> bool:
         """Let child fields own HTML required attributes."""
@@ -173,14 +205,14 @@ class CompositeBoundField(BoundField):
     @cached_property
     def _data_input(self) -> Mapping[str, object]:
         """Cache normalized submitted form data for this field."""
-        return self.field.widget._normalized_datadict(self.form.data, self.html_name)
+        return self.field.widget.keys.normalized(self.form.data, self.html_name)
 
     @cached_property
     def _file_input(self) -> Mapping[str, object]:
         """Cache normalized submitted files for this field."""
         if not self.form.files:
             return {}
-        return self.field.widget._normalized_datadict(self.form.files, self.html_name)
+        return self.field.widget.keys.normalized(self.form.files, self.html_name)
 
     @cached_property
     def data(self) -> object:
@@ -204,14 +236,11 @@ class CompositeBoundField(BoundField):
         return super().as_widget(widget, attrs, only_initial)
 
     def _prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
-        """Put the submitted state this render needs on the widget.
-
-        Set all of the state each time. ``hidden_widget()`` copies the widget
-        with the state of the last render, and a hidden initial render must not
-        keep it.
-        """
-        widget.hidden_initial_value = (
-            self._hidden_initial_value(widget)[0] if only_initial else None
+        """Put the submitted state this render needs on the widget."""
+        widget.bound = widget.Bound(
+            hidden_initial_value=(
+                self._hidden_initial_value(widget)[0] if only_initial else None
+            )
         )
 
     def _hidden_initial_value(
@@ -225,11 +254,9 @@ class CompositeBoundField(BoundField):
         the hidden initial and hide a change.
         """
         name = self.html_initial_name
-        data_input = widget._normalized_datadict(self.form.data, name)
+        data_input = widget.keys.normalized(self.form.data, name)
         file_input = (
-            widget._normalized_datadict(self.form.files, name)
-            if self.form.files
-            else {}
+            widget.keys.normalized(self.form.files, name) if self.form.files else {}
         )
         if data_input or file_input:
             return (
@@ -240,7 +267,7 @@ class CompositeBoundField(BoundField):
 
     def _flat_initial_value(self, source: Mapping[str, object]) -> object | None:
         """Return an initial value rebuilt from flattened child keys, if any match."""
-        normalized = self.field.widget._normalized_datadict(source, self.name)
+        normalized = self.field.widget.keys.normalized(source, self.name)
         if not normalized:
             return None
         value: object = self.field.widget._value_from_normalized_data(

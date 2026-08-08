@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import inspect
 from pathlib import Path
 
@@ -14,12 +15,20 @@ AGENTS_PATH = Path("nestingdolls/AGENTS.md")
 
 
 def defined_methods(cls: type[object]) -> list[str]:
-    """Return the method-like names that the class body defines, in source order."""
+    """Return the method-like names that the class body defines, in source order.
+
+    A dataclass generates its own special methods, so list only the methods a
+    dataclass body writes.
+    """
+    written_only = dataclasses.is_dataclass(cls)
     return [
         name
         for name, value in cls.__dict__.items()
-        if inspect.isfunction(value)
-        or isinstance(value, (staticmethod, classmethod, property, cached_property))
+        if (
+            inspect.isfunction(value)
+            or isinstance(value, (staticmethod, classmethod, property, cached_property))
+        )
+        and not (written_only and name.startswith("__"))
     ]
 
 
@@ -35,20 +44,55 @@ def split_methods(cls: type[object]) -> tuple[list[str], list[str]]:
     return overrides, introduced
 
 
-def render_method_group(title: str, methods: list[str]) -> list[str]:
+def render_method_group(
+    title: str, methods: list[str], depth: str = "####"
+) -> list[str]:
     if not methods:
         return []
     return [
-        f"#### {title}",
+        f"{depth} {title}",
         "",
         *(f"- `{name}`" for name in methods),
         "",
     ]
 
 
+def nested_classes(cls: type[object]) -> list[type[object]]:
+    """Return the helper classes that the class body defines, in source order.
+
+    A class attribute can also hold a class, so use the qualified name to find
+    the classes this body defines.
+    """
+    return [
+        value
+        for name, value in cls.__dict__.items()
+        if isinstance(value, type)
+        and name != "Media"
+        and value.__qualname__ == f"{cls.__qualname__}.{name}"
+    ]
+
+
+def render_nested_class(owner: type[object], cls: type[object]) -> list[str]:
+    overrides, introduced = split_methods(cls)
+    title = f"#### {owner.__name__}.{cls.__name__}"
+    if not overrides and not introduced:
+        return [title, "", f"`{cls.__name__}` holds data only.", ""]
+    return [
+        title,
+        "",
+        *render_method_group("Overrides parent methods", overrides, "#####"),
+        *render_method_group("Methods introduced here", introduced, "#####"),
+    ]
+
+
 def render_class_section(cls: type[object]) -> list[str]:
     overrides, introduced = split_methods(cls)
-    if not overrides and not introduced:
+    nested = [
+        line
+        for value in nested_classes(cls)
+        for line in render_nested_class(cls, value)
+    ]
+    if not overrides and not introduced and not nested:
         return [
             f"### {cls.__name__}",
             "",
@@ -59,6 +103,7 @@ def render_class_section(cls: type[object]) -> list[str]:
         "",
         *render_method_group("Overrides parent methods", overrides),
         *render_method_group("Methods introduced here", introduced),
+        *nested,
     ]
     if section[-1] == "":
         section.pop()

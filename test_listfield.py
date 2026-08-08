@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import unittest
 from collections import deque
@@ -700,7 +701,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             **{f"values-0-{index}": "value" for index in range(3)},
         }
 
-        normalized = widget._normalized_datadict(data, "values")
+        normalized = widget.keys.normalized(data, "values")
 
         self.assertEqual(normalized[f"values-{TOTAL_FORM_COUNT}"], "3")
 
@@ -713,9 +714,10 @@ class SequenceFieldTestCase(SimpleTestCase):
         class CountingWidget(nestingdolls.MappingWidget):
             key_visits = 0
 
-            def _normalized_datadict(self, data, name):
-                type(self).key_visits += len(data)
-                return super()._normalized_datadict(data, name)
+            class Keys(nestingdolls.MappingWidget.Keys):
+                def normalized(self, data, name):
+                    CountingWidget.key_visits += len(data)
+                    return super().normalized(data, name)
 
         class Form(forms.Form):
             values = nestingdolls.ListField(
@@ -759,7 +761,7 @@ class SequenceFieldTestCase(SimpleTestCase):
                 form = SparseForm(data)
                 self.assertIs(form.is_valid(), True, form.errors)
                 self.assertEqual(form.cleaned_data["values"], [False, True])
-                normalized = form.fields["values"].widget._normalized_datadict(
+                normalized = form.fields["values"].widget.keys.normalized(
                     form.data, "values"
                 )
                 self.assertEqual(normalized[f"values-{TOTAL_FORM_COUNT}"], "2")
@@ -770,7 +772,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertEqual(
             long_index.errors.as_data()["values"][0].code, "too_many_forms"
         )
-        normalized = long_index.fields["values"].widget._normalized_datadict(
+        normalized = long_index.fields["values"].widget.keys.normalized(
             long_index.data, "values"
         )
         self.assertIs(any(key.startswith("values-1001") for key in normalized), False)
@@ -2909,9 +2911,10 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         class CountingWidget(nestingdolls.SequenceWidget):
             normalizations = 0
 
-            def _normalized_datadict(self, data, name):
-                type(self).normalizations += 1
-                return super()._normalized_datadict(data, name)
+            class Keys(nestingdolls.SequenceWidget.Keys):
+                def normalized(self, data, name):
+                    CountingWidget.normalizations += 1
+                    return super().normalized(data, name)
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), widget=CountingWidget)
@@ -2928,9 +2931,10 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         class CountingWidget(nestingdolls.SequenceWidget):
             normalizations = 0
 
-            def _normalized_datadict(self, data, name):
-                type(self).normalizations += 1
-                return super()._normalized_datadict(data, name)
+            class Keys(nestingdolls.SequenceWidget.Keys):
+                def normalized(self, data, name):
+                    CountingWidget.normalizations += 1
+                    return super().normalized(data, name)
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), widget=CountingWidget)
@@ -2943,6 +2947,60 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         self.assertIs(second.is_valid(), True, second.errors)
         self.assertEqual(second.cleaned_data["values"], [2])
         self.assertEqual(CountingWidget.normalizations, 2)
+
+    def test_render_state_is_not_shared_between_form_instances(self):
+        """It keeps row errors and deleted rows scoped to one form instance."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        bound = Form(
+            QueryDict(
+                f"values-{TOTAL_FORM_COUNT}=2&"
+                f"values-{INITIAL_FORM_COUNT}=0&"
+                "values-0=bad&"
+                "values-1=2&"
+                "values-1-DELETE=on"
+            )
+        )
+        self.assertIs(bound.is_valid(), False)
+        bound.as_p()
+        bound_widget = bound.fields["values"].widget
+
+        self.assertEqual(
+            dict(bound_widget.bound.row_errors), {0: ["Enter a whole number."]}
+        )
+        self.assertEqual(set(bound_widget.bound.deleted_indexes), {1})
+
+        fresh = Form()
+        fresh_widget = fresh.fields["values"].widget
+        html = fresh.as_p()
+
+        self.assertIsNot(fresh_widget, bound_widget)
+        self.assertEqual(dict(fresh_widget.bound.row_errors), {})
+        self.assertEqual(set(fresh_widget.bound.deleted_indexes), set())
+        self.assertNotIn("errorlist", html)
+        self.assertNotIn("data-sequence-deleted-row", html)
+        # The class default is the state of a widget that no render has touched.
+        self.assertIs(
+            Form.base_fields["values"].widget.bound, nestingdolls.SequenceWidget.bound
+        )
+
+    def test_state_holders_are_frozen_and_hold_no_instance_dictionary(self):
+        """It keeps per-render and per-field state in frozen objects with slots."""
+        limits = nestingdolls.SequenceField.Limits.build(0, 1, None)
+        holders = (
+            nestingdolls.SequenceWidget.Bound(),
+            nestingdolls.SequenceWidget.Keys(limits.absolute_max),
+            limits,
+        )
+
+        for holder in holders:
+            with self.subTest(holder=type(holder).__qualname__):
+                self.assertIs(hasattr(holder, "__dict__"), False)
+                for field in dataclasses.fields(holder):
+                    with self.assertRaises(dataclasses.FrozenInstanceError):
+                        setattr(holder, field.name, None)
 
     def test_file_field_keeps_and_clears_initial_values(self):
         """It keeps, clears, and deletes file rows correctly."""
@@ -3374,7 +3432,7 @@ class PublicApiTestCase(SimpleTestCase):
     def test_management_names_match_the_formset_contract(self):
         """The widget uses Django's four formset management names."""
         self.assertEqual(
-            nestingdolls.SequenceWidget.management_names("values"),
+            nestingdolls.SequenceWidget.Keys.management_names("values"),
             {
                 f"values-{TOTAL_FORM_COUNT}",
                 f"values-{INITIAL_FORM_COUNT}",
@@ -3476,14 +3534,14 @@ class PublicApiTestCase(SimpleTestCase):
 
         self.assertIsNot(field.widget, widget)
         self.assertIs(field.widget.child_field, field.child_field)
-        self.assertEqual(field.widget.min_length, 1)
-        self.assertEqual(field.widget.max_length, 2)
+        self.assertEqual(field.widget.limits.min_length, 1)
+        self.assertEqual(field.widget.limits.max_length, 2)
         self.assertEqual(field.absolute_max, 3)
-        self.assertEqual(field.widget.absolute_max, field.absolute_max)
+        self.assertEqual(field.widget.limits.absolute_max, field.absolute_max)
         self.assertIs(widget.child_field, original_child)
-        self.assertEqual(widget.min_length, 4)
-        self.assertEqual(widget.max_length, 5)
-        self.assertEqual(widget.absolute_max, 6)
+        self.assertEqual(widget.limits.min_length, 4)
+        self.assertEqual(widget.limits.max_length, 5)
+        self.assertEqual(widget.limits.absolute_max, 6)
 
     def test_management_total_uses_configured_absolute_maximum(self):
         """It enforces a custom absolute maximum for management totals."""
@@ -3547,11 +3605,11 @@ class SequenceParserPropertyTestCase(SimpleTestCase):
         self, data, files
     ):
         """Arbitrary keys cannot escape the canonical bounded parser contract."""
-        normalized = PARSER_WIDGET._normalized_datadict(data, "values")
-        renormalized = PARSER_WIDGET._normalized_datadict(normalized, "values")
+        normalized = PARSER_WIDGET.keys.normalized(data, "values")
+        renormalized = PARSER_WIDGET.keys.normalized(normalized, "values")
         self.assertEqual(renormalized, normalized)
 
-        management_names = PARSER_WIDGET.management_names("values")
+        management_names = PARSER_WIDGET.keys.management_names("values")
         for key in normalized:
             if key == "values" or key in management_names:
                 continue
@@ -3559,14 +3617,14 @@ class SequenceParserPropertyTestCase(SimpleTestCase):
             suffix = key.removeprefix("values-")
             digits = suffix[: len(suffix) - len(suffix.lstrip("0123456789"))]
             self.assertIs(bool(digits), True, key)
-            self.assertLess(int(digits), PARSER_WIDGET.absolute_max)
+            self.assertLess(int(digits), PARSER_WIDGET.limits.absolute_max)
 
         unrelated = {f"other:{key}": value for key, value in data.items()}
         self.assertEqual(
-            PARSER_WIDGET._normalized_datadict(data | unrelated, "values"), normalized
+            PARSER_WIDGET.keys.normalized(data | unrelated, "values"), normalized
         )
         value = PARSER_WIDGET.value_from_datadict(data, files, "values")
-        self.assertLessEqual(len(value), PARSER_WIDGET.absolute_max)
+        self.assertLessEqual(len(value), PARSER_WIDGET.limits.absolute_max)
 
 
 if __name__ == "__main__":  # pragma: no cover

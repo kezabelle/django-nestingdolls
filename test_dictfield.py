@@ -809,9 +809,10 @@ class DictFieldRenderingTestCase(SimpleTestCase):
         class CountingWidget(nestingdolls.MappingWidget):
             normalizations = 0
 
-            def _normalized_datadict(self, data, name):
-                type(self).normalizations += 1
-                return super()._normalized_datadict(data, name)
+            class Keys(nestingdolls.MappingWidget.Keys):
+                def normalized(self, data, name):
+                    CountingWidget.normalizations += 1
+                    return super().normalized(data, name)
 
         class Form(forms.Form):
             point = nestingdolls.MappingField(PointForm, widget=CountingWidget)
@@ -924,7 +925,7 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
         widget = nestingdolls.MappingWidget(ChildForm)
 
         self.assertEqual(
-            widget._normalized_datadict(
+            widget.keys.normalized(
                 {"value-title": "kept", "value-untrusted": "ignored"}, "value"
             ),
             {"value-title": "kept"},
@@ -1094,6 +1095,33 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
 
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertIs(form.cleaned_data["payload"]["asset"]["upload"], initial_upload)
+
+    def test_render_state_is_not_shared_between_form_instances(self):
+        """It keeps the bound child Form scoped to one form instance."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm)
+
+        bound = Form({"point-a": "bad", "point-label": "kept"})
+        self.assertIs(bound.is_valid(), False)
+        bound.as_p()
+        bound_widget = bound.fields["point"].widget
+
+        self.assertIs(bound_widget.bound.subform, bound["point"].subform)
+
+        fresh = Form()
+        fresh_widget = fresh.fields["point"].widget
+        html = fresh.as_p()
+
+        self.assertIsNot(fresh_widget, bound_widget)
+        self.assertIs(fresh_widget.bound.subform, fresh["point"].subform)
+        self.assertIsNot(fresh_widget.bound.subform, bound_widget.bound.subform)
+        self.assertNotIn("errorlist", html)
+        self.assertNotIn("kept", html)
+        # The class default is the state of a widget that no render has touched.
+        self.assertIs(
+            Form.base_fields["point"].widget.bound, nestingdolls.MappingWidget.bound
+        )
 
 
 class NestedDictFieldTestCase(SimpleTestCase):
@@ -1741,17 +1769,15 @@ class DictFieldPropertyTestCase(SimpleTestCase):
         widget = Form.base_fields["point"].widget
         child_count = len(PointForm.base_fields)
         for source in (data, files):
-            normalized = widget._normalized_datadict(source, "point")
-            self.assertEqual(
-                widget._normalized_datadict(normalized, "point"), normalized
-            )
+            normalized = widget.keys.normalized(source, "point")
+            self.assertEqual(widget.keys.normalized(normalized, "point"), normalized)
             self.assertLessEqual(len(normalized), max(len(source), child_count))
             for key in normalized:
                 self.assertIs(key == "point" or key.startswith("point-"), True, key)
 
             unrelated = {f"other:{key}": value for key, value in source.items()}
             self.assertEqual(
-                widget._normalized_datadict(source | unrelated, "point"), normalized
+                widget.keys.normalized(source | unrelated, "point"), normalized
             )
 
         widget.value_from_datadict(data, files, "point")

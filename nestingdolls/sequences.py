@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import datetime, time
 from itertools import islice
+from types import MappingProxyType
 from typing import Any, Self, cast
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
@@ -22,7 +24,6 @@ from django.forms.formsets import (
     TOTAL_FORM_COUNT,
     ManagementForm,
 )
-from django.forms.utils import ErrorList
 from django.forms.widgets import Media as WidgetMedia
 from django.utils.datastructures import MultiValueDict
 from django.utils.functional import Promise, cached_property
@@ -69,6 +70,88 @@ class SequenceBoundField(CompositeBoundField):
         if not isinstance(self.field, SequenceField):
             raise TypeError("field must be a SequenceField")
 
+    @dataclasses.dataclass(frozen=True)
+    class Submitted:
+        """Report what the browser sent for the rows of one bound field.
+
+        It answers which rows the management form declares, which rows the user
+        deleted, which rows the child widget omitted, and which errors belong to
+        each row. It holds the bound field, and it finds each answer one time.
+        It keeps each answer in its own instance dictionary, so it takes no
+        slots.
+        """
+
+        bound_field: SequenceBoundField
+
+        @cached_property
+        def management_form(self) -> ManagementForm | None:
+            """Build a management form from normalized sequence inputs."""
+            bound_field = self.bound_field
+            data_input = bound_field._data_input
+            names = bound_field.field.widget.keys.management_names(
+                bound_field.html_name
+            )
+            if not any(name in data_input for name in names):
+                return None
+            management_form = ManagementForm(data_input, prefix=bound_field.html_name)
+            management_form.full_clean()
+            return management_form
+
+        @cached_property
+        def deleted(self) -> frozenset[int]:
+            """Return submitted deleted rows, as ``BaseFormSet.deleted_forms`` does."""
+            bound_field = self.bound_field
+            return frozenset(
+                index
+                for index in range(len(bound_field.data))
+                if bound_field.field.widget.deletion_field.clean(
+                    bound_field._data_input.get(
+                        f"{bound_field.html_name}-{index}-{DELETION_FIELD_NAME}"
+                    )
+                )
+            )
+
+        @cached_property
+        def omitted(self) -> frozenset[int]:
+            """Return extra submitted rows that were omitted by the child widget."""
+            bound_field = self.bound_field
+            field = bound_field.field
+            name = bound_field.html_name
+            data_input = bound_field._data_input
+            file_input = bound_field._file_input
+            if name in data_input or name in file_input:
+                return frozenset()
+            initial_count = len(field._initial_values(bound_field.initial))
+            row_count = len(bound_field.data)
+            row_data = field.widget.keys.rows(data_input, name, row_count)
+            row_files = field.widget.keys.rows(file_input, name, row_count)
+            return frozenset(
+                index
+                for index in range(row_count)
+                if index >= initial_count
+                and field.widget.child_field.widget.value_omitted_from_data(
+                    row_data[index],
+                    row_files[index],
+                    f"{name}-{index}",
+                )
+            )
+
+        @cached_property
+        def errors(self) -> Mapping[int, list[object]]:
+            """Group child error messages by the row index they belong to."""
+            row_errors: dict[int, list[object]] = defaultdict(list)
+            for error in self.bound_field._all_errors.as_data():
+                if isinstance(error, ItemValidationError) and isinstance(
+                    error.item, int
+                ):
+                    row_errors[error.item].append(error.message)
+            return row_errors
+
+    @cached_property
+    def submitted(self) -> Submitted:
+        """Return what the browser sent for these rows."""
+        return self.Submitted(self)
+
     def _prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
         """Give the sequence widget the submitted rows, errors, and deletions."""
         if not isinstance(widget, SequenceWidget):
@@ -76,37 +159,16 @@ class SequenceBoundField(CompositeBoundField):
         elif only_initial:
             # A hidden initial render shows the submitted initial rows. It shows
             # no errors, and it keeps the rows the user deleted.
-            widget.hidden_initial_value, widget.management_data = (
-                self._hidden_initial_value(widget)
+            value, management_data = self._hidden_initial_value(widget)
+            widget.bound = widget.Bound(
+                hidden_initial_value=value, management_data=management_data
             )
-            widget.row_errors = {}
-            widget.deleted_indexes = frozenset()
         else:
-            widget.hidden_initial_value = None
-            widget.management_data = self._data_input
-            widget.row_errors = self._item_errors(self._all_errors)
-            widget.deleted_indexes = self._deleted_indexes
-
-    @staticmethod
-    def _item_errors(errors: ErrorList) -> dict[int, list[object]]:
-        """Group child error messages by the row index they belong to."""
-        item_errors: dict[int, list[object]] = defaultdict(list)
-        for error in errors.as_data():
-            if isinstance(error, ItemValidationError) and isinstance(error.item, int):
-                item_errors[error.item].append(error.message)
-        return item_errors
-
-    @cached_property
-    def _management_form(self) -> ManagementForm | None:
-        """Build a management form from normalized sequence inputs."""
-        if not any(
-            name in self._data_input
-            for name in self.field.widget.management_names(self.html_name)
-        ):
-            return None
-        management_form = ManagementForm(self._data_input, prefix=self.html_name)
-        management_form.full_clean()
-        return management_form
+            widget.bound = widget.Bound(
+                management_data=self._data_input,
+                row_errors=self.submitted.errors,
+                deleted_indexes=self.submitted.deleted,
+            )
 
     @cached_property
     def initial(self) -> list[object]:
@@ -122,7 +184,9 @@ class SequenceBoundField(CompositeBoundField):
             value = normalized
         try:
             # Keep runtime initial values from growing rendering without a limit.
-            value = self.field._initial_values(value, limit=self.field.absolute_max)
+            value = self.field._initial_values(
+                value, limit=self.field.limits.absolute_max
+            )
         except InvalidInitialValueError:
             value = [value]
         if not self.field.child_field.widget.supports_microseconds:
@@ -134,52 +198,16 @@ class SequenceBoundField(CompositeBoundField):
             ]
         return value
 
-    @cached_property
-    def _deleted_indexes(self) -> frozenset[int]:
-        """Return submitted deleted rows, as ``BaseFormSet.deleted_forms`` does."""
-        return frozenset(
-            index
-            for index in range(len(self.data))
-            if self.field.widget.deletion_field.clean(
-                self._data_input.get(f"{self.html_name}-{index}-{DELETION_FIELD_NAME}")
-            )
-        )
-
-    @cached_property
-    def _omitted_indexes(self) -> frozenset[int]:
-        """Return extra submitted rows that were omitted by the child widget."""
-        data_input = self._data_input
-        file_input = self._file_input
-        if self.html_name in data_input or self.html_name in file_input:
-            return frozenset()
-        initial_count = len(self.field._initial_values(self.initial))
-        row_data = self.field.widget._rows_from_normalized_data(
-            data_input, self.html_name, len(self.data)
-        )
-        row_files = self.field.widget._rows_from_normalized_data(
-            file_input, self.html_name, len(self.data)
-        )
-        return frozenset(
-            index
-            for index in range(len(self.data))
-            if index >= initial_count
-            and self.field.widget.child_field.widget.value_omitted_from_data(
-                row_data[index],
-                row_files[index],
-                f"{self.html_name}-{index}",
-            )
-        )
-
     def _has_changed(self) -> bool:
         """Treat deleted initial rows as a real change."""
         changed = super()._has_changed()
-        if changed or self.field.disabled or not self._deleted_indexes:
+        if changed or self.field.disabled or not self.submitted.deleted:
             return changed
         try:
             initial_length = len(self.field._initial_values(self.initial))
         except InvalidInitialValueError:
             return True
-        return any(index < initial_length for index in self._deleted_indexes)
+        return any(index < initial_length for index in self.submitted.deleted)
 
 
 class SequenceField(CompositeField):
@@ -204,6 +232,68 @@ class SequenceField(CompositeField):
     }
     bound_field_class: type[SequenceBoundField] = SequenceBoundField
     widget: SequenceWidget
+
+    @dataclasses.dataclass(frozen=True, slots=True)
+    class Limits:
+        """Hold the row limits of one sequence field.
+
+        min_length and max_length are the limits the user gives. absolute_max is
+        the limit on submitted rows, which stops hostile input before it makes
+        work. This object makes sure that the three agree, and it does the
+        arithmetic that the field and its widget both need.
+        """
+
+        min_length: int
+        max_length: int
+        absolute_max: int
+
+        def __post_init__(self) -> None:
+            if self.min_length < 0 or self.max_length < self.min_length:
+                raise ValueError(
+                    "min_length and max_length must be non-negative integers"
+                )
+            if self.max_length > self.absolute_max:
+                raise ValueError(
+                    "'absolute_max' must be greater or equal to 'max_length'."
+                )
+
+        @classmethod
+        def build(
+            cls, min_length: int, max_length: int, absolute_max: int | None
+        ) -> Self:
+            """Return the limits, with the default limit on submitted rows."""
+            if absolute_max is None:
+                absolute_max = max_length + DEFAULT_MAX_NUM
+            return cls(min_length, max_length, absolute_max)
+
+        def exceeded_by(self, count: int) -> bool:
+            """Report whether a row count is above the limit on submitted rows."""
+            return count > self.absolute_max
+
+        def bounded_count(self, count: int) -> int:
+            """Return a submitted row count inside the limit on submitted rows."""
+            return max(0, min(count, self.absolute_max))
+
+        def empty_count(self, required: bool) -> int:
+            """Return how many empty rows to render for a field with no value."""
+            return min(max(self.min_length, int(required)), self.max_length)
+
+    limits: Limits
+
+    @property
+    def min_length(self) -> int:
+        """Return the smallest number of items this field accepts."""
+        return self.limits.min_length
+
+    @property
+    def max_length(self) -> int:
+        """Return the largest number of items this field accepts."""
+        return self.limits.max_length
+
+    @property
+    def absolute_max(self) -> int:
+        """Return the limit on the number of submitted rows."""
+        return self.limits.absolute_max
 
     def __init__(
         self,
@@ -232,12 +322,7 @@ class SequenceField(CompositeField):
             raise ImproperlyConfigured(
                 "child_field argument for SequenceField must be a forms.Field instance"
             )
-        if min_length < 0 or max_length < min_length:
-            raise ValueError("min_length and max_length must be non-negative integers")
-        if absolute_max is None:
-            absolute_max = max_length + DEFAULT_MAX_NUM
-        if max_length > absolute_max:
-            raise ValueError("'absolute_max' must be greater or equal to 'max_length'.")
+        self.limits = self.Limits.build(min_length, max_length, absolute_max)
         if (
             initial is not None
             and not callable(initial)
@@ -247,9 +332,6 @@ class SequenceField(CompositeField):
             raise ValueError("initial must not contain more than max_length values")
 
         self.child_field = copy.deepcopy(child_field)
-        self.min_length = min_length
-        self.max_length = max_length
-        self.absolute_max = absolute_max
         self.child_field.localize = localize
 
         bound_field_class = bound_field_class or self.bound_field_class
@@ -275,10 +357,7 @@ class SequenceField(CompositeField):
         if not isinstance(self.widget, SequenceWidget):
             raise TypeError("widget must be a SequenceWidget instance or subclass")
         # Django copies the widget. Configure that copy to match this field.
-        self.widget.child_field = self.child_field
-        self.widget.min_length = min_length
-        self.widget.max_length = max_length
-        self.widget.absolute_max = self.absolute_max
+        self.widget.configure(self.child_field, self.limits)
 
     def __deepcopy__(self, memo: dict[int, object]) -> Self:
         """Copy the field and its child field together."""
@@ -327,10 +406,10 @@ class SequenceField(CompositeField):
         omitted_indexes: frozenset[int] = frozenset(),
     ) -> Collection[object]:
         """Clean each row, then validate the result, as ``MultiValueField`` does."""
-        if len(values) > self.absolute_max:
+        if self.limits.exceeded_by(len(values)):
             # Reject oversized direct input before it multiplies child validation work.
             raise TooManyFormsValidationError(
-                self.error_messages["too_many_forms"], num=self.max_length
+                self.error_messages["too_many_forms"], num=self.limits.max_length
             )
         cleaned_data: list[object] = []
         errors = []
@@ -374,13 +453,12 @@ class SequenceField(CompositeField):
                 Collection[object],
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
-        management_form = bound_field._management_form
-        deleted_indexes = bound_field._deleted_indexes
-        omitted_indexes = bound_field._omitted_indexes
+        submitted = bound_field.submitted
+        management_form = submitted.management_form
         if (
             management_form is None
-            and not deleted_indexes
-            and not omitted_indexes
+            and not submitted.deleted
+            and not submitted.omitted
             and not isinstance(self.child_field, FileField)
         ):
             return cast(
@@ -398,9 +476,11 @@ class SequenceField(CompositeField):
                     ),
                 )
             submitted_total = management_form.cleaned_data[TOTAL_FORM_COUNT]
-            if isinstance(submitted_total, int) and submitted_total > self.absolute_max:
+            if isinstance(submitted_total, int) and self.limits.exceeded_by(
+                submitted_total
+            ):
                 raise TooManyFormsValidationError(
-                    self.error_messages["too_many_forms"], num=self.max_length
+                    self.error_messages["too_many_forms"], num=self.limits.max_length
                 )
 
         initial = self._initial_values(bound_field.initial)
@@ -412,7 +492,7 @@ class SequenceField(CompositeField):
             and initial
         ):
             data = [None] * len(initial)
-        return self._clean_values(data, initial, deleted_indexes, omitted_indexes)
+        return self._clean_values(data, initial, submitted.deleted, submitted.omitted)
 
     def validate(self, value: Collection[object]) -> None:
         """Apply required, minimum, and maximum length checks."""
@@ -420,17 +500,17 @@ class SequenceField(CompositeField):
             super().validate([])
             return
         length = len(value)
-        if length < self.min_length:
+        if length < self.limits.min_length:
             raise ValidationError(
                 self.error_messages["min_length"],
                 code="min_length",
-                params={"limit_value": self.min_length, "show_value": length},
+                params={"limit_value": self.limits.min_length, "show_value": length},
             )
-        if length > self.max_length:
+        if length > self.limits.max_length:
             raise ValidationError(
                 self.error_messages["max_length"],
                 code="max_length",
-                params={"limit_value": self.max_length, "show_value": length},
+                params={"limit_value": self.limits.max_length, "show_value": length},
             )
 
     def compress(self, data_list: list[object]) -> Collection[object]:
@@ -441,7 +521,7 @@ class SequenceField(CompositeField):
         """Bind each submitted row against its matching initial value."""
         if self.disabled:
             return self._initial_values(initial)
-        if isinstance(data, list) and len(data) > self.absolute_max:
+        if isinstance(data, list) and self.limits.exceeded_by(len(data)):
             return []
         initial = self._initial_values(initial)
         values = []
@@ -462,7 +542,7 @@ class SequenceField(CompositeField):
     def prepare_value(self, value: object) -> list[object]:
         """Prepare each row for widget rendering."""
         values = []
-        for row in self._initial_values(value, limit=self.absolute_max):
+        for row in self._initial_values(value, limit=self.limits.absolute_max):
             try:
                 row = self.child_field.prepare_value(row)
             except (InvalidInitialValueError, ValidationError):
@@ -474,7 +554,7 @@ class SequenceField(CompositeField):
         """Compare submitted rows using child-field change semantics."""
         if self.disabled:
             return False
-        if isinstance(data, list) and len(data) > self.absolute_max:
+        if isinstance(data, list) and self.limits.exceeded_by(len(data)):
             return True
         try:
             initial = self._initial_values(initial)
@@ -546,7 +626,7 @@ class SetField(SequenceField):
         """
         if self.disabled:
             return False
-        if isinstance(data, list) and len(data) > self.absolute_max:
+        if isinstance(data, list) and self.limits.exceeded_by(len(data)):
             return True
         try:
             initial = list(self.compress(self._initial_values(initial)))
@@ -613,16 +693,179 @@ class SequenceWidget(CompositeWidget):
     use_fieldset = True
     deletion_field = BooleanField(required=False)
     child_field: Field
-    # Submitted state that Widget.render() cannot pass to get_context(). The
-    # bound field sets it before each render.
-    management_data: Mapping[str, object] | None = None
-    row_errors: Mapping[int, list[object]] = {}
-    deleted_indexes: Collection[int] = frozenset()
+    keys: Keys
+    limits: SequenceField.Limits
+
+    @dataclasses.dataclass(frozen=True, slots=True)
+    class Bound(CompositeWidget.Bound):
+        """Hold the submitted rows that one render of a sequence widget needs.
+
+        management_data holds the submitted management inputs, which limit how
+        many rows to render. row_errors holds the errors of each row, and
+        deleted_indexes holds the rows the user deleted.
+        """
+
+        management_data: Mapping[str, object] | None = None
+        row_errors: Mapping[int, list[object]] = MappingProxyType({})
+        deleted_indexes: Collection[int] = frozenset()
+
+    bound: Bound = Bound()
 
     class Media:
         """Load the client-side row add/remove controller."""
 
         js = ("nestingdolls/sequence.js",)
+
+    @dataclasses.dataclass(frozen=True, slots=True)
+    class Keys(CompositeWidget.Keys):
+        """Read the submitted input keys of one sequence field as row keys.
+
+        Every row of a sequence has an index. This object changes each accepted
+        key spelling into one canonical row key, gives each row its own input,
+        and knows the management keys of the field. It holds the row limit, so
+        it can refuse an index that is too large.
+        """
+
+        absolute_max: int
+
+        @staticmethod
+        def management_names(name: str) -> set[str]:
+            """Return the management keys for a sequence field name."""
+            return {
+                f"{name}-{TOTAL_FORM_COUNT}",
+                f"{name}-{INITIAL_FORM_COUNT}",
+                f"{name}-{MIN_NUM_FORM_COUNT}",
+                f"{name}-{MAX_NUM_FORM_COUNT}",
+            }
+
+        def canonical(self, key: object, name: str) -> tuple[str, int] | None:
+            """Normalize one supported row key into its canonical name and index."""
+            if (child_key := self.split(key, name)) is None:
+                return None
+            token, suffix = child_key
+            index_end = 0
+            index = 0
+            while index_end < len(token) and "0" <= token[index_end] <= "9":
+                digit = ord(token[index_end]) - ord("0")
+                # Avoid an unbounded integer from a hostile row index.
+                index = min(self.absolute_max, index * 10 + digit)
+                index_end += 1
+            if not index_end:
+                return None
+            suffix = token[index_end:] + suffix
+            if suffix and suffix[0] not in "_-.[":
+                return None
+            return (f"{name}-{index}{suffix}", index)
+
+        def rows(
+            self, data: Mapping[str, object], name: str, form_count: int
+        ) -> list[MultiValueDict[str, object]]:
+            """Avoid repeated full-input scans when rows use composite child widgets."""
+            rows = [MultiValueDict[str, object]() for _ in range(form_count)]
+            for key, value in data.items():
+                if (row_key := self.canonical(key, name)) is None:
+                    continue
+                row_name, index = row_key
+                if index < form_count:
+                    rows[index].setlist(
+                        row_name,
+                        data.getlist(key)
+                        if isinstance(data, MultiValueDict)
+                        else [value],
+                    )
+            return rows
+
+        def normalized(
+            self, data: Mapping[str, object], name: str
+        ) -> MultiValueDict[str, object]:
+            """Canonicalize accepted row spellings into Django-style keys and dense rows.
+
+            post[]:
+                implies(not data, not __return__)
+                implies(name in data, name in __return__)
+                all(key == name or key.startswith(f"{name}-") for key in __return__)
+                len(__return__) <= len(data) + 2
+            """
+            normalized = MultiValueDict[str, object]()
+            if not data:
+                return normalized
+
+            def values_for(key: str) -> list[object]:
+                # Treat repeated input the same way Django request data does.
+                if isinstance(data, MultiValueDict):
+                    return list(data.getlist(key))
+                value = data.get(key)
+                return value if isinstance(value, list) else [value]
+
+            # Keep formset control fields in the repeated-value shape Django expects.
+            management_keys = {
+                key for key in self.management_names(name) if key in data
+            }
+            for key in management_keys:
+                normalized.setlist(key, values_for(key))
+
+            if name in data:
+                # Use the direct list value when both shapes are present.
+                direct_value = values_for(name)
+                normalized[name] = direct_value
+                if not management_keys:
+                    # Build missing control fields for a direct Python list.
+                    normalized[f"{name}-{TOTAL_FORM_COUNT}"] = str(len(direct_value))
+                    normalized[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
+                return normalized
+
+            overflowed_index = False
+            row_inputs: list[tuple[int, str, list[object]]] = []
+            for key in data:
+                if key in management_keys:
+                    continue
+                if (row_key := self.canonical(key, name)) is None:
+                    continue
+                row_name, index = row_key
+                if index >= self.absolute_max:
+                    # Do not let a forged index bypass the row limit.
+                    overflowed_index = True
+                    continue
+                if len(row_inputs) >= self.absolute_max:
+                    # Prevent many matching keys from growing memory without limit.
+                    overflowed_index = True
+                    break
+                row_inputs.append((index, row_name, values_for(key)))
+
+            if management_keys:
+                # Keep Django's management validation authoritative for managed rows.
+                if overflowed_index:
+                    # Reject excess input through Django's standard validation error.
+                    normalized.setlist(
+                        f"{name}-{TOTAL_FORM_COUNT}", [str(self.absolute_max + 1)]
+                    )
+                for _, row_name, values in row_inputs:
+                    normalized.setlist(row_name, values)
+                return normalized
+
+            if not row_inputs and not overflowed_index:
+                return normalized
+
+            # Renumber sparse rows so plain mappings bind like form input.
+            row_indexes = sorted({index for index, _, _ in row_inputs})
+            remapped_indexes = {
+                original_index: min(original_index, dense_index + 1)
+                for dense_index, original_index in enumerate(row_indexes)
+            }
+            for original_index, row_name, values in row_inputs:
+                suffix = row_name.removeprefix(f"{name}-{original_index}")
+                normalized.setlist(
+                    f"{name}-{remapped_indexes[original_index]}{suffix}",
+                    values,
+                )
+
+            total_forms = max(remapped_indexes.values(), default=-1) + 1
+            if overflowed_index:
+                # Reject excess input through Django's standard validation error.
+                total_forms = self.absolute_max + 1
+            normalized[f"{name}-{TOTAL_FORM_COUNT}"] = str(total_forms)
+            normalized[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
+            return normalized
 
     def __init__(
         self,
@@ -638,14 +881,22 @@ class SequenceWidget(CompositeWidget):
         Django builds this widget from its class, and gives it no child field,
         when a field supplies only the class. The field configures the copy.
         """
+        self.limits = SequenceField.Limits.build(min_length, max_length, absolute_max)
+        self.keys = self.Keys(self.limits.absolute_max)
         if child_field is not None:
             self.child_field = child_field
-        self.min_length = min_length
-        self.max_length = max_length
-        self.absolute_max = (
-            max_length + DEFAULT_MAX_NUM if absolute_max is None else absolute_max
-        )
         super().__init__(dict(attrs) if attrs is not None else None)
+
+    def configure(self, child_field: Field, limits: SequenceField.Limits) -> None:
+        """Take the configuration of the field that owns this widget.
+
+        Django copies a widget before a field can use it, so the field calls
+        this on its own copy. The key reader is built here, because it holds the
+        row limit and must never hold an old one.
+        """
+        self.child_field = child_field
+        self.limits = limits
+        self.keys = self.Keys(limits.absolute_max)
 
     def _value_from_normalized_data(
         self,
@@ -662,7 +913,9 @@ class SequenceWidget(CompositeWidget):
                 return None
             value = source.get(name)
             # Keep direct Python or JSON input from multiplying child work past the limit.
-            return value[: self.absolute_max + 1] if isinstance(value, list) else []
+            return (
+                value[: self.limits.absolute_max + 1] if isinstance(value, list) else []
+            )
 
         def submitted_total_forms(source: Mapping[str, object]) -> int | None:
             value = source.get(f"{name}-{TOTAL_FORM_COUNT}")
@@ -685,12 +938,12 @@ class SequenceWidget(CompositeWidget):
         if not counts:
             return []
         form_count = max(counts)
-        if form_count < 0 or form_count > self.absolute_max:
+        if form_count < 0 or form_count > self.limits.absolute_max:
             # Reject forged totals before they allocate rows or call child widgets.
             return []
         child_widget = self._child_widget(self.child_field)
-        row_data = self._rows_from_normalized_data(data, name, form_count)
-        row_files = self._rows_from_normalized_data(files, name, form_count)
+        row_data = self.keys.rows(data, name, form_count)
+        row_files = self.keys.rows(files, name, form_count)
         return [
             child_widget.value_from_datadict(
                 row_data[index],
@@ -699,141 +952,6 @@ class SequenceWidget(CompositeWidget):
             )
             for index in range(form_count)
         ]
-
-    @staticmethod
-    def management_names(name: str) -> set[str]:
-        """Return the management keys for a sequence field name."""
-        return {
-            f"{name}-{TOTAL_FORM_COUNT}",
-            f"{name}-{INITIAL_FORM_COUNT}",
-            f"{name}-{MIN_NUM_FORM_COUNT}",
-            f"{name}-{MAX_NUM_FORM_COUNT}",
-        }
-
-    def _normalized_row_key(self, key: object, name: str) -> tuple[str, int] | None:
-        """Normalize one supported row key into its canonical name and index."""
-        if (child_key := self._split_child_key(key, name)) is None:
-            return None
-        token, suffix = child_key
-        index_end = 0
-        index = 0
-        while index_end < len(token) and "0" <= token[index_end] <= "9":
-            digit = ord(token[index_end]) - ord("0")
-            # Avoid an unbounded integer from a hostile row index.
-            index = min(self.absolute_max, index * 10 + digit)
-            index_end += 1
-        if not index_end:
-            return None
-        suffix = token[index_end:] + suffix
-        if suffix and suffix[0] not in "_-.[":
-            return None
-        return (f"{name}-{index}{suffix}", index)
-
-    def _rows_from_normalized_data(
-        self, data: Mapping[str, object], name: str, form_count: int
-    ) -> list[MultiValueDict[str, object]]:
-        """Avoid repeated full-input scans when rows use composite child widgets."""
-        rows = [MultiValueDict[str, object]() for _ in range(form_count)]
-        for key, value in data.items():
-            if (row_key := self._normalized_row_key(key, name)) is None:
-                continue
-            row_name, index = row_key
-            if index < form_count:
-                rows[index].setlist(
-                    row_name,
-                    data.getlist(key) if isinstance(data, MultiValueDict) else [value],
-                )
-        return rows
-
-    def _normalized_datadict(
-        self, data: Mapping[str, object], name: str
-    ) -> MultiValueDict[str, object]:
-        """Canonicalize accepted row spellings into Django-style keys and dense rows.
-
-        post[]:
-            implies(not data, not __return__)
-            implies(name in data, name in __return__)
-            all(key == name or key.startswith(f"{name}-") for key in __return__)
-            len(__return__) <= len(data) + 2
-        """
-        normalized = MultiValueDict[str, object]()
-        if not data:
-            return normalized
-
-        def values_for(key: str) -> list[object]:
-            # Treat repeated input the same way Django request data does.
-            if isinstance(data, MultiValueDict):
-                return list(data.getlist(key))
-            value = data.get(key)
-            return value if isinstance(value, list) else [value]
-
-        # Keep formset control fields in the repeated-value shape Django expects.
-        management_keys = {key for key in self.management_names(name) if key in data}
-        for key in management_keys:
-            normalized.setlist(key, values_for(key))
-
-        if name in data:
-            # Use the direct list value when both shapes are present.
-            direct_value = values_for(name)
-            normalized[name] = direct_value
-            if not management_keys:
-                # Build missing control fields for a direct Python list.
-                normalized[f"{name}-{TOTAL_FORM_COUNT}"] = str(len(direct_value))
-                normalized[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
-            return normalized
-
-        overflowed_index = False
-        row_inputs: list[tuple[int, str, list[object]]] = []
-        for key in data:
-            if key in management_keys:
-                continue
-            if (row_key := self._normalized_row_key(key, name)) is None:
-                continue
-            row_name, index = row_key
-            if index >= self.absolute_max:
-                # Do not let a forged index bypass the row limit.
-                overflowed_index = True
-                continue
-            if len(row_inputs) >= self.absolute_max:
-                # Prevent many matching keys from growing memory without limit.
-                overflowed_index = True
-                break
-            row_inputs.append((index, row_name, values_for(key)))
-
-        if management_keys:
-            # Keep Django's management validation authoritative for managed rows.
-            if overflowed_index:
-                # Reject excess input through Django's standard validation error.
-                normalized.setlist(
-                    f"{name}-{TOTAL_FORM_COUNT}", [str(self.absolute_max + 1)]
-                )
-            for _, row_name, values in row_inputs:
-                normalized.setlist(row_name, values)
-            return normalized
-
-        if not row_inputs and not overflowed_index:
-            return normalized
-
-        # Renumber sparse rows so plain mappings bind like form input.
-        row_indexes = sorted({index for index, _, _ in row_inputs})
-        remapped_indexes = {
-            original_index: min(original_index, dense_index + 1)
-            for dense_index, original_index in enumerate(row_indexes)
-        }
-        for original_index, row_name, values in row_inputs:
-            suffix = row_name.removeprefix(f"{name}-{original_index}")
-            normalized.setlist(
-                f"{name}-{remapped_indexes[original_index]}{suffix}",
-                values,
-            )
-
-        total_forms = max(remapped_indexes.values(), default=-1) + 1
-        if overflowed_index:
-            # Reject excess input through Django's standard validation error.
-            total_forms = self.absolute_max + 1
-        normalized[f"{name}-{TOTAL_FORM_COUNT}"] = str(total_forms)
-        normalized[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
-        return normalized
 
     def get_context(
         self,
@@ -847,30 +965,29 @@ class SequenceWidget(CompositeWidget):
         if self.is_localized:
             child_widget.is_localized = True
 
-        if self.hidden_initial_value is not None:
-            value = cast(Sequence[object] | None, self.hidden_initial_value)
+        if self.bound.hidden_initial_value is not None:
+            value = cast(Sequence[object] | None, self.bound.hidden_initial_value)
         # Keep runtime initials from expanding rendering without a bound.
-        value = [] if value is None else list(islice(value, self.absolute_max))
-        if self.management_data is not None and any(
-            key in self.management_data for key in self.management_names(name)
+        value = [] if value is None else list(islice(value, self.limits.absolute_max))
+        if self.bound.management_data is not None and any(
+            key in self.bound.management_data
+            for key in self.keys.management_names(name)
         ):
-            management_form = ManagementForm(self.management_data, prefix=name)
+            management_form = ManagementForm(self.bound.management_data, prefix=name)
             management_invalid = not management_form.is_valid()
             total_forms = cast(int, management_form.cleaned_data[TOTAL_FORM_COUNT])
-            value = value[: max(0, min(total_forms, self.absolute_max))]
+            value = value[: self.limits.bounded_count(total_forms)]
         else:
             initial_forms = len(value)
             if not value:
-                value = [None] * min(
-                    max(self.min_length, int(self.is_required)), self.max_length
-                )
+                value = [None] * self.limits.empty_count(self.is_required)
             management_form = ManagementForm(
                 prefix=name,
                 initial={
                     TOTAL_FORM_COUNT: len(value),
                     INITIAL_FORM_COUNT: initial_forms,
-                    MIN_NUM_FORM_COUNT: self.min_length,
-                    MAX_NUM_FORM_COUNT: self.max_length,
+                    MIN_NUM_FORM_COUNT: self.limits.min_length,
+                    MAX_NUM_FORM_COUNT: self.limits.max_length,
                 },
             )
             management_invalid = False
@@ -889,14 +1006,16 @@ class SequenceWidget(CompositeWidget):
             if isinstance(child_widget, SequenceWidget):
                 # Give a nested sequence the same management data, as
                 # MultiWidget gives its own input type to each subwidget.
-                child_widget.management_data = self.management_data
+                child_widget.bound = child_widget.Bound(
+                    management_data=self.bound.management_data
+                )
                 item = cast(Sequence[object] | None, item)
             subwidget = child_widget.get_context(row_name, item, child_attrs)["widget"]
             row: dict[str, object] = {
                 "index": index,
                 "delete_name": f"{row_name}-{DELETION_FIELD_NAME}",
                 "subwidget": subwidget,
-                "errors": self.row_errors.get(index, [])
+                "errors": self.bound.row_errors.get(index, [])
                 if isinstance(index, int)
                 else [],
             }
@@ -921,20 +1040,20 @@ class SequenceWidget(CompositeWidget):
                 "rows": [
                     make_row(index, item)
                     for index, item in enumerate(value)
-                    if index not in self.deleted_indexes
+                    if index not in self.bound.deleted_indexes
                 ],
                 "empty_row": make_row("__prefix__", None),
                 "management_form": management_form,
-                "minimum_forms": self.min_length,
-                "maximum_forms": self.max_length,
-                "absolute_maximum_forms": self.absolute_max,
+                "minimum_forms": self.limits.min_length,
+                "maximum_forms": self.limits.max_length,
+                "absolute_maximum_forms": self.limits.absolute_max,
                 "disabled": disabled or management_invalid,
             }
         )
-        if self.deleted_indexes:
+        if self.bound.deleted_indexes:
             context["widget"]["deleted_rows"] = [
                 {"delete_name": f"{name}-{index}-{DELETION_FIELD_NAME}"}
-                for index in sorted(self.deleted_indexes)
+                for index in sorted(self.bound.deleted_indexes)
             ]
         return context
 

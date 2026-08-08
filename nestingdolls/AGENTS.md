@@ -19,6 +19,11 @@ normal Django behavior and uses JavaScript only for progressive enhancement.
 - `InvalidInitialValueError` reports an invalid initial value.
 - `CompositeWidget`, `CompositeBoundField`, and `CompositeField` in `_shared.py`
   are internal. They hold shared behavior to avoid writing it twice.
+- A class that holds one cohort of behavior is nested in the class that owns it,
+  as Django nests `class Media`. The owner builds one instance and keeps it under
+  the lower-case name: `widget.keys`, `widget.bound`, `field.limits`, and
+  `bound_field.submitted`. These nested classes are private. Put a cohort of
+  related methods in one of them instead of adding more methods to the owner.
 
 ## Generated method reference
 
@@ -86,9 +91,21 @@ Alias of `MappingField`. It defines no methods of its own.
 
 #### Methods introduced here
 
+- `min_length`
+- `max_length`
+- `absolute_max`
 - `_initial_values`
 - `_clean_values`
 - `compress`
+
+#### SequenceField.Limits
+
+##### Methods introduced here
+
+- `build`
+- `exceeded_by`
+- `bounded_count`
+- `empty_count`
 
 ### ListField
 
@@ -130,16 +147,24 @@ It inherits `SetField` behavior.
 
 - `_child_widget`
 - `template_name`
-- `_normalized_datadict`
 - `_value_from_normalized_data`
-- `_split_child_key`
+
+#### CompositeWidget.Keys
+
+##### Methods introduced here
+
+- `split`
+- `normalized`
+
+#### CompositeWidget.Bound
+
+`Bound` holds data only.
 
 ### MappingWidget
 
 #### Overrides parent methods
 
 - `__init__`
-- `_normalized_datadict`
 - `_value_from_normalized_data`
 - `get_context`
 - `is_hidden`
@@ -148,8 +173,23 @@ It inherits `SetField` behavior.
 
 #### Methods introduced here
 
+- `configure`
 - `fields`
-- `_normalized_child_key`
+
+#### MappingWidget.Bound
+
+`Bound` holds data only.
+
+#### MappingWidget.Keys
+
+##### Overrides parent methods
+
+- `normalized`
+
+##### Methods introduced here
+
+- `names`
+- `canonical`
 
 ### SequenceWidget
 
@@ -157,7 +197,6 @@ It inherits `SetField` behavior.
 
 - `__init__`
 - `_value_from_normalized_data`
-- `_normalized_datadict`
 - `get_context`
 - `is_hidden`
 - `needs_multipart_form`
@@ -165,10 +204,24 @@ It inherits `SetField` behavior.
 
 #### Methods introduced here
 
-- `management_names`
-- `_normalized_row_key`
-- `_rows_from_normalized_data`
+- `configure`
 - `_mark_row_invalid`
+
+#### SequenceWidget.Bound
+
+`Bound` holds data only.
+
+#### SequenceWidget.Keys
+
+##### Overrides parent methods
+
+- `normalized`
+
+##### Methods introduced here
+
+- `management_names`
+- `canonical`
+- `rows`
 
 ### CompositeBoundField
 
@@ -212,10 +265,16 @@ It inherits `SetField` behavior.
 
 #### Methods introduced here
 
-- `_item_errors`
-- `_management_form`
-- `_deleted_indexes`
-- `_omitted_indexes`
+- `submitted`
+
+#### SequenceBoundField.Submitted
+
+##### Methods introduced here
+
+- `management_form`
+- `deleted`
+- `omitted`
+- `errors`
 
 ### _ValueBoundField
 

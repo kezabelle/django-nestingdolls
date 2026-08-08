@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
@@ -44,9 +45,101 @@ class MappingWidget(CompositeWidget):
     _template_name = "nestingdolls/mapping/{layout}.html"
     use_fieldset = True
     form_class: type[BaseForm]
-    # Submitted state that Widget.render() cannot pass to get_context(). The
-    # bound field sets it before each render.
-    subform: BaseForm | None = None
+
+    @dataclasses.dataclass(frozen=True, slots=True)
+    class Bound(CompositeWidget.Bound):
+        """Hold the child Form that one render of a mapping widget needs.
+
+        The bound field builds the child Form, because only it holds the
+        submitted data and the errors of that Form. A render without one builds
+        its own Form from the value it is given.
+        """
+
+        subform: BaseForm | None = None
+
+    bound: Bound = Bound()
+
+    @dataclasses.dataclass(frozen=True)
+    class Keys(CompositeWidget.Keys):
+        """Read the submitted input keys of one mapping field as child keys.
+
+        Every child of a mapping has a declared name. This object changes each
+        accepted key spelling into one canonical child key, and drops a key
+        that no child declares. It holds the child Form class, so it can read
+        those names, including the names a Form adds when it is built. It keeps
+        those names in its own instance dictionary, so it takes no slots.
+        """
+
+        form_class: type[BaseForm]
+
+        @cached_property
+        def names(self) -> tuple[str, ...]:
+            """Return the declared child names of the child Form."""
+            return tuple(self.form_class().fields)
+
+        def canonical(self, key: object, name: str) -> str | None:
+            """Normalize one supported child key into its canonical declared name."""
+            if (child_key := self.split(key, name)) is None:
+                return None
+            token, suffix = child_key
+            key = f"{name}-{token}{suffix}"
+            # Drop undeclared keys so a matching prefix cannot retain untrusted data.
+            return (
+                key
+                if any(
+                    key == f"{name}-{child_name}"
+                    or key.startswith(f"{name}-{child_name}{separator}")
+                    for child_name in self.names
+                    for separator in "_-.["
+                )
+                else None
+            )
+
+        def normalized(
+            self, data: Mapping[str, object], name: str
+        ) -> Mapping[str, object]:
+            """Canonicalize accepted child names while preserving source values."""
+            if not data:
+                return {}
+
+            if name in data:
+                # Use the direct mapping value when both shapes are present.
+                value = data.get(name)
+                if not isinstance(value, Mapping):
+                    return {name: value}
+                if isinstance(value, MultiValueDict):
+                    # Keep repeated child values for widgets that read all values.
+                    normalized = MultiValueDict[str, object]()
+                    for child_name in self.names:
+                        if child_name in value:
+                            normalized.setlist(
+                                f"{name}-{child_name}", value.getlist(child_name)
+                            )
+                    return normalized
+                # Keep direct mapping input from retaining undeclared data.
+                return {
+                    f"{name}-{child_name}": value[child_name]
+                    for child_name in self.names
+                    if child_name in value
+                }
+
+            if isinstance(data, MultiValueDict):
+                # Keep repeated flat input values in Django's multi-value shape.
+                normalized = MultiValueDict[str, object]()
+                for source_key in data:
+                    key = self.canonical(source_key, name)
+                    if key is not None:
+                        normalized.setlist(key, data.getlist(source_key))
+                return normalized
+
+            # Plain mappings keep one value for each child key.
+            return {
+                key: value
+                for source_key, value in data.items()
+                if (key := self.canonical(source_key, name)) is not None
+            }
+
+    keys: Keys
 
     def __init__(
         self,
@@ -59,74 +152,22 @@ class MappingWidget(CompositeWidget):
         when a field supplies only the class. The field configures the copy.
         """
         if form_class is not None:
-            self.form_class = form_class
+            self.configure(form_class)
         super().__init__(dict(attrs) if attrs is not None else None)
+
+    def configure(self, form_class: type[BaseForm]) -> None:
+        """Take the child Form class of the field that owns this widget.
+
+        Django copies a widget before a field can use it, so the field calls
+        this on its own copy. The key reader is built here, because it reads the
+        child names of this Form class and must never read another one.
+        """
+        self.form_class = form_class
+        self.keys = self.Keys(form_class)
 
     @cached_property
     def fields(self) -> dict[str, Field]:
         return self.form_class().fields
-
-    def _normalized_child_key(self, key: object, name: str) -> str | None:
-        """Normalize one supported child key into its canonical declared name."""
-        if (child_key := self._split_child_key(key, name)) is None:
-            return None
-        token, suffix = child_key
-        key = f"{name}-{token}{suffix}"
-        # Drop undeclared keys so a matching prefix cannot retain untrusted data.
-        return (
-            key
-            if any(
-                key == f"{name}-{child_name}"
-                or key.startswith(f"{name}-{child_name}{separator}")
-                for child_name in self.fields
-                for separator in "_-.["
-            )
-            else None
-        )
-
-    def _normalized_datadict(
-        self, data: Mapping[str, object], name: str
-    ) -> Mapping[str, object]:
-        """Canonicalize accepted child names while preserving source values."""
-        if not data:
-            return {}
-
-        if name in data:
-            # Use the direct mapping value when both shapes are present.
-            value = data.get(name)
-            if not isinstance(value, Mapping):
-                return {name: value}
-            if isinstance(value, MultiValueDict):
-                # Keep repeated child values for widgets that read all values.
-                normalized = MultiValueDict[str, object]()
-                for child_name in self.fields:
-                    if child_name in value:
-                        normalized.setlist(
-                            f"{name}-{child_name}", value.getlist(child_name)
-                        )
-                return normalized
-            # Keep direct mapping input from retaining undeclared data.
-            return {
-                f"{name}-{child_name}": value[child_name]
-                for child_name in self.fields
-                if child_name in value
-            }
-
-        if isinstance(data, MultiValueDict):
-            # Keep repeated flat input values in Django's multi-value shape.
-            normalized = MultiValueDict[str, object]()
-            for source_key in data:
-                key = self._normalized_child_key(source_key, name)
-                if key is not None:
-                    normalized.setlist(key, data.getlist(source_key))
-            return normalized
-
-        # Plain mappings keep one value for each child key.
-        return {
-            key: value
-            for source_key, value in data.items()
-            if (key := self._normalized_child_key(source_key, name)) is not None
-        }
 
     def _value_from_normalized_data(
         self,
@@ -159,10 +200,10 @@ class MappingWidget(CompositeWidget):
     ) -> dict[str, Any]:
         """Build widget context with a prefixed child Form."""
         context = super().get_context(name, value, attrs)
-        subform = self.subform
+        subform = self.bound.subform
         if subform is None:
-            if self.hidden_initial_value is not None:
-                value = self.hidden_initial_value
+            if self.bound.hidden_initial_value is not None:
+                value = self.bound.hidden_initial_value
             subform = self.form_class(
                 initial=dict(value) if isinstance(value, Mapping) else {},
                 prefix=name,
@@ -264,10 +305,14 @@ class MappingBoundField(CompositeBoundField):
 
     def _prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
         """Give the mapping widget the child Form that holds the bound data."""
-        super()._prepare_widget(widget, only_initial)
-        if isinstance(widget, MappingWidget):
-            # A hidden initial render builds its own Form, with the initial prefix.
-            widget.subform = None if only_initial else self.subform
+        if not isinstance(widget, MappingWidget):
+            return super()._prepare_widget(widget, only_initial)
+        # A hidden initial render builds its own Form, with the initial prefix.
+        value, _ = self._hidden_initial_value(widget) if only_initial else (None, None)
+        widget.bound = widget.Bound(
+            hidden_initial_value=value,
+            subform=None if only_initial else self.subform,
+        )
 
 
 class MappingField(CompositeField):
@@ -336,7 +381,7 @@ class MappingField(CompositeField):
         if not isinstance(self.widget, MappingWidget):
             raise TypeError("widget must be a MappingWidget instance or subclass")
         # Django copies the widget. Configure that copy to match this field.
-        self.widget.form_class = form_class
+        self.widget.configure(form_class)
 
     @staticmethod
     def _initial_value(value: object) -> dict[str, object]:
