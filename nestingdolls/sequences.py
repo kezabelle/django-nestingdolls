@@ -24,14 +24,12 @@ from django.forms.formsets import (
 )
 from django.forms.utils import ErrorList
 from django.forms.widgets import Media as WidgetMedia
-from django.forms.widgets import Widget
 from django.utils.datastructures import MultiValueDict
 from django.utils.functional import Promise, cached_property
-from django.utils.safestring import SafeString
 from django.utils.translation import gettext_lazy as _
 from django.utils.translation import ngettext_lazy
 
-from nestingdolls._shared import CompositeWidget
+from nestingdolls._shared import CompositeBoundField, CompositeField, CompositeWidget
 
 __all__ = [
     "FrozenSequenceField",
@@ -51,10 +49,9 @@ from nestingdolls.errors import (
     SequenceInputValidationError,
     TooManyFormsValidationError,
 )
-from nestingdolls.rendering import FormLayout
 
 
-class SequenceBoundField(BoundField):
+class SequenceBoundField(CompositeBoundField):
     """Render indexed child errors without storing validation state on the field.
 
     Django passes a widget no errors when it renders a ``BoundField``. A sequence
@@ -64,153 +61,40 @@ class SequenceBoundField(BoundField):
     """
 
     field: SequenceField
+    # Every sequence widget extracts rows, so the bound value is always a list.
+    data: list[object]
 
     def __init__(self, form: BaseForm, field: Field, name: str) -> None:
         super().__init__(form, field, name)
         if not isinstance(self.field, SequenceField):
             raise TypeError("field must be a SequenceField")
 
-    @property
-    def errors(self) -> ErrorList:
-        """Return only field-level errors for Django's normal field rendering."""
-        errors = super().errors
-        if not errors:
-            return errors
-        field_errors = []
-        for error in errors.as_data():
-            if isinstance(error, ItemValidationError):
-                continue
-            field_errors.append(error)
-        if len(field_errors) == len(errors):
-            return errors
-        return self.form.error_class(
-            field_errors,
-            renderer=self.form.renderer,
-            field_id=self.auto_id,
-        )
-
-    def as_widget(
-        self,
-        widget: Widget | None = None,
-        attrs: dict[str, str | bool] | None = None,
-        only_initial: bool = False,
-    ) -> SafeString:
-        """Render submitted hidden initials or patch visible sequence rows."""
-        widget = widget or self.field.widget
+    def _prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
+        """Give the sequence widget the submitted rows, errors, and deletions."""
         if not isinstance(widget, SequenceWidget):
-            return super().as_widget(widget, attrs, only_initial)
-
-        if not only_initial:
-            errors = super().errors
-            deleted_indexes = self._deleted_indexes
-            if not deleted_indexes and not errors:
-                return super().as_widget(widget, attrs, only_initial)
-
-        if self.field.localize:
-            widget.is_localized = True
-        attrs = self.build_widget_attrs(dict(attrs or {}), widget)
-        if self.auto_id and "id" not in widget.attrs:
-            attrs.setdefault(
-                "id", self.html_initial_id if only_initial else self.auto_id
+            super()._prepare_widget(widget, only_initial)
+        elif only_initial:
+            # A hidden initial render shows the submitted initial rows. It shows
+            # no errors, and it keeps the rows the user deleted.
+            widget.hidden_initial_value, widget.management_data = (
+                self._hidden_initial_value(widget)
             )
-
-        if only_initial:
-            name = self.html_initial_name
-            data_input = widget._normalize_mapping(self.form.data, name)
-            file_input = (
-                widget._normalize_mapping(self.form.files, name)
-                if self.form.files
-                else MultiValueDict()
-            )
-            if data_input or file_input:
-                value = widget._value_from_normalized_data(data_input, file_input, name)
-                management_data: Mapping[str, object] | None = data_input
-            else:
-                value = self.value()
-                management_data = None
-            context = widget.get_context(
-                name,
-                value,
-                attrs,
-                management_data=management_data,
-            )
+            widget.row_errors = {}
+            widget.deleted_indexes = frozenset()
         else:
-            item_errors: dict[int, list[object]] = defaultdict(list)
-            for error in errors.as_data():
-                if isinstance(error, ItemValidationError) and isinstance(
-                    error.item, int
-                ):
-                    item_errors[error.item].append(error.message)
+            widget.hidden_initial_value = None
+            widget.management_data = self._data_input
+            widget.row_errors = self._item_errors(self._all_errors)
+            widget.deleted_indexes = self._deleted_indexes
 
-            context = widget.get_context(
-                self.html_name,
-                self.value(),
-                attrs,
-                management_data=self._data_input,
-            )
-
-            # A MultiWidget copies the parent attributes into each child context.
-            # Walk the tree so every input refers to the same row error.
-            def set_error_attributes(
-                widget_context: dict[str, Any], error_id: str | None
-            ) -> None:
-                child_attrs = widget_context["attrs"]
-                child_attrs["aria-invalid"] = "true"
-                if error_id:
-                    described_by = child_attrs.get("aria-describedby")
-                    child_attrs["aria-describedby"] = (
-                        f"{described_by} {error_id}" if described_by else error_id
-                    )
-                for child_context in widget_context.get("subwidgets", []):
-                    set_error_attributes(child_context, error_id)
-
-            rows = []
-            for row in context["widget"]["rows"]:
-                if row["index"] in deleted_indexes:
-                    continue
-                row["errors"] = item_errors[row["index"]]
-                if row["errors"]:
-                    subwidget = row["subwidget"]
-                    child_id = subwidget["attrs"].get("id")
-                    error_id = f"{child_id}_error" if child_id else None
-                    if error_id:
-                        row["error_id"] = error_id
-                    set_error_attributes(subwidget, error_id)
-                rows.append(row)
-            context["widget"]["rows"] = rows
-            if deleted_indexes:
-                context["widget"]["deleted_rows"] = [
-                    {"delete_name": f"{self.html_name}-{index}-{DELETION_FIELD_NAME}"}
-                    for index in sorted(deleted_indexes)
-                ]
-
-        # Widget.render() would rebuild and lose this prepared row or management
-        # context. Django has no public API for rendering it, so use _render().
-        return widget._render(  # type: ignore[attr-defined, no-any-return]
-            f"nestingdolls/sequence/{FormLayout.current().value}.html",
-            context,
-            self.form.renderer,
-        )
-
-    def as_hidden(
-        self,
-        attrs: dict[str, str | bool] | None = None,
-        **kwargs: Any,
-    ) -> SafeString:
-        """Render management inputs and recursively hidden child widgets."""
-        return self.as_widget(self.field.widget.hidden_widget(), attrs, **kwargs)
-
-    @cached_property
-    def _data_input(self) -> MultiValueDict[str, object]:
-        """Cache normalized submitted form data for this field."""
-        return self.field.widget._normalize_mapping(self.form.data, self.html_name)
-
-    @cached_property
-    def _file_input(self) -> MultiValueDict[str, object]:
-        """Cache normalized submitted files for this field."""
-        if not self.form.files:
-            return MultiValueDict()
-        return self.field.widget._normalize_mapping(self.form.files, self.html_name)
+    @staticmethod
+    def _item_errors(errors: ErrorList) -> dict[int, list[object]]:
+        """Group child error messages by the row index they belong to."""
+        item_errors: dict[int, list[object]] = defaultdict(list)
+        for error in errors.as_data():
+            if isinstance(error, ItemValidationError) and isinstance(error.item, int):
+                item_errors[error.item].append(error.message)
+        return item_errors
 
     @cached_property
     def _management_form(self) -> ManagementForm | None:
@@ -225,27 +109,17 @@ class SequenceBoundField(BoundField):
         return management_form
 
     @cached_property
-    def data(self) -> list[object]:
-        """Return the bound value extracted from normalized data and files."""
-        return self.field.widget._value_from_normalized_data(
-            self._data_input,
-            self._file_input,
-            self.html_name,
-        )
-
-    @cached_property
     def initial(self) -> list[object]:
         """Use Django's normal initial path unless flattened row keys need normalizing."""
+        value: object = None
         if self.form.initial and self.name not in self.form.initial:
-            value = self._normalize_initial_mapping(self.form.initial)
-            if value is None:
-                value = super().initial
-        else:
+            value = self._flat_initial_value(self.form.initial)
+        if value is None:
             value = super().initial
-        if isinstance(value, Mapping):
-            normalized_value = self._normalize_initial_mapping(value)
-            if normalized_value is not None:
-                value = normalized_value
+        if isinstance(value, Mapping) and (
+            (normalized := self._flat_initial_value(value)) is not None
+        ):
+            value = normalized
         try:
             # Keep runtime initial values from growing rendering without a limit.
             value = self.field._initial_values(value, limit=self.field.absolute_max)
@@ -260,47 +134,29 @@ class SequenceBoundField(BoundField):
             ]
         return value
 
-    def _normalize_initial_mapping(
-        self, value: Mapping[str, object]
-    ) -> list[object] | None:
-        """Return normalized initial rows for mapping-style values when possible."""
-        value = self.field.widget._normalize_mapping(value, self.name)
-        if not value:
-            return None
-        return self.field.widget._value_from_normalized_data(
-            value,
-            MultiValueDict(),
-            self.name,
-        )
-
     @cached_property
     def _deleted_indexes(self) -> frozenset[int]:
         """Return submitted deleted rows, as ``BaseFormSet.deleted_forms`` does."""
-        if not isinstance(self.field.widget, SequenceWidget):
-            return frozenset()
-        data_input = self._data_input
         return frozenset(
             index
             for index in range(len(self.data))
             if self.field.widget.deletion_field.clean(
-                data_input.get(f"{self.html_name}-{index}-{DELETION_FIELD_NAME}")
+                self._data_input.get(f"{self.html_name}-{index}-{DELETION_FIELD_NAME}")
             )
         )
 
     @cached_property
     def _omitted_indexes(self) -> frozenset[int]:
         """Return extra submitted rows that were omitted by the child widget."""
-        if not isinstance(self.field.widget, SequenceWidget):
-            return frozenset()
         data_input = self._data_input
         file_input = self._file_input
         if self.html_name in data_input or self.html_name in file_input:
             return frozenset()
         initial_count = len(self.field._initial_values(self.initial))
-        row_data = self.field.widget._partition_normalized_rows(
+        row_data = self.field.widget._rows_from_normalized_data(
             data_input, self.html_name, len(self.data)
         )
-        row_files = self.field.widget._partition_normalized_rows(
+        row_files = self.field.widget._rows_from_normalized_data(
             file_input, self.html_name, len(self.data)
         )
         return frozenset(
@@ -316,25 +172,8 @@ class SequenceBoundField(BoundField):
 
     def _has_changed(self) -> bool:
         """Treat deleted initial rows as a real change."""
-        if self.field.disabled:
-            return False
-        if self.field.show_hidden_initial:
-            hidden_widget = self.field.widget.hidden_widget()
-            try:
-                initial = hidden_widget._normalize_hidden_initial(
-                    self.field,
-                    hidden_widget.value_from_datadict(
-                        self.form.data, self.form.files, self.html_initial_name
-                    ),
-                )
-            except (TypeError, ValidationError):
-                return True
-            changed = self.field.has_changed(initial, self.data)
-        else:
-            changed = cast(bool, super()._has_changed())  # type: ignore[misc]
-        if not isinstance(self.field.widget, SequenceWidget):
-            return changed
-        if changed or not self._deleted_indexes:
+        changed = super()._has_changed()
+        if changed or self.field.disabled or not self._deleted_indexes:
             return changed
         try:
             initial_length = len(self.field._initial_values(self.initial))
@@ -343,7 +182,7 @@ class SequenceBoundField(BoundField):
         return any(index < initial_length for index in self._deleted_indexes)
 
 
-class SequenceField(Field):
+class SequenceField(CompositeField):
     """Validate a variable-length collection with one homogeneous child field."""
 
     default_error_messages = {  # noqa: RUF012
@@ -413,22 +252,14 @@ class SequenceField(Field):
         self.absolute_max = absolute_max
         self.child_field.localize = localize
 
-        widget = SequenceWidget if widget is None else widget
-        if not (
-            isinstance(widget, SequenceWidget)
-            or isinstance(widget, type)
-            and issubclass(widget, SequenceWidget)
-        ):
-            raise TypeError("widget must be a SequenceWidget instance or subclass")
-        if isinstance(widget, type):
-            widget = widget(self.child_field)
-
         bound_field_class = bound_field_class or self.bound_field_class
         if not issubclass(bound_field_class, SequenceBoundField):
             raise TypeError("bound_field_class must inherit from SequenceBoundField")
         super().__init__(
             required=required,
-            widget=widget,
+            # Django builds a widget class and copies a widget instance. The
+            # configuration below then makes that copy match this field.
+            widget=widget or SequenceWidget,
             label=label,  # type: ignore[arg-type]
             initial=initial,
             help_text=help_text,  # type: ignore[arg-type]
@@ -441,6 +272,8 @@ class SequenceField(Field):
             template_name=template_name,
             bound_field_class=bound_field_class,
         )
+        if not isinstance(self.widget, SequenceWidget):
+            raise TypeError("widget must be a SequenceWidget instance or subclass")
         # Django copies the widget. Configure that copy to match this field.
         self.widget.child_field = self.child_field
         self.widget.min_length = min_length
@@ -478,14 +311,22 @@ class SequenceField(Field):
             raise SequenceInputValidationError(self.error_messages["invalid"])
         return value
 
+    def children_from_hidden_initial(self, value: object, /) -> object:
+        """Convert each row back from its hidden initial value."""
+        # to_python() gives a list of rows here, or raises for other input.
+        value = cast(list[object], super().children_from_hidden_initial(value))
+        if isinstance(self.child_field, FileField):
+            return value
+        return [self.hidden_initial_to_python(self.child_field, row) for row in value]
+
     def _clean_values(
         self,
         values: list[object],
         initial_values: list[object],
         deleted_indexes: frozenset[int] = frozenset(),
         omitted_indexes: frozenset[int] = frozenset(),
-    ) -> list[object]:
-        """Clean each submitted row and return the cleaned row list."""
+    ) -> Collection[object]:
+        """Clean each row, then validate the result, as ``MultiValueField`` does."""
         if len(values) > self.absolute_max:
             # Reject oversized direct input before it multiplies child validation work.
             raise TooManyFormsValidationError(
@@ -505,33 +346,19 @@ class SequenceField(Field):
                 else:
                     cleaned = self.child_field.clean(value)
             except ValidationError as error:
-                for item_error in error.error_list:
-                    for message in item_error.messages:
-                        errors.append(
-                            ItemValidationError(
-                                index,
-                                message,
-                                ValidationError(
-                                    message,
-                                    code=(item_error.params or {}).get(
-                                        "child_code", item_error.code
-                                    ),
-                                    params=item_error.params,
-                                ),
-                            )
-                        )
+                errors.extend(ItemValidationError.for_messages_of(index, error))
             else:
                 cleaned_data.append(cleaned)
         if errors:
             raise ValidationError(errors)
-        return cleaned_data
-
-    def clean(self, value: object) -> Collection[object]:
-        """Clean an already-collected sequence value."""
-        result = self.compress(self._clean_values(self.to_python(value), []))
+        result = self.compress(cleaned_data)
         self.validate(result)
         self.run_validators(result)
         return result
+
+    def clean(self, value: object) -> Collection[object]:
+        """Clean an already-collected sequence value."""
+        return self._clean_values(self.to_python(value), [])
 
     def _clean_bound_field(self, bound_field: BoundField) -> Collection[object]:
         """Validate Django's management form and retain FileField initial values.
@@ -585,17 +412,7 @@ class SequenceField(Field):
             and initial
         ):
             data = [None] * len(initial)
-        result = self.compress(
-            self._clean_values(
-                data,
-                initial,
-                deleted_indexes,
-                omitted_indexes,
-            )
-        )
-        self.validate(result)
-        self.run_validators(result)
-        return result
+        return self._clean_values(data, initial, deleted_indexes, omitted_indexes)
 
     def validate(self, value: Collection[object]) -> None:
         """Apply required, minimum, and maximum length checks."""
@@ -741,12 +558,10 @@ class SetField(SequenceField):
             return True
 
         try:
+            # compress() already rejected unhashable members, so index them all.
             indexed: dict[object, list[int]] = defaultdict(list)
             for index, value in enumerate(initial):
-                try:
-                    indexed[value].append(index)
-                except TypeError:
-                    pass
+                indexed[value].append(index)
 
             matched: set[int] = set()
             all_indexes = range(len(initial))
@@ -754,17 +569,14 @@ class SetField(SequenceField):
             def matching_index(
                 value: object, candidates: Collection[int]
             ) -> int | None:
-                for indexes, already_matched in (
-                    (candidates, False),
-                    (all_indexes, False),
-                    (candidates, True),
-                    (all_indexes, True),
-                ):
-                    for index in indexes:
-                        if (index in matched) != already_matched:
-                            continue
-                        if not self.child_field.has_changed(initial[index], value):
-                            return index
+                # Prefer an unmatched member, and prefer an equal-hash candidate.
+                for already_matched in (False, True):
+                    for indexes in (candidates, all_indexes):
+                        for index in indexes:
+                            if (index in matched) != already_matched:
+                                continue
+                            if not self.child_field.has_changed(initial[index], value):
+                                return index
                 return None
 
             for data_value in data:
@@ -800,6 +612,12 @@ class SequenceWidget(CompositeWidget):
     _template_name = "nestingdolls/sequence/{layout}.html"
     use_fieldset = True
     deletion_field = BooleanField(required=False)
+    child_field: Field
+    # Submitted state that Widget.render() cannot pass to get_context(). The
+    # bound field sets it before each render.
+    management_data: Mapping[str, object] | None = None
+    row_errors: Mapping[int, list[object]] = {}
+    deleted_indexes: Collection[int] = frozenset()
 
     class Media:
         """Load the client-side row add/remove controller."""
@@ -808,56 +626,26 @@ class SequenceWidget(CompositeWidget):
 
     def __init__(
         self,
-        child_field: Field,
+        child_field: Field | None = None,
         *,
         min_length: int = DEFAULT_MIN_NUM,
         max_length: int = DEFAULT_MAX_NUM,
         absolute_max: int | None = None,
         attrs: Mapping[str, object] | None = None,
     ) -> None:
-        """Store child-widget settings for a sequence field."""
-        self.child_field = child_field
+        """Store child-widget settings for a sequence field.
+
+        Django builds this widget from its class, and gives it no child field,
+        when a field supplies only the class. The field configures the copy.
+        """
+        if child_field is not None:
+            self.child_field = child_field
         self.min_length = min_length
         self.max_length = max_length
         self.absolute_max = (
             max_length + DEFAULT_MAX_NUM if absolute_max is None else absolute_max
         )
         super().__init__(dict(attrs) if attrs is not None else None)
-
-    def value_from_datadict(
-        self,
-        data: Mapping[str, object],
-        files: Mapping[str, object],
-        name: str,
-    ) -> list[object]:
-        """Extract a sequence value from raw submitted inputs."""
-        return self._value_from_normalized_data(
-            self._normalize_mapping(data, name),
-            self._normalize_mapping(files, name) if files else MultiValueDict(),
-            name,
-        )
-
-    def _child_widget(self) -> Widget:
-        """Return the child widget for this composite widget's current mode."""
-        return (
-            self._hidden_child_widget(self.child_field)
-            if super().is_hidden
-            else self.child_field.widget
-        )
-
-    def _normalize_hidden_initial(self, field: Field, value: object) -> object:
-        """Normalize submitted hidden child values recursively."""
-        values = field.to_python(value)
-        if not isinstance(values, list) or isinstance(self.child_field, FileField):
-            return values
-        if isinstance(self.child_field.widget, CompositeWidget):
-            return [
-                self.child_field.widget._normalize_hidden_initial(
-                    self.child_field, item
-                )
-                for item in values
-            ]
-        return [self.child_field.to_python(item) for item in values]
 
     def _value_from_normalized_data(
         self,
@@ -885,12 +673,9 @@ class SequenceWidget(CompositeWidget):
             except (TypeError, ValueError):
                 return None
 
-        direct_data = direct_sequence_value(data)
-        if direct_data is not None:
-            return direct_data
-        direct_files = direct_sequence_value(files)
-        if direct_files is not None:
-            return direct_files
+        for source in (data, files):
+            if (direct_value := direct_sequence_value(source)) is not None:
+                return direct_value
 
         counts = [
             count
@@ -903,9 +688,9 @@ class SequenceWidget(CompositeWidget):
         if form_count < 0 or form_count > self.absolute_max:
             # Reject forged totals before they allocate rows or call child widgets.
             return []
-        child_widget = self._child_widget()
-        row_data = self._partition_normalized_rows(data, name, form_count)
-        row_files = self._partition_normalized_rows(files, name, form_count)
+        child_widget = self._child_widget(self.child_field)
+        row_data = self._rows_from_normalized_data(data, name, form_count)
+        row_files = self._rows_from_normalized_data(files, name, form_count)
         return [
             child_widget.value_from_datadict(
                 row_data[index],
@@ -927,41 +712,30 @@ class SequenceWidget(CompositeWidget):
 
     def _normalized_row_key(self, key: object, name: str) -> tuple[str, int] | None:
         """Normalize one supported row key into its canonical name and index."""
-        if not isinstance(key, str):
+        if (child_key := self._split_child_key(key, name)) is None:
             return None
-        for separator in ("-", ".", "["):
-            prefix = f"{name}{separator}"
-            if not key.startswith(prefix):
-                continue
-            suffix = key.removeprefix(prefix)
-            index_end = 0
-            index = 0
-            while index_end < len(suffix) and "0" <= suffix[index_end] <= "9":
-                digit = ord(suffix[index_end]) - ord("0")
-                # Avoid an unbounded integer from a hostile row index.
-                index = min(self.absolute_max, index * 10 + digit)
-                index_end += 1
-            if not index_end:
-                return None
-            if separator == "[":
-                if index_end == len(suffix) or suffix[index_end] != "]":
-                    return None
-                suffix = suffix[index_end + 1 :]
-            else:
-                suffix = suffix[index_end:]
-            if suffix and suffix[0] not in "_-.[":
-                return None
-            return (f"{name}-{index}{suffix}", index)
-        return None
+        token, suffix = child_key
+        index_end = 0
+        index = 0
+        while index_end < len(token) and "0" <= token[index_end] <= "9":
+            digit = ord(token[index_end]) - ord("0")
+            # Avoid an unbounded integer from a hostile row index.
+            index = min(self.absolute_max, index * 10 + digit)
+            index_end += 1
+        if not index_end:
+            return None
+        suffix = token[index_end:] + suffix
+        if suffix and suffix[0] not in "_-.[":
+            return None
+        return (f"{name}-{index}{suffix}", index)
 
-    def _partition_normalized_rows(
+    def _rows_from_normalized_data(
         self, data: Mapping[str, object], name: str, form_count: int
     ) -> list[MultiValueDict[str, object]]:
         """Avoid repeated full-input scans when rows use composite child widgets."""
         rows = [MultiValueDict[str, object]() for _ in range(form_count)]
         for key, value in data.items():
-            row_key = self._normalized_row_key(key, name)
-            if row_key is None:
+            if (row_key := self._normalized_row_key(key, name)) is None:
                 continue
             row_name, index = row_key
             if index < form_count:
@@ -971,7 +745,7 @@ class SequenceWidget(CompositeWidget):
                 )
         return rows
 
-    def _normalize_mapping(
+    def _normalized_datadict(
         self, data: Mapping[str, object], name: str
     ) -> MultiValueDict[str, object]:
         """Canonicalize accepted row spellings into Django-style keys and dense rows.
@@ -995,6 +769,9 @@ class SequenceWidget(CompositeWidget):
 
         # Keep formset control fields in the repeated-value shape Django expects.
         management_keys = {key for key in self.management_names(name) if key in data}
+        for key in management_keys:
+            normalized.setlist(key, values_for(key))
+
         if name in data:
             # Use the direct list value when both shapes are present.
             direct_value = values_for(name)
@@ -1003,21 +780,14 @@ class SequenceWidget(CompositeWidget):
                 # Build missing control fields for a direct Python list.
                 normalized[f"{name}-{TOTAL_FORM_COUNT}"] = str(len(direct_value))
                 normalized[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
-                return normalized
-            for key in management_keys:
-                normalized.setlist(key, values_for(key))
             return normalized
 
         overflowed_index = False
         row_inputs: list[tuple[int, str, list[object]]] = []
-        for key in management_keys:
-            normalized.setlist(key, values_for(key))
-
         for key in data:
             if key in management_keys:
                 continue
-            row_key = self._normalized_row_key(key, name)
-            if row_key is None:
+            if (row_key := self._normalized_row_key(key, name)) is None:
                 continue
             row_name, index = row_key
             if index >= self.absolute_max:
@@ -1070,24 +840,21 @@ class SequenceWidget(CompositeWidget):
         name: str,
         value: Sequence[object] | None,
         attrs: dict[str, Any] | None,
-        *,
-        management_data: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         """Build rows and use bound management data when it is available."""
         context = super().get_context(name, value, attrs)
-        context["widget"]["template_name"] = (
-            f"nestingdolls/sequence/{FormLayout.current().value}.html"
-        )
-        child_widget = self._child_widget()
+        child_widget = self._child_widget(self.child_field)
         if self.is_localized:
             child_widget.is_localized = True
 
+        if self.hidden_initial_value is not None:
+            value = cast(Sequence[object] | None, self.hidden_initial_value)
         # Keep runtime initials from expanding rendering without a bound.
         value = [] if value is None else list(islice(value, self.absolute_max))
-        if management_data is not None and any(
-            key in management_data for key in self.management_names(name)
+        if self.management_data is not None and any(
+            key in self.management_data for key in self.management_names(name)
         ):
-            management_form = ManagementForm(management_data, prefix=name)
+            management_form = ManagementForm(self.management_data, prefix=name)
             management_invalid = not management_form.is_valid()
             total_forms = cast(int, management_form.cleaned_data[TOTAL_FORM_COUNT])
             value = value[: max(0, min(total_forms, self.absolute_max))]
@@ -1120,20 +887,26 @@ class SequenceWidget(CompositeWidget):
             if self.child_field.disabled:
                 child_attrs["disabled"] = True
             if isinstance(child_widget, SequenceWidget):
-                child_context = child_widget.get_context(
-                    row_name,
-                    cast(Sequence[object] | None, item),
-                    child_attrs,
-                    management_data=management_data,
-                )
-            else:
-                child_context = child_widget.get_context(row_name, item, child_attrs)
-            return {
+                # Give a nested sequence the same management data, as
+                # MultiWidget gives its own input type to each subwidget.
+                child_widget.management_data = self.management_data
+                item = cast(Sequence[object] | None, item)
+            subwidget = child_widget.get_context(row_name, item, child_attrs)["widget"]
+            row: dict[str, object] = {
                 "index": index,
                 "delete_name": f"{row_name}-{DELETION_FIELD_NAME}",
-                "subwidget": child_context["widget"],
-                "errors": [],
+                "subwidget": subwidget,
+                "errors": self.row_errors.get(index, [])
+                if isinstance(index, int)
+                else [],
             }
+            if row["errors"]:
+                child_id = subwidget["attrs"].get("id")
+                error_id = f"{child_id}_error" if child_id else None
+                if error_id:
+                    row["error_id"] = error_id
+                self._mark_row_invalid(subwidget, error_id)
+            return row
 
         if not self.is_hidden:
             management_form.fields[TOTAL_FORM_COUNT].widget.attrs[
@@ -1142,21 +915,46 @@ class SequenceWidget(CompositeWidget):
         if disabled:
             for management_field in management_form.fields.values():
                 management_field.widget.attrs["disabled"] = True
-        rows = [make_row(index, item) for index, item in enumerate(value)]
 
         context["widget"].update(
             {
-                "rows": rows,
+                "rows": [
+                    make_row(index, item)
+                    for index, item in enumerate(value)
+                    if index not in self.deleted_indexes
+                ],
                 "empty_row": make_row("__prefix__", None),
                 "management_form": management_form,
                 "minimum_forms": self.min_length,
                 "maximum_forms": self.max_length,
                 "absolute_maximum_forms": self.absolute_max,
                 "disabled": disabled or management_invalid,
-                "is_hidden": self.is_hidden,
             }
         )
+        if self.deleted_indexes:
+            context["widget"]["deleted_rows"] = [
+                {"delete_name": f"{name}-{index}-{DELETION_FIELD_NAME}"}
+                for index in sorted(self.deleted_indexes)
+            ]
         return context
+
+    def _mark_row_invalid(
+        self, widget_context: dict[str, Any], error_id: str | None
+    ) -> None:
+        """Point every input of one row at that row's error list.
+
+        A MultiWidget copies the parent attributes into each child context, so
+        walk the tree and give each input the same row error reference.
+        """
+        child_attrs = widget_context["attrs"]
+        child_attrs["aria-invalid"] = "true"
+        if error_id:
+            described_by = child_attrs.get("aria-describedby")
+            child_attrs["aria-describedby"] = (
+                f"{described_by} {error_id}" if described_by else error_id
+            )
+        for child_context in widget_context.get("subwidgets", []):
+            self._mark_row_invalid(child_context, error_id)
 
     @property
     def is_hidden(self) -> bool:

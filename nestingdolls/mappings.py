@@ -8,21 +8,17 @@ from django.core.files.uploadedfile import UploadedFile
 from django.forms import BaseForm, Field
 from django.forms.boundfield import BoundField
 from django.forms.fields import FileField
-from django.forms.utils import ErrorList
 from django.forms.widgets import Media as WidgetMedia
-from django.forms.widgets import Widget
 from django.utils.datastructures import MultiValueDict
 from django.utils.functional import Promise, cached_property
-from django.utils.safestring import SafeString
 from django.utils.translation import gettext_lazy as _
 
-from nestingdolls._shared import CompositeWidget
+from nestingdolls._shared import CompositeBoundField, CompositeField, CompositeWidget
 from nestingdolls.errors import (
     InvalidInitialValueError,
     InvalidMappingInputError,
     ItemValidationError,
 )
-from nestingdolls.rendering import FormLayout
 
 __all__ = [
     "DictField",
@@ -47,70 +43,63 @@ class MappingWidget(CompositeWidget):
 
     _template_name = "nestingdolls/mapping/{layout}.html"
     use_fieldset = True
+    form_class: type[BaseForm]
+    # Submitted state that Widget.render() cannot pass to get_context(). The
+    # bound field sets it before each render.
+    subform: BaseForm | None = None
 
     def __init__(
         self,
-        form_class: type[BaseForm],
+        form_class: type[BaseForm] | None = None,
         attrs: Mapping[str, object] | None = None,
     ) -> None:
-        self.form_class = form_class
+        """Store the child Form class this widget renders.
+
+        Django builds this widget from its class, and gives it no Form class,
+        when a field supplies only the class. The field configures the copy.
+        """
+        if form_class is not None:
+            self.form_class = form_class
         super().__init__(dict(attrs) if attrs is not None else None)
 
     @cached_property
     def fields(self) -> dict[str, Field]:
         return self.form_class().fields
 
-    def _normalize_mapping(
+    def _normalized_child_key(self, key: object, name: str) -> str | None:
+        """Normalize one supported child key into its canonical declared name."""
+        if (child_key := self._split_child_key(key, name)) is None:
+            return None
+        token, suffix = child_key
+        key = f"{name}-{token}{suffix}"
+        # Drop undeclared keys so a matching prefix cannot retain untrusted data.
+        return (
+            key
+            if any(
+                key == f"{name}-{child_name}"
+                or key.startswith(f"{name}-{child_name}{separator}")
+                for child_name in self.fields
+                for separator in "_-.["
+            )
+            else None
+        )
+
+    def _normalized_datadict(
         self, data: Mapping[str, object], name: str
     ) -> Mapping[str, object]:
         """Canonicalize accepted child names while preserving source values."""
         if not data:
             return {}
 
-        flat_prefixes = (f"{name}-", f"{name}.")
-        bracket_prefix = f"{name}["
-
-        def normalized_key(key: object) -> str | None:
-            # Convert each supported input spelling to one child key format.
-            if not isinstance(key, str):
-                return None
-            for prefix in flat_prefixes:
-                if key.startswith(prefix) and len(key) > len(prefix):
-                    key = f"{name}-{key.removeprefix(prefix)}"
-                    break
-            else:
-                if not key.startswith(bracket_prefix):
-                    return None
-                end = key.find("]", len(bracket_prefix))
-                if end < 0:
-                    return None
-                child_name = key[len(bracket_prefix) : end]
-                suffix = key[end + 1 :]
-                if not child_name or suffix and suffix[0] not in "_-.[":
-                    return None
-                key = f"{name}-{child_name}{suffix}"
-            # Drop undeclared keys so a matching prefix cannot retain untrusted data.
-            return (
-                key
-                if any(
-                    key == f"{name}-{child_name}"
-                    or key.startswith(f"{name}-{child_name}{separator}")
-                    for child_name in self.fields
-                    for separator in "_-.["
-                )
-                else None
-            )
-
         if name in data:
             # Use the direct mapping value when both shapes are present.
             value = data.get(name)
             if not isinstance(value, Mapping):
                 return {name: value}
-            child_names = self.fields
             if isinstance(value, MultiValueDict):
                 # Keep repeated child values for widgets that read all values.
                 normalized = MultiValueDict[str, object]()
-                for child_name in child_names:
+                for child_name in self.fields:
                     if child_name in value:
                         normalized.setlist(
                             f"{name}-{child_name}", value.getlist(child_name)
@@ -119,7 +108,7 @@ class MappingWidget(CompositeWidget):
             # Keep direct mapping input from retaining undeclared data.
             return {
                 f"{name}-{child_name}": value[child_name]
-                for child_name in child_names
+                for child_name in self.fields
                 if child_name in value
             }
 
@@ -127,18 +116,17 @@ class MappingWidget(CompositeWidget):
             # Keep repeated flat input values in Django's multi-value shape.
             normalized = MultiValueDict[str, object]()
             for source_key in data:
-                key = normalized_key(source_key)
+                key = self._normalized_child_key(source_key, name)
                 if key is not None:
                     normalized.setlist(key, data.getlist(source_key))
             return normalized
 
         # Plain mappings keep one value for each child key.
-        normalized_dict: dict[str, object] = {}
-        for source_key, value in data.items():
-            key = normalized_key(source_key)
-            if key is not None:
-                normalized_dict[key] = value
-        return normalized_dict
+        return {
+            key: value
+            for source_key, value in data.items()
+            if (key := self._normalized_child_key(source_key, name)) is not None
+        }
 
     def _value_from_normalized_data(
         self,
@@ -166,63 +154,30 @@ class MappingWidget(CompositeWidget):
             )
         return value
 
-    def _child_widget(self, field: Field) -> Widget:
-        """Return the child widget for this composite widget's current mode."""
-        return self._hidden_child_widget(field) if super().is_hidden else field.widget
-
-    def _normalize_hidden_initial(self, field: Field, value: object) -> object:
-        """Normalize submitted hidden child values recursively."""
-        value = field.to_python(value)
-        if not isinstance(value, dict):
-            return value
-        for name, child_field in self.fields.items():
-            if name not in value or isinstance(child_field, FileField):
-                continue
-            if isinstance(child_field.widget, CompositeWidget):
-                value[name] = child_field.widget._normalize_hidden_initial(
-                    child_field, value[name]
-                )
-            else:
-                value[name] = child_field.to_python(value[name])
-        return value
-
-    def value_from_datadict(
-        self,
-        data: Mapping[str, object],
-        files: Mapping[str, object],
-        name: str,
-    ) -> object:
-        """Return the submitted mapping extracted by child widgets."""
-        return self._value_from_normalized_data(
-            self._normalize_mapping(data, name),
-            self._normalize_mapping(files, name) if files else {},
-            name,
-        )
-
     def get_context(
         self, name: str, value: object, attrs: dict[str, Any] | None
     ) -> dict[str, Any]:
         """Build widget context with a prefixed child Form."""
         context = super().get_context(name, value, attrs)
-        layout = FormLayout.current()
-        if not isinstance(value, BaseForm):
-            value = self.form_class(
+        subform = self.subform
+        if subform is None:
+            if self.hidden_initial_value is not None:
+                value = self.hidden_initial_value
+            subform = self.form_class(
                 initial=dict(value) if isinstance(value, Mapping) else {},
                 prefix=name,
                 use_required_attribute=self.is_required,
             )
         context["widget"].update(
             {
-                "layout": layout.value,
-                "template_name": f"nestingdolls/mapping/{layout.value}.html",
-                "subform": value,
-                "visible_fields": value.visible_fields(),
+                "subform": subform,
+                "visible_fields": subform.visible_fields(),
                 "hidden_fields": (
-                    [field.as_hidden() for field in value]
+                    [field.as_hidden() for field in subform]
                     if self.is_hidden
-                    else value.hidden_fields()
+                    else subform.hidden_fields()
                 ),
-                "non_field_errors": value.non_field_errors(),
+                "non_field_errors": subform.non_field_errors(),
             }
         )
         return context
@@ -230,7 +185,7 @@ class MappingWidget(CompositeWidget):
     @property
     def is_hidden(self) -> bool:
         """Report whether the mapping or every child widget is hidden."""
-        return self.input_type == "hidden" or all(
+        return super().is_hidden or all(
             field.widget.is_hidden for field in self.fields.values()
         )
 
@@ -241,11 +196,12 @@ class MappingWidget(CompositeWidget):
 
     @property
     def media(self) -> WidgetMedia:
-        """Return the child Form widget media."""
-        return self.form_class().media
+        """Return this widget's media with the child Form media."""
+        media: WidgetMedia = super().media + self.form_class().media
+        return media
 
 
-class MappingBoundField(BoundField):
+class MappingBoundField(CompositeBoundField):
     """Render child Form errors without duplicating them on the parent field."""
 
     field: MappingField
@@ -255,59 +211,13 @@ class MappingBoundField(BoundField):
         if not isinstance(self.field, MappingField):
             raise TypeError("field must be a MappingField")
 
-    @property
-    def errors(self) -> ErrorList:
-        """Return only errors owned by the outer mapping field."""
-        errors = super().errors
-        if not errors:
-            return errors
-        field_errors = []
-        for error in errors.as_data():
-            if isinstance(error, ItemValidationError):
-                continue
-            field_errors.append(error)
-        if len(field_errors) == len(errors):
-            return errors
-        return self.form.error_class(
-            field_errors,
-            renderer=self.form.renderer,
-            field_id=self.auto_id,
-        )
-
-    @cached_property
-    def _data_input(self) -> Mapping[str, object]:
-        """Cache normalized submitted form data for this field."""
-        return self.field.widget._normalize_mapping(self.form.data, self.html_name)
-
-    @cached_property
-    def _file_input(self) -> Mapping[str, object]:
-        """Cache normalized submitted files for this field."""
-        if not self.form.files:
-            return {}
-        return self.field.widget._normalize_mapping(self.form.files, self.html_name)
-
-    @cached_property
-    def data(self) -> object:
-        """Return the mapping extracted from normalized data and files."""
-        return self.field.widget._value_from_normalized_data(
-            self._data_input,
-            self._file_input,
-            self.html_name,
-        )
-
     @cached_property
     def initial(self) -> object:
         """Normalize recognized mapping initials and preserve invalid ones."""
         if self.form.initial and self.name not in self.form.initial:
-            normalized = self.field.widget._normalize_mapping(
-                self.form.initial, self.name
-            )
-            if normalized:
-                value = self.field.widget._value_from_normalized_data(
-                    normalized, {}, self.name
-                )
-                if isinstance(value, Mapping) and value:
-                    return self.field._initial_value(value)
+            value = self._flat_initial_value(self.form.initial)
+            if isinstance(value, Mapping) and value:
+                return self.field._initial_value(value)
         value = super().initial
         try:
             return self.field._initial_value(value)
@@ -352,77 +262,15 @@ class MappingBoundField(BoundField):
                 field.disabled = True
         return subform
 
-    def as_widget(
-        self,
-        widget: Widget | None = None,
-        attrs: dict[str, str | bool] | None = None,
-        only_initial: bool = False,
-    ) -> SafeString:
-        """Render the cached child Form through the mapping widget."""
-        widget = widget or self.field.widget
-        if not isinstance(widget, MappingWidget):
-            return super().as_widget(widget, attrs, only_initial)
-        if self.field.localize:
-            widget.is_localized = True
-        attrs = self.build_widget_attrs(dict(attrs or {}), widget)
-        if self.auto_id and "id" not in widget.attrs:
-            attrs.setdefault(
-                "id", self.html_initial_id if only_initial else self.auto_id
-            )
-        if only_initial:
-            name = self.html_initial_name
-            normalized_data = widget._normalize_mapping(self.form.data, name)
-            normalized_files = (
-                widget._normalize_mapping(self.form.files, name)
-                if self.form.files
-                else {}
-            )
-            value = (
-                widget._value_from_normalized_data(
-                    normalized_data, normalized_files, name
-                )
-                if normalized_data or normalized_files
-                else self.value()
-            )
-            return widget.render(
-                name,
-                value,
-                attrs=attrs,
-                renderer=self.form.renderer,
-            )
-        return widget.render(
-            self.html_name,
-            self.subform,
-            attrs=attrs,
-            renderer=self.form.renderer,
-        )
-
-    def as_hidden(
-        self,
-        attrs: dict[str, str | bool] | None = None,
-        **kwargs: Any,
-    ) -> SafeString:
-        """Render each child through its own hidden widget."""
-        return self.as_widget(self.field.widget.hidden_widget(), attrs, **kwargs)
-
-    def _has_changed(self) -> bool:
-        """Read hidden mapping initial values through the mapping widget."""
-        if self.field.disabled:
-            return False
-        if not self.field.show_hidden_initial:
-            return cast(bool, super()._has_changed())  # type: ignore[misc]
-        widget = self.field.widget.hidden_widget()
-        initial_value = widget.value_from_datadict(
-            self.form.data, self.form.files, self.html_initial_name
-        )
-        try:
-            initial_value = widget._normalize_hidden_initial(self.field, initial_value)
-        except (TypeError, ValidationError):
-            return True
-        return self.field.has_changed(initial_value, self.data)
+    def _prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
+        """Give the mapping widget the child Form that holds the bound data."""
+        super()._prepare_widget(widget, only_initial)
+        if isinstance(widget, MappingWidget):
+            # A hidden initial render builds its own Form, with the initial prefix.
+            widget.subform = None if only_initial else self.subform
 
 
-class MappingField(Field):
+class MappingField(CompositeField):
     """Validate a fixed mapping shape with one child Form class."""
 
     widget: MappingWidget
@@ -465,22 +313,14 @@ class MappingField(Field):
             self._initial_value(initial)
 
         self.form_class = form_class
-        widget = MappingWidget if widget is None else widget
-        if not (
-            isinstance(widget, MappingWidget)
-            or isinstance(widget, type)
-            and issubclass(widget, MappingWidget)
-        ):
-            raise TypeError("widget must be a MappingWidget instance or subclass")
-        if isinstance(widget, type):
-            widget = widget(form_class)
-
         bound_field_class = bound_field_class or self.bound_field_class
         if not issubclass(bound_field_class, MappingBoundField):
             raise TypeError("bound_field_class must inherit from MappingBoundField")
         super().__init__(
             required=required,
-            widget=widget,
+            # Django builds a widget class and copies a widget instance. The
+            # configuration below then makes that copy match this field.
+            widget=widget or MappingWidget,
             label=label,  # type: ignore[arg-type]
             initial=initial,
             help_text=help_text,  # type: ignore[arg-type]
@@ -493,6 +333,8 @@ class MappingField(Field):
             template_name=template_name,
             bound_field_class=bound_field_class,
         )
+        if not isinstance(self.widget, MappingWidget):
+            raise TypeError("widget must be a MappingWidget instance or subclass")
         # Django copies the widget. Configure that copy to match this field.
         self.widget.form_class = form_class
 
@@ -513,29 +355,26 @@ class MappingField(Field):
             raise InvalidMappingInputError(self.error_messages["invalid"])
         return dict(value)
 
-    @staticmethod
-    def _form_errors(form: BaseForm) -> list[ValidationError]:
-        errors: list[ValidationError] = []
-        for key, error_list in form.errors.as_data().items():
-            for error in error_list:
-                for message in error.messages:
-                    errors.append(
-                        ItemValidationError(
-                            key,
-                            message,
-                            ValidationError(
-                                message,
-                                code=(error.params or {}).get("child_code", error.code),
-                                params=error.params,
-                            ),
-                        )
-                    )
-        return errors
+    def children_from_hidden_initial(self, value: object, /) -> object:
+        """Convert each member back from its hidden initial value."""
+        # to_python() gives a mapping of members here, or raises for other input.
+        value = cast(dict[str, object], super().children_from_hidden_initial(value))
+        for name, child_field in self.form_class().fields.items():
+            if name in value and not isinstance(child_field, FileField):
+                value[name] = self.hidden_initial_to_python(child_field, value[name])
+        return value
 
     def _clean_form(self, form: BaseForm) -> dict[str, object]:
         """Return child cleaned data or raise its leaf errors."""
         if not form.is_valid():
-            raise ValidationError(self._form_errors(form))
+            raise ValidationError(
+                [
+                    item_error
+                    for name, errors in form.errors.as_data().items()
+                    for error in errors
+                    for item_error in ItemValidationError.for_messages_of(name, error)
+                ]
+            )
         result: dict[str, object] = form.cleaned_data
         self.validate(result)
         self.run_validators(result)
@@ -590,11 +429,11 @@ class MappingField(Field):
     def prepare_value(self, value: object) -> object:
         """Prepare each mapping member for widget rendering."""
         try:
-            mapping = self._initial_value(value)
+            value = self._initial_value(value)
             return {
-                name: field.prepare_value(mapping[name])
+                name: field.prepare_value(value[name])
                 for name, field in self.form_class().fields.items()
-                if name in mapping
+                if name in value
             }
         except (InvalidInitialValueError, ValidationError):
             return super().prepare_value(value)

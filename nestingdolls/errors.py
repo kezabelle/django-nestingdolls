@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from django.core.exceptions import ValidationError
 
@@ -70,6 +70,28 @@ class ItemValidationError(ValidationError):
                 "child_code": child_error.code,
             },
         )
+
+    @classmethod
+    def for_messages_of(cls, item: int | str, error: ValidationError, /) -> list[Self]:
+        """Return one item error for each message a child error carries.
+
+        Each message keeps its own code, parameters, and translation, and records
+        the item it came from. Django flattens a composite error to its leaves, so
+        one error for each message is what keeps that item recorded.
+        """
+        return [
+            cls(
+                item,
+                message,
+                ValidationError(
+                    message,
+                    code=(leaf.params or {}).get("child_code", leaf.code),
+                    params=leaf.params,
+                ),
+            )
+            for leaf in error.error_list
+            for message in leaf.messages
+        ]
 
 
 class InvalidMappingInputError(ValidationError):

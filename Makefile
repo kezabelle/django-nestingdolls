@@ -35,11 +35,11 @@ mypy: ## Run mypy with strict checks.
 test: ## Run the Django test files.
 	$(PYTHON) -W error::DeprecationWarning -W error::PendingDeprecationWarning -m unittest test_listfield test_dictfield test_patches
 
-agents: ## Update the generated field method reference in nestingdolls/AGENTS.md.
+agents: ## Update the generated method reference in nestingdolls/AGENTS.md.
 	$(PYTHON) scripts/update_package_agents.py
 
 check: ## Update generated docs and run all fast checks.
-check: tscheck jstest ruff format mypy test agents
+check: tscheck jstest ruff format test mypy agents
 
 crosshair: ## Confirm the small set of independent semantic models.
 	$(CROSSHAIR) check --report_all --max_uninteresting_iterations=25 --per_condition_timeout=12 proof_listfield.prove_sequence_direct_extraction proof_dictfield.prove_mapping_direct_precedence proof_dictfield.prove_mapping_hostile_fallback

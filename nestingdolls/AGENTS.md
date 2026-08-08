@@ -17,13 +17,27 @@ normal Django behavior and uses JavaScript only for progressive enhancement.
 - `TupleField`, `SetField`, and `FrozenSetField` return other collection types.
 - Mapping and sequence widgets and bound fields are advanced integration hooks.
 - `InvalidInitialValueError` reports an invalid initial value.
+- `CompositeWidget`, `CompositeBoundField`, and `CompositeField` in `_shared.py`
+  are internal. They hold shared behavior to avoid writing it twice.
 
 ## Generated method reference
 
-Do not edit the text between the generated markers. Change the source or the
-generator, and then run `make agents`.
+This section lists the methods that each field, widget, and bound field in this
+package defines. Do not edit the text between the generated markers. Change the
+source or the generator, and then run `make agents`.
 
-<!-- BEGIN GENERATED FIELD METHODS -->
+<!-- BEGIN GENERATED METHOD REFERENCE -->
+
+### CompositeField
+
+#### Overrides parent methods
+
+- `hidden_widget`
+
+#### Methods introduced here
+
+- `hidden_initial_to_python`
+- `children_from_hidden_initial`
 
 ### MappingField
 
@@ -31,13 +45,16 @@ generator, and then run `make agents`.
 
 - `__init__`
 - `to_python`
+- `children_from_hidden_initial`
 - `clean`
 - `_clean_bound_field`
 - `bound_data`
 - `prepare_value`
 - `has_changed`
+
 #### Methods introduced here
 
+- `_initial_value`
 - `_clean_form`
 
 ### DictField
@@ -59,14 +76,17 @@ Alias of `MappingField`. It defines no methods of its own.
 - `__init__`
 - `__deepcopy__`
 - `to_python`
+- `children_from_hidden_initial`
 - `clean`
 - `_clean_bound_field`
 - `validate`
 - `bound_data`
 - `prepare_value`
 - `has_changed`
+
 #### Methods introduced here
 
+- `_initial_values`
 - `_clean_values`
 - `compress`
 
@@ -96,7 +116,114 @@ Alias of `FrozenSequenceField`. It defines no methods of its own.
 `FrozenSetField` defines no methods of its own.
 It inherits `SetField` behavior.
 
-<!-- END GENERATED FIELD METHODS -->
+### CompositeWidget
+
+#### Overrides parent methods
+
+- `value_from_datadict`
+- `value_omitted_from_data`
+- `use_required_attribute`
+- `id_for_label`
+- `media`
+
+#### Methods introduced here
+
+- `_child_widget`
+- `template_name`
+- `_normalized_datadict`
+- `_value_from_normalized_data`
+- `_split_child_key`
+
+### MappingWidget
+
+#### Overrides parent methods
+
+- `__init__`
+- `_normalized_datadict`
+- `_value_from_normalized_data`
+- `get_context`
+- `is_hidden`
+- `needs_multipart_form`
+- `media`
+
+#### Methods introduced here
+
+- `fields`
+- `_normalized_child_key`
+
+### SequenceWidget
+
+#### Overrides parent methods
+
+- `__init__`
+- `_value_from_normalized_data`
+- `_normalized_datadict`
+- `get_context`
+- `is_hidden`
+- `needs_multipart_form`
+- `media`
+
+#### Methods introduced here
+
+- `management_names`
+- `_normalized_row_key`
+- `_rows_from_normalized_data`
+- `_mark_row_invalid`
+
+### CompositeBoundField
+
+#### Overrides parent methods
+
+- `errors`
+- `data`
+- `as_widget`
+- `_has_changed`
+
+#### Methods introduced here
+
+- `_all_errors`
+- `_data_input`
+- `_file_input`
+- `_prepare_widget`
+- `_hidden_initial_value`
+- `_flat_initial_value`
+
+### MappingBoundField
+
+#### Overrides parent methods
+
+- `__init__`
+- `initial`
+- `_prepare_widget`
+
+#### Methods introduced here
+
+- `_is_bound_subform`
+- `subform`
+
+### SequenceBoundField
+
+#### Overrides parent methods
+
+- `__init__`
+- `_prepare_widget`
+- `initial`
+- `_has_changed`
+
+#### Methods introduced here
+
+- `_item_errors`
+- `_management_form`
+- `_deleted_indexes`
+- `_omitted_indexes`
+
+### _ValueBoundField
+
+#### Overrides parent methods
+
+- `data`
+
+<!-- END GENERATED METHOD REFERENCE -->
 
 ## Verification
 
@@ -142,6 +269,9 @@ It inherits `SetField` behavior.
 ## Source map
 
 - Public exports: `nestingdolls/__init__.py`
+- Shared composite widget, bound-field, and field behavior:
+  `nestingdolls/_shared.py`
+- Composite error types, including child-error wrapping: `nestingdolls/errors.py`
 - Mapping fields: `nestingdolls/mappings.py`,
   `nestingdolls/templates/nestingdolls/mapping/`, `test_dictfield.py`, and
   `proof_dictfield.py`

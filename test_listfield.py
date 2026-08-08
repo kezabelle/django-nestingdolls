@@ -700,7 +700,7 @@ class SequenceFieldTestCase(SimpleTestCase):
             **{f"values-0-{index}": "value" for index in range(3)},
         }
 
-        normalized = widget._normalize_mapping(data, "values")
+        normalized = widget._normalized_datadict(data, "values")
 
         self.assertEqual(normalized[f"values-{TOTAL_FORM_COUNT}"], "3")
 
@@ -713,9 +713,9 @@ class SequenceFieldTestCase(SimpleTestCase):
         class CountingWidget(nestingdolls.MappingWidget):
             key_visits = 0
 
-            def _normalize_mapping(self, data, name):
+            def _normalized_datadict(self, data, name):
                 type(self).key_visits += len(data)
-                return super()._normalize_mapping(data, name)
+                return super()._normalized_datadict(data, name)
 
         class Form(forms.Form):
             values = nestingdolls.ListField(
@@ -759,7 +759,7 @@ class SequenceFieldTestCase(SimpleTestCase):
                 form = SparseForm(data)
                 self.assertIs(form.is_valid(), True, form.errors)
                 self.assertEqual(form.cleaned_data["values"], [False, True])
-                normalized = form.fields["values"].widget._normalize_mapping(
+                normalized = form.fields["values"].widget._normalized_datadict(
                     form.data, "values"
                 )
                 self.assertEqual(normalized[f"values-{TOTAL_FORM_COUNT}"], "2")
@@ -770,7 +770,7 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertEqual(
             long_index.errors.as_data()["values"][0].code, "too_many_forms"
         )
-        normalized = long_index.fields["values"].widget._normalize_mapping(
+        normalized = long_index.fields["values"].widget._normalized_datadict(
             long_index.data, "values"
         )
         self.assertIs(any(key.startswith("values-1001") for key in normalized), False)
@@ -2909,9 +2909,9 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         class CountingWidget(nestingdolls.SequenceWidget):
             normalizations = 0
 
-            def _normalize_mapping(self, data, name):
+            def _normalized_datadict(self, data, name):
                 type(self).normalizations += 1
-                return super()._normalize_mapping(data, name)
+                return super()._normalized_datadict(data, name)
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), widget=CountingWidget)
@@ -2928,9 +2928,9 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         class CountingWidget(nestingdolls.SequenceWidget):
             normalizations = 0
 
-            def _normalize_mapping(self, data, name):
+            def _normalized_datadict(self, data, name):
                 type(self).normalizations += 1
-                return super()._normalize_mapping(data, name)
+                return super()._normalized_datadict(data, name)
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), widget=CountingWidget)
@@ -3547,8 +3547,8 @@ class SequenceParserPropertyTestCase(SimpleTestCase):
         self, data, files
     ):
         """Arbitrary keys cannot escape the canonical bounded parser contract."""
-        normalized = PARSER_WIDGET._normalize_mapping(data, "values")
-        renormalized = PARSER_WIDGET._normalize_mapping(normalized, "values")
+        normalized = PARSER_WIDGET._normalized_datadict(data, "values")
+        renormalized = PARSER_WIDGET._normalized_datadict(normalized, "values")
         self.assertEqual(renormalized, normalized)
 
         management_names = PARSER_WIDGET.management_names("values")
@@ -3563,7 +3563,7 @@ class SequenceParserPropertyTestCase(SimpleTestCase):
 
         unrelated = {f"other:{key}": value for key, value in data.items()}
         self.assertEqual(
-            PARSER_WIDGET._normalize_mapping(data | unrelated, "values"), normalized
+            PARSER_WIDGET._normalized_datadict(data | unrelated, "values"), normalized
         )
         value = PARSER_WIDGET.value_from_datadict(data, files, "values")
         self.assertLessEqual(len(value), PARSER_WIDGET.absolute_max)

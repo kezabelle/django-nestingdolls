@@ -809,9 +809,9 @@ class DictFieldRenderingTestCase(SimpleTestCase):
         class CountingWidget(nestingdolls.MappingWidget):
             normalizations = 0
 
-            def _normalize_mapping(self, data, name):
+            def _normalized_datadict(self, data, name):
                 type(self).normalizations += 1
-                return super()._normalize_mapping(data, name)
+                return super()._normalized_datadict(data, name)
 
         class Form(forms.Form):
             point = nestingdolls.MappingField(PointForm, widget=CountingWidget)
@@ -924,7 +924,7 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
         widget = nestingdolls.MappingWidget(ChildForm)
 
         self.assertEqual(
-            widget._normalize_mapping(
+            widget._normalized_datadict(
                 {"value-title": "kept", "value-untrusted": "ignored"}, "value"
             ),
             {"value-title": "kept"},
@@ -1741,15 +1741,17 @@ class DictFieldPropertyTestCase(SimpleTestCase):
         widget = Form.base_fields["point"].widget
         child_count = len(PointForm.base_fields)
         for source in (data, files):
-            normalized = widget._normalize_mapping(source, "point")
-            self.assertEqual(widget._normalize_mapping(normalized, "point"), normalized)
+            normalized = widget._normalized_datadict(source, "point")
+            self.assertEqual(
+                widget._normalized_datadict(normalized, "point"), normalized
+            )
             self.assertLessEqual(len(normalized), max(len(source), child_count))
             for key in normalized:
                 self.assertIs(key == "point" or key.startswith("point-"), True, key)
 
             unrelated = {f"other:{key}": value for key, value in source.items()}
             self.assertEqual(
-                widget._normalize_mapping(source | unrelated, "point"), normalized
+                widget._normalized_datadict(source | unrelated, "point"), normalized
             )
 
         widget.value_from_datadict(data, files, "point")

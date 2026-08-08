@@ -1,58 +1,59 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable
 from pathlib import Path
 
-import nestingdolls
+from django.utils.functional import cached_property
 
-BEGIN_MARKER = "<!-- BEGIN GENERATED FIELD METHODS -->"
-END_MARKER = "<!-- END GENERATED FIELD METHODS -->"
+import nestingdolls
+from nestingdolls import _shared, mappings
+
+BEGIN_MARKER = "<!-- BEGIN GENERATED METHOD REFERENCE -->"
+END_MARKER = "<!-- END GENERATED METHOD REFERENCE -->"
 AGENTS_PATH = Path("nestingdolls/AGENTS.md")
 
 
-def defined_methods(cls: type[object]) -> list[tuple[str, Callable[..., object]]]:
-    methods: list[tuple[str, Callable[..., object]]] = []
-    for name, value in cls.__dict__.items():
-        if inspect.isfunction(value):
-            methods.append((name, value))
-    return methods
+def defined_methods(cls: type[object]) -> list[str]:
+    """Return the method-like names that the class body defines, in source order."""
+    return [
+        name
+        for name, value in cls.__dict__.items()
+        if inspect.isfunction(value)
+        or isinstance(value, (staticmethod, classmethod, property, cached_property))
+    ]
 
 
-def split_methods(
-    cls: type[object],
-) -> tuple[
-    list[tuple[str, Callable[..., object]]], list[tuple[str, Callable[..., object]]]
-]:
-    overrides: list[tuple[str, Callable[..., object]]] = []
-    introduced: list[tuple[str, Callable[..., object]]] = []
+def split_methods(cls: type[object]) -> tuple[list[str], list[str]]:
+    overrides: list[str] = []
+    introduced: list[str] = []
     parents = cls.__mro__[1:]
-    for name, value in defined_methods(cls):
+    for name in defined_methods(cls):
         if any(hasattr(parent, name) for parent in parents):
-            overrides.append((name, value))
+            overrides.append(name)
         else:
-            introduced.append((name, value))
+            introduced.append(name)
     return overrides, introduced
 
 
-def render_method(name: str) -> str:
-    return f"- `{name}`"
-
-
-def render_method_group(
-    title: str, methods: list[tuple[str, Callable[..., object]]]
-) -> list[str]:
+def render_method_group(title: str, methods: list[str]) -> list[str]:
     if not methods:
         return []
     return [
         f"#### {title}",
         "",
-        *(render_method(name) for name, _ in methods),
+        *(f"- `{name}`" for name in methods),
+        "",
     ]
 
 
 def render_class_section(cls: type[object]) -> list[str]:
     overrides, introduced = split_methods(cls)
+    if not overrides and not introduced:
+        return [
+            f"### {cls.__name__}",
+            "",
+            f"`{cls.__name__}` defines no methods of its own.",
+        ]
     section = [
         f"### {cls.__name__}",
         "",
@@ -85,6 +86,8 @@ def render_generated_block() -> str:
     sections: list[str] = [
         BEGIN_MARKER,
         "",
+        *render_class_section(_shared.CompositeField),
+        "",
         *render_class_section(nestingdolls.MappingField),
         "",
         *render_alias_section("DictField", "MappingField"),
@@ -105,6 +108,20 @@ def render_generated_block() -> str:
         "",
         *render_inherited_section("FrozenSetField", "SetField"),
         "",
+        *render_class_section(_shared.CompositeWidget),
+        "",
+        *render_class_section(nestingdolls.MappingWidget),
+        "",
+        *render_class_section(nestingdolls.SequenceWidget),
+        "",
+        *render_class_section(_shared.CompositeBoundField),
+        "",
+        *render_class_section(nestingdolls.MappingBoundField),
+        "",
+        *render_class_section(nestingdolls.SequenceBoundField),
+        "",
+        *render_class_section(mappings._ValueBoundField),
+        "",
         END_MARKER,
     ]
     return "\n".join(sections)
@@ -115,7 +132,7 @@ def replace_generated_block(text: str, block: str) -> str:
     end_count = text.count(END_MARKER)
     if begin_count != 1 or end_count != 1:
         raise RuntimeError(
-            "Expected exactly one generated field-method block in nestingdolls/AGENTS.md"
+            "Expected exactly one generated method reference block in nestingdolls/AGENTS.md"
         )
     start = text.index(BEGIN_MARKER)
     end = text.index(END_MARKER) + len(END_MARKER)

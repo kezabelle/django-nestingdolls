@@ -14,8 +14,7 @@ from django.forms.renderers import DjangoTemplates, TemplatesSetting
 from django.test import SimpleTestCase, override_settings
 
 import nestingdolls
-from nestingdolls.patches import install_form_rendering_patch
-from nestingdolls.rendering import FormLayout
+from nestingdolls.patches import FormLayout, install_form_rendering_patch
 
 if not settings.configured:
     settings.configure(
