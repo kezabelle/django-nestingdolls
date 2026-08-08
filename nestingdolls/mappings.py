@@ -17,8 +17,8 @@ from django.utils.translation import gettext_lazy as _
 from nestingdolls._shared import CompositeBoundField, CompositeField, CompositeWidget
 from nestingdolls.errors import (
     InvalidInitialValueError,
-    InvalidMappingInputError,
     ItemValidationError,
+    MappingInputValidationError,
 )
 
 __all__ = [
@@ -454,7 +454,7 @@ class MappingField(CompositeField):
         if value is None or value == "":
             return {}
         if not isinstance(value, Mapping):
-            raise InvalidMappingInputError(self.error_messages["invalid"])
+            raise MappingInputValidationError(self.error_messages["invalid"])
         return dict(value)
 
     def children_from_hidden_initial(self, value: object, /) -> object:

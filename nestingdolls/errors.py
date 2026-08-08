@@ -11,8 +11,8 @@ else:
 
 __all__ = [
     "InvalidInitialValueError",
-    "InvalidMappingInputError",
     "ItemValidationError",
+    "MappingInputValidationError",
     "MissingManagementFormValidationError",
     "SequenceInputValidationError",
     "TooManyFormsValidationError",
@@ -20,7 +20,56 @@ __all__ = [
 
 
 class InvalidInitialValueError(ValueError):
-    """Raised when composite-field initial data has the wrong shape."""
+    """Composite-field initial data has the wrong shape."""
+
+
+class ItemValidationError(ValidationError):
+    """A child item failed validation inside a composite field."""
+
+    item: int | str
+    child_code: str | None
+    child_message: str
+
+    def __init__(
+        self, message: str, *, item: int | str, child_code: str | None
+    ) -> None:
+        # ``message`` is a rendered child message, never a lazy string: it always
+        # arrives from ``ValidationError.messages``, which forces its translation.
+        self.item = item
+        self.child_code = child_code
+        self.child_message = message
+        super().__init__(
+            # Django renders ``message % params`` whenever params is set, so a
+            # child message that carries a literal percent sign must escape it.
+            message.replace("%", "%%"),
+            code="item_invalid",
+            params={"item": item, "message": message, "child_code": child_code},
+        )
+
+    @classmethod
+    def for_messages_of(cls, item: int | str, error: ValidationError, /) -> list[Self]:
+        """Return one item error for each message a child error carries.
+
+        Each message keeps its own code, parameters, and translation, and records
+        the item it came from. Django flattens a composite error to its leaves, so
+        one error for each message is what keeps that item recorded.
+        """
+        return [
+            cls(
+                message,
+                item=item,
+                child_code=(leaf.params or {}).get("child_code", leaf.code),
+            )
+            for leaf in error.error_list
+            for message in leaf.messages
+        ]
+
+
+class MappingInputValidationError(ValidationError):
+    """The outer submitted mapping value has the wrong shape."""
+
+    def __init__(self, message: str | StrPromise) -> None:
+        super().__init__(message, code="invalid")
 
 
 class SequenceInputValidationError(ValidationError):
@@ -46,56 +95,3 @@ class TooManyFormsValidationError(ValidationError):
 
     def __init__(self, message: str | StrPromise, *, num: int) -> None:
         super().__init__(message, code="too_many_forms", params={"num": num})
-
-
-class ItemValidationError(ValidationError):
-    """A child item failed validation inside a composite field."""
-
-    item: int | str
-    child_error: ValidationError
-    child_code: str | None
-
-    def __init__(
-        self, item: int | str, message: str, child_error: ValidationError
-    ) -> None:
-        self.item = item
-        self.child_error = child_error
-        self.child_code = child_error.code
-        super().__init__(
-            message,
-            code="item_invalid",
-            params={
-                "item": item,
-                "message": message,
-                "child_code": child_error.code,
-            },
-        )
-
-    @classmethod
-    def for_messages_of(cls, item: int | str, error: ValidationError, /) -> list[Self]:
-        """Return one item error for each message a child error carries.
-
-        Each message keeps its own code, parameters, and translation, and records
-        the item it came from. Django flattens a composite error to its leaves, so
-        one error for each message is what keeps that item recorded.
-        """
-        return [
-            cls(
-                item,
-                message,
-                ValidationError(
-                    message,
-                    code=(leaf.params or {}).get("child_code", leaf.code),
-                    params=leaf.params,
-                ),
-            )
-            for leaf in error.error_list
-            for message in leaf.messages
-        ]
-
-
-class InvalidMappingInputError(ValidationError):
-    """The outer submitted mapping value has the wrong shape."""
-
-    def __init__(self, message: str | StrPromise) -> None:
-        super().__init__(message, code="invalid")

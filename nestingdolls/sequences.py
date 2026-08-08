@@ -149,7 +149,7 @@ class SequenceBoundField(CompositeBoundField):
                 if isinstance(error, ItemValidationError) and isinstance(
                     error.item, int
                 ):
-                    row_errors.setdefault(error.item, []).append(error.message)
+                    row_errors.setdefault(error.item, []).append(error.child_message)
             return row_errors
 
     @cached_property

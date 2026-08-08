@@ -1270,6 +1270,60 @@ class SequenceFieldTestCase(SimpleTestCase):
             ["first_code", "second_code"],
         )
 
+    def test_item_error_message_with_a_percent_sign_renders_literally(self):
+        """It renders a child message that carries a literal percent sign."""
+
+        class PercentField(forms.Field):
+            def clean(self, value):
+                raise ValidationError("50% off is required", code="required")
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(PercentField())
+
+        form = Form(
+            QueryDict(
+                f"values-{TOTAL_FORM_COUNT}=1&values-{INITIAL_FORM_COUNT}=0&values-0=x"
+            )
+        )
+        self.assertIs(form.is_valid(), False)
+        error = form.errors.as_data()["values"][0]
+        self.assertEqual(error.messages, ["50% off is required"])
+        self.assertEqual(error.params["message"], "50% off is required")
+        html = form.as_p()
+        self.assertIn("50% off is required", html)
+        self.assertNotIn("50%% off", html)
+
+    def test_lazy_item_error_message_with_a_percent_sign_renders_literally(self):
+        """It renders a lazy child message that substitutes a percent sign."""
+
+        class LazyPercentField(forms.Field):
+            def clean(self, value):
+                raise ValidationError(
+                    translation.gettext_lazy("%(pct)s%% off is required"),
+                    code="required",
+                    params={"pct": 50},
+                )
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(LazyPercentField())
+
+        form = Form(
+            QueryDict(
+                f"values-{TOTAL_FORM_COUNT}=1&values-{INITIAL_FORM_COUNT}=0&values-0=x"
+            )
+        )
+        self.assertIs(form.is_valid(), False)
+        error = form.errors.as_data()["values"][0]
+        self.assertEqual(error.messages, ["50% off is required"])
+        self.assertEqual(error.child_message, "50% off is required")
+        self.assertEqual(error.params["message"], "50% off is required")
+        self.assertEqual(
+            dict(form["values"].submitted.errors), {0: ["50% off is required"]}
+        )
+        html = form.as_p()
+        self.assertIn("50% off is required", html)
+        self.assertNotIn("50%% off", html)
+
     def test_flattened_initial_sequence_falls_back_to_the_field_initial(self):
         """It uses flattened rows when present and Django's initial otherwise."""
 

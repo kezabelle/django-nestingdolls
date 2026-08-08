@@ -346,7 +346,7 @@ class DictFieldTestCase(SimpleTestCase):
         self.assertIs(form.is_valid(), False)
         self.assertIsInstance(
             form.errors.as_data()["point"][0],
-            nestingdolls.InvalidMappingInputError,
+            nestingdolls.MappingInputValidationError,
         )
         self.assertEqual(form.errors.as_data()["point"][0].code, "invalid")
 
@@ -1963,7 +1963,7 @@ class PublicApiTestCase(SimpleTestCase):
             issubclass(nestingdolls.ItemValidationError, ValidationError), True
         )
         self.assertIs(
-            issubclass(nestingdolls.InvalidMappingInputError, ValidationError), True
+            issubclass(nestingdolls.MappingInputValidationError, ValidationError), True
         )
 
     def test_mapping_bound_field_rejects_non_mapping_field(self):

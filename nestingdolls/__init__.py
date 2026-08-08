@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from .errors import (
     InvalidInitialValueError,
-    InvalidMappingInputError,
     ItemValidationError,
+    MappingInputValidationError,
     MissingManagementFormValidationError,
     SequenceInputValidationError,
     TooManyFormsValidationError,
@@ -33,11 +33,11 @@ __all__ = [
     "FrozenSequenceField",
     "FrozenSetField",
     "InvalidInitialValueError",
-    "InvalidMappingInputError",
     "ItemValidationError",
     "ListField",
     "MappingBoundField",
     "MappingField",
+    "MappingInputValidationError",
     "MappingWidget",
     "MissingManagementFormValidationError",
     "SequenceBoundField",
