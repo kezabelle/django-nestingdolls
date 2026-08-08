@@ -1,4 +1,5 @@
 import json
+import tracemalloc
 import unittest
 from collections import deque
 from datetime import datetime
@@ -709,10 +710,21 @@ class SequenceFieldTestCase(SimpleTestCase):
             f"values-{INITIAL_FORM_COUNT}": "0",
             **{f"values-0-{index}": "value" for index in range(3)},
         }
+        # Three keys naming one row are one row, not an overflow.
         self.assertEqual(
             widget.keys.normalized(matching, "values")[f"values-{TOTAL_FORM_COUNT}"],
-            "3",
+            "2",
         )
+        distinct = {
+            f"values-{TOTAL_FORM_COUNT}": "2",
+            f"values-{INITIAL_FORM_COUNT}": "0",
+            **{f"values-{index}": "value" for index in range(3)},
+        }
+        # A row index at or past absolute_max names no row, so canonical()
+        # drops it and the two rows that remain keep the submitted total.
+        normalized_distinct = widget.keys.normalized(distinct, "values")
+        self.assertEqual(normalized_distinct[f"values-{TOTAL_FORM_COUNT}"], "2")
+        self.assertNotIn("values-2", normalized_distinct)
 
         class UnreachableField(forms.IntegerField):
             def clean(self, value):
@@ -1019,6 +1031,118 @@ class SequenceFieldTestCase(SimpleTestCase):
         self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["values"][0].code, "unhashable")
 
+    def test_long_digit_run_is_refused_before_leading_zeros_are_stripped(self):
+        """A padded index is a long digit run, whatever it strips down to."""
+        widget = nestingdolls.SequenceWidget(forms.CharField())
+        padded = "0" * 500_000
+
+        self.assertIsNone(widget.keys.canonical(f"values-{padded}", "values"))
+        self.assertIsNone(widget.keys.canonical(f"values-{padded}1", "values"))
+        # A run inside the limit still names its row.
+        self.assertEqual(widget.keys.canonical("values-007", "values"), ("values-7", 7))
+
+    def test_absolute_max_must_stay_addressable_by_a_row_index(self):
+        """``max_index_digits`` is an invariant, so a limit past it is refused."""
+        with self.assertRaises(ValueError):
+            nestingdolls.ListField(forms.CharField(), absolute_max=10_000_000)
+
+    def test_uploaded_file_named_after_the_field_keeps_the_child_rows(self):
+        """A file input named after the field cannot replace the whole value."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        form = Form(
+            QueryDict(
+                f"values-0=1&values-1=2&values-{TOTAL_FORM_COUNT}=2"
+                f"&values-{INITIAL_FORM_COUNT}=0"
+            ),
+            files=MultiValueDict(
+                {"values": [SimpleUploadedFile("forged.txt", b"forged")]}
+            ),
+        )
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["values"], [1, 2])
+
+    def test_composite_rows_are_counted_as_rows_not_as_keys(self):
+        """A composite child submits several keys per row, and that is one row."""
+
+        class PointForm(forms.Form):
+            a = forms.IntegerField()
+            b = forms.IntegerField()
+            c = forms.IntegerField()
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.DictField(PointForm), max_length=5, absolute_max=10
+            )
+
+        form = Form(
+            {
+                f"values-{TOTAL_FORM_COUNT}": "4",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                **{
+                    f"values-{index}-{child}": "1"
+                    for index in range(4)
+                    for child in ("a", "b", "c")
+                },
+            }
+        )
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(len(form.cleaned_data["values"]), 4)
+
+    def test_negative_submitted_total_clamps_instead_of_slicing_from_the_end(self):
+        """A negative total renders no row, rather than dropping the last one.
+
+        ``IntegerField`` accepts ``-1``, so ``ManagementForm.clean()`` keeps
+        it and it reaches the slice that limits the rendered rows. Django
+        feeds its own total to ``range()``, where a negative is harmless. As a
+        slice bound it counts from the end instead, so the page would show
+        every row but the last and still claim a total of ``-1``.
+        """
+        widget = nestingdolls.SequenceWidget(forms.CharField())
+        widget.bound = widget.Bound(
+            management_data={
+                f"values-{TOTAL_FORM_COUNT}": "-1",
+                f"values-{INITIAL_FORM_COUNT}": "2",
+            }
+        )
+
+        context = widget.get_context("values", ["a", "b"], {})
+
+        self.assertEqual([row["index"] for row in context["widget"]["rows"]], [])
+
+    def test_disabled_sequence_renders_the_initial_rows_it_cleans(self):
+        """A disabled field ignores submitted render state, as it ignores data."""
+        cases = (
+            {
+                f"values-{TOTAL_FORM_COUNT}": "2",
+                f"values-{INITIAL_FORM_COUNT}": "2",
+                f"values-0-{DELETION_FIELD_NAME}": "on",
+            },
+            {
+                f"values-{TOTAL_FORM_COUNT}": "bad",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+            },
+        )
+        for data in cases:
+            with self.subTest(data=data):
+
+                class Form(forms.Form):
+                    values = nestingdolls.ListField(
+                        forms.IntegerField(), disabled=True, initial=[1, 2]
+                    )
+
+                form = Form(data)
+                html = form.as_p()
+
+                self.assertIs(form.is_valid(), True, form.errors)
+                self.assertEqual(form.cleaned_data["values"], [1, 2])
+                self.assertIn('value="1"', html)
+                self.assertIn('value="2"', html)
+
 
 class TupleFieldTestCase(SimpleTestCase):
     """`TupleField` is `SequenceField` with one line changed: ``compress``.
@@ -1191,6 +1315,32 @@ class SetFieldTestCase(SimpleTestCase):
 
         self.assertIs(changed, True)
         self.assertLess(field.child_field.comparisons, 5 * (members + rows))
+
+    def test_member_order_does_not_build_one_index_per_member_per_row(self):
+        """A row that hits its hash candidate must not look at other members.
+
+        A comparison looks at one member at a time, and a hit looks at one.
+        Building the whole order up front costs ``len(members)`` writes for
+        each row even then. That is the quadratic that ``members_left`` stops.
+        """
+        size = 100_000
+        members = [f"m{index}" for index in range(size)]
+        match = nestingdolls.SetField.Match(
+            forms.CharField(), members, members_left=size
+        )
+        rows = members[:100]
+
+        tracemalloc.start()
+        try:
+            for row in rows:
+                self.assertIs(match.claim(row, match.candidate(row)), True)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+        self.assertEqual(size - match.members_left, len(rows))
+        # An eager order builds one tuple of `size` indexes for each row.
+        self.assertLess(peak, size)
 
     def test_has_changed_uses_fallback_for_multiple_choice_lists(self):
         """It compares multiple-choice lists without hashing them."""
@@ -1643,6 +1793,174 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
         self.assertEqual(
             extra_item.errors.as_data()["values"][0].params["child_code"], "max_length"
         )
+
+    def test_nested_row_counts_share_one_step_count(self):
+        """Nested totals multiply, so one step count must cover every level."""
+
+        class CountingField(forms.CharField):
+            extractions = 0
+
+            def clean(self, value):
+                CountingField.extractions += 1
+                return super().clean(value)
+
+        class HostileForm(forms.Form):
+            outer = nestingdolls.ListField(
+                nestingdolls.ListField(CountingField(required=False)),
+                required=False,
+            )
+
+        outer_rows = 498
+        inner_rows = 2000
+        CountingField.extractions = 0
+        hostile = HostileForm(
+            {
+                f"outer-{TOTAL_FORM_COUNT}": str(outer_rows),
+                f"outer-{INITIAL_FORM_COUNT}": "0",
+                **{
+                    f"outer-{index}-{TOTAL_FORM_COUNT}": str(inner_rows)
+                    for index in range(outer_rows)
+                },
+            }
+        )
+
+        self.assertIs(hostile.is_valid(), False)
+        self.assertEqual(hostile.errors.as_data()["outer"][0].code, "too_many_forms")
+        # Extraction stops at the step count, so no child is cleaned at all.
+        # The whole tree may build no more rows than the outermost field's own
+        # absolute_max, which one nesting level could already reach alone.
+        self.assertLessEqual(
+            CountingField.extractions,
+            HostileForm.base_fields["outer"].limits.absolute_max,
+        )
+
+        class PointForm(forms.Form):
+            a = forms.IntegerField()
+
+        class LegitimateForm(forms.Form):
+            rows = nestingdolls.ListField(nestingdolls.DictField(PointForm))
+
+        legitimate = LegitimateForm(
+            {
+                f"rows-{TOTAL_FORM_COUNT}": "2",
+                f"rows-{INITIAL_FORM_COUNT}": "0",
+                "rows-0-a": "1",
+                "rows-1-a": "2",
+            }
+        )
+
+        self.assertIs(legitimate.is_valid(), True, legitimate.errors)
+        self.assertEqual(legitimate.cleaned_data["rows"], [{"a": 1}, {"a": 2}])
+
+    def test_submission_limit_follows_the_django_request_limit(self):
+        """Use Django's key limit and the per-level cap for the shared cap.
+
+        A populated row needs a key. One level can still request
+        ``absolute_max`` empty rows with one ``TOTAL_FORMS`` key. The shared cap
+        is the larger value.
+        """
+        limits = nestingdolls.ListField(forms.CharField()).limits
+        self.assertEqual(limits.absolute_max, 2000)
+
+        cases = (
+            # (Django key limit, expected shared cap)
+            (1000, 2000),  # The per-level cap is larger.
+            (5000, 5000),  # More accepted keys allow more populated rows.
+            (10, 2000),  # The field still permits its empty rows.
+            (None, 2000),  # The key limit is off, so the per-level cap applies.
+        )
+        for keys, expected in cases:
+            with (
+                self.subTest(keys=keys),
+                override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=keys),
+            ):
+                self.assertEqual(limits.submission_max, expected)
+
+    def test_a_raised_django_limit_lets_a_larger_nested_submission_through(self):
+        """A higher Django key limit permits a larger nested submission."""
+
+        class Form(forms.Form):
+            outer = nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(required=False)),
+                required=False,
+            )
+
+        # Three parent rows and 900 child rows in each parent need 2703 rows.
+        # Each child total is valid. Only the shared cap can reject this data.
+        data = {
+            f"outer-{TOTAL_FORM_COUNT}": "3",
+            f"outer-{INITIAL_FORM_COUNT}": "0",
+            **{f"outer-{index}-{TOTAL_FORM_COUNT}": "900" for index in range(3)},
+        }
+
+        refused = Form(data)
+        self.assertIs(refused.is_valid(), False)
+        self.assertEqual(refused.errors.as_data()["outer"][0].code, "too_many_forms")
+
+        with override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10_000):
+            allowed = Form(data)
+            self.assertIs(allowed.is_valid(), True, allowed.errors)
+            self.assertEqual(
+                [len(rows) for rows in allowed.cleaned_data["outer"]],
+                [900, 900, 900],
+            )
+
+    def test_submission_cap_allows_an_exact_nested_total(self):
+        """Exact use of the shared cap does not report too many forms."""
+
+        class Form(forms.Form):
+            outer = nestingdolls.ListField(
+                nestingdolls.ListField(
+                    forms.CharField(required=False),
+                    max_length=1999,
+                ),
+                required=False,
+            )
+
+        # One parent row and 1999 child rows use the default cap of 2000 exactly.
+        form = Form(
+            {
+                f"outer-{TOTAL_FORM_COUNT}": "1",
+                f"outer-{INITIAL_FORM_COUNT}": "0",
+                f"outer-0-{TOTAL_FORM_COUNT}": "1999",
+                f"outer-0-{INITIAL_FORM_COUNT}": "0",
+            }
+        )
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual([len(rows) for rows in form.cleaned_data["outer"]], [1999])
+
+    def test_failed_extraction_does_not_share_its_budget(self):
+        """An extraction error restores the cap before the next form starts."""
+
+        class BoomWidget(forms.TextInput):
+            def value_from_datadict(self, data, files, name):
+                raise RuntimeError("boom")
+
+        class ExplodingForm(forms.Form):
+            values = nestingdolls.ListField(forms.CharField(widget=BoomWidget))
+
+        limit = ExplodingForm.base_fields["values"].absolute_max
+        exploding = ExplodingForm(
+            {
+                f"values-{TOTAL_FORM_COUNT}": str(limit),
+                f"values-{INITIAL_FORM_COUNT}": "0",
+            }
+        )
+        with self.assertRaises(RuntimeError):
+            self.assertIsNone(exploding["values"].data)
+
+        class HealthyForm(forms.Form):
+            values = nestingdolls.ListField(forms.CharField())
+
+        healthy = HealthyForm(
+            {
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                "values-0": "x",
+            }
+        )
+        self.assertIs(healthy.is_valid(), True, healthy.errors)
 
 
 class _HypothesisTestCase(SimpleTestCase):
@@ -2214,6 +2532,56 @@ class NestedSequencePropertyTestCase(_HypothesisTestCase):
             initial={"values": initial_rows},
         )
         self.assertIs(form.has_changed(), initial_rows != submitted_rows)
+
+    @HYPOTHESIS_SETTINGS
+    @example(outer_total=2, inner_totals=[2000, 2000])
+    @example(outer_total=-1, inner_totals=[])
+    @given(
+        outer_total=st.integers(min_value=-3, max_value=4000),
+        inner_totals=st.lists(st.integers(min_value=-3, max_value=4000), max_size=12),
+    )
+    def test_nested_totals_never_build_more_rows_than_one_submission_permits(
+        self, outer_total, inner_totals
+    ):
+        """Keep all built rows inside the shared cap.
+
+        Each payload stays within Django's key limit. Django can pass it to the
+        form, but nested totals can still multiply rows. This test checks the
+        package cap.
+        """
+
+        class Form(forms.Form):
+            outer = nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(required=False)),
+                required=False,
+            )
+
+        data = {
+            f"outer-{TOTAL_FORM_COUNT}": str(outer_total),
+            f"outer-{INITIAL_FORM_COUNT}": "0",
+        }
+        for index, total in enumerate(inner_totals):
+            data[f"outer-{index}-{TOTAL_FORM_COUNT}"] = str(total)
+            data[f"outer-{index}-{INITIAL_FORM_COUNT}"] = "0"
+        # Django rejects requests above this key count. A real request cannot
+        # reach the form with more keys.
+        self.assertLessEqual(len(data), settings.DATA_UPLOAD_MAX_NUMBER_FIELDS)
+
+        form = Form(data)
+        bound = form["outer"]
+        limit = form.fields["outer"].limits.submission_max
+
+        rows = bound.data
+        built = len(rows) + sum(len(row) for row in rows)
+        self.assertLessEqual(built, limit)
+
+        # Extraction and rendering must not raise for any submitted totals.
+        valid = form.is_valid()
+        form.as_p()
+
+        if bound.over_submission_max:
+            self.assertIs(valid, False)
+            self.assertEqual(form.errors.as_data()["outer"][0].code, "too_many_forms")
 
 
 class NestedParserRegressionTestCase(SimpleTestCase):

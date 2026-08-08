@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import cast
 
 from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import UploadedFile
 from django.forms import Field
 from django.forms.boundfield import BoundField
 from django.forms.utils import ErrorList
@@ -65,19 +66,30 @@ class CompositeWidget(Widget):
             """Return the canonical key for one accepted key spelling, or None."""
             raise NotImplementedError
 
-        def prefers_direct(self, data: Mapping[str, object], name: str) -> bool:
-            """Report whether a value stored under ``name`` outranks flat child keys.
+        def reads_whole_value(self, data: Mapping[str, object], name: str) -> bool:
+            """Report whether to read the value from the one key named ``name``.
 
-            A ``QueryDict`` holds the browser's own input. There, a key that is
-            only spelled like the field name can be a submit button or a forged
-            key. That key must not discard the real child keys. The direct
-            value wins in two cases:
+            A composite value arrives in one of two spellings. A programmer
+            gives the whole value under the field's own name, as in
+            ``{"point": {"a": 1}}``. A browser gives one key for each child,
+            as in ``point-a=1``. This method picks the spelling to read when
+            the data holds both.
+
+            The choice matters because a browser can send a key that is named
+            after the field but holds no value of the field. A submit button
+            named ``point`` sends ``point=save``. If the whole value won
+            there, that button would replace every real child value. So the
+            whole value wins in two cases only:
 
             1. The data is not a ``QueryDict``. A programmer built the data,
-               and direct values win by design.
-            2. The data has no canonical child key for ``name``. A real
-               control named after the field is the only input present.
+               and a whole value is the point of that spelling.
+            2. The data holds no child key for ``name``. Nothing else can
+               supply the value.
             """
+            # An UploadedFile is never a composite value, and request.FILES is a
+            # plain MultiValueDict, so the QueryDict test below cannot see it.
+            if isinstance(data.get(name), UploadedFile):
+                return False
             if not isinstance(data, QueryDict):
                 return True
             return not any(self.canonical(key, name) is not None for key in data)

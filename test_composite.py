@@ -79,6 +79,10 @@ class Family:
     forged_query: str
     # What the forged submission must still clean to.
     forged_cleaned: object
+    # A QueryDict submission whose only key for the field is the forged one.
+    empty_forged_query: str
+    # What that submission must clean to: the empty composite.
+    empty_forged_cleaned: object
     # A direct Python value a programmer would pass, and its cleaned form.
     direct_data: dict[str, object]
     direct_cleaned: object
@@ -104,6 +108,10 @@ FAMILIES = (
             f"values-{TOTAL_FORM_COUNT}=2&values-{INITIAL_FORM_COUNT}=0"
         ),
         forged_cleaned=[1, 2],
+        empty_forged_query=(
+            f"values=save&values-{TOTAL_FORM_COUNT}=0&values-{INITIAL_FORM_COUNT}=0"
+        ),
+        empty_forged_cleaned=[],
         direct_data={"values": ["3", "4"]},
         direct_cleaned=[3, 4],
         invalid_data={"values.0": "bad"},
@@ -119,6 +127,8 @@ FAMILIES = (
         dotted_data={"point.a": "1"},
         forged_query="point=forged&point-a=1&point-label=kept",
         forged_cleaned={"a": 1, "label": "kept"},
+        empty_forged_query="point=save",
+        empty_forged_cleaned={},
         direct_data={"point": {"a": "3", "label": "direct"}},
         direct_cleaned={"a": 3, "label": "direct"},
         invalid_data={"point.a": "bad"},
@@ -281,6 +291,25 @@ class SharedCompositeTestCase(SimpleTestCase):
                 self.assertIs(form.is_valid(), True, form.errors)
                 self.assertEqual(
                     form.cleaned_data[family.field_name], family.forged_cleaned
+                )
+
+    def test_forged_field_name_key_is_ignored_on_an_empty_field(self):
+        """A control named after a field with no child input injects nothing.
+
+        ``test_forged_field_name_key_does_not_discard_child_input`` always
+        submits child keys, so the direct value loses to them. With no child
+        key at all, the submit button is the only candidate, and it must still
+        not become the value of the field.
+        """
+        for family in FAMILIES:
+            with self.subTest(family=family.name):
+                form_class = form_class_for(family, required=False)
+
+                form = form_class(QueryDict(family.empty_forged_query))
+
+                self.assertIs(form.is_valid(), True, form.errors)
+                self.assertEqual(
+                    form.cleaned_data[family.field_name], family.empty_forged_cleaned
                 )
 
     def test_programmer_data_keeps_direct_value_precedence(self):

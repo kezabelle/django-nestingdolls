@@ -10,6 +10,7 @@ from django.forms import BaseForm, Field
 from django.forms.boundfield import BoundField
 from django.forms.fields import FileField
 from django.forms.widgets import Media as WidgetMedia
+from django.http import QueryDict
 from django.utils.datastructures import MultiValueDict
 from django.utils.functional import Promise, cached_property
 from django.utils.translation import gettext_lazy as _
@@ -109,6 +110,16 @@ class MappingWidget(CompositeWidget):
                 else None
             )
 
+        def reads_whole_value(self, data: Mapping[str, object], name: str) -> bool:
+            """Refuse a browser value under this field's own name.
+
+            A browser cannot submit a mapping under one key, so a key spelled
+            exactly like the field name is a submit button or forged input.
+            """
+            return not isinstance(data, QueryDict) and super().reads_whole_value(
+                data, name
+            )
+
         def normalized(
             self, data: Mapping[str, object], name: str
         ) -> Mapping[str, object]:
@@ -119,9 +130,9 @@ class MappingWidget(CompositeWidget):
             if not data:
                 return {}
 
-            if name in data and self.prefers_direct(data, name):
-                # A direct mapping value and flat child keys can both be
-                # present. See prefers_direct() for which one wins.
+            if name in data and self.reads_whole_value(data, name):
+                # A whole mapping value and flat child keys can both be
+                # present. See reads_whole_value() for which one wins.
                 value = data.get(name)
                 if not isinstance(value, Mapping):
                     return {name: value}
@@ -198,7 +209,7 @@ class MappingWidget(CompositeWidget):
         name: str,
     ) -> object:
         """Extract child values from canonical data and files."""
-        # A direct value holds the whole mapping. Return it, because the caller
+        # A whole value holds the whole mapping. Return it, because the caller
         # gave Python data and no child widget must read it again.
         if name in data:
             return data.get(name)

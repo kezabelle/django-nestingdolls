@@ -319,6 +319,27 @@ class DictFieldTestCase(SimpleTestCase):
             form.cleaned_data["point"], {"a": 1, "label": "east", "upload": upload}
         )
 
+    def test_uploaded_file_named_after_the_field_keeps_the_child_input(self):
+        """A file input named after the field cannot replace the whole mapping.
+
+        ``request.FILES`` is a plain ``MultiValueDict``, not a ``QueryDict``,
+        so the direct-value rule for programmer-built data would otherwise let
+        one upload outrank every real child key.
+        """
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm)
+
+        form = Form(
+            data=QueryDict("point-a=1&point-label=kept"),
+            files=MultiValueDict(
+                {"point": [SimpleUploadedFile("forged.txt", b"forged")]}
+            ),
+        )
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["point"], {"a": 1, "label": "kept"})
+
     def test_flattened_initial_mapping_uses_child_widget_values(self):
         """It reconstructs raw widget values from flat child names."""
 
