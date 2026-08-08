@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import dataclasses
-from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import datetime, time
 from itertools import islice
@@ -139,12 +138,12 @@ class SequenceBoundField(CompositeBoundField):
         @cached_property
         def errors(self) -> Mapping[int, list[object]]:
             """Group child error messages by the row index they belong to."""
-            row_errors: dict[int, list[object]] = defaultdict(list)
+            row_errors: dict[int, list[object]] = {}
             for error in self.bound_field._all_errors.as_data():
                 if isinstance(error, ItemValidationError) and isinstance(
                     error.item, int
                 ):
-                    row_errors[error.item].append(error.message)
+                    row_errors.setdefault(error.item, []).append(error.message)
             return row_errors
 
     @cached_property
@@ -614,22 +613,72 @@ class SetField(SequenceField):
                 self.error_messages["unhashable"], code="unhashable"
             ) from error
 
+    @dataclasses.dataclass(slots=True)
+    class Match:
+        """Match the submitted rows of a set field to its initial members.
+
+        A set has no order, so each submitted row can answer for any initial
+        member. The child field decides whether a row and a member are the same,
+        because only it knows how it reads its own input. This object claims one
+        member for each row it can, and reports whether every member was
+        claimed. It holds the members of one comparison, so a field builds one
+        for each comparison it makes. Claiming a member changes it, so it is the
+        one holder that is not frozen.
+        """
+
+        child_field: Field
+        members: list[object]
+        claimed: set[int] = dataclasses.field(default_factory=set)
+        indexed: dict[object, list[int]] = dataclasses.field(init=False, repr=False)
+
+        def __post_init__(self) -> None:
+            # compress() already rejected unhashable members, so index them all.
+            self.indexed = {}
+            for index, member in enumerate(self.members):
+                self.indexed.setdefault(member, []).append(index)
+
+        def candidates(self, value: object) -> Collection[int]:
+            """Return the members that hash equal to one submitted row."""
+            try:
+                return self.indexed.get(value, ())
+            except TypeError:
+                # A compound child value can be unhashable. Scan for it instead.
+                return ()
+
+        def claim(self, row: object, candidates: Collection[int]) -> bool:
+            """Claim one member for a submitted row, and report the success.
+
+            Prefer a member that no row claimed, and prefer a member that hashes
+            equal to the row.
+            """
+            for claimed in (False, True):
+                for indexes in (candidates, range(len(self.members))):
+                    for index in indexes:
+                        if (index in self.claimed) != claimed:
+                            continue
+                        if not self.child_field.has_changed(self.members[index], row):
+                            self.claimed.add(index)
+                            return True
+            return False
+
+        @property
+        def complete(self) -> bool:
+            """Report whether the submitted rows claimed every member."""
+            return len(self.claimed) == len(self.members)
+
     def has_changed(self, initial: object, data: object) -> bool:
         """Compare semantic set members, not raw row order or raw row spelling.
 
         ``has_changed()`` receives raw submitted row data but initial members are
         already cleaned Python values. A plain ``==`` comparison would therefore
         be wrong for child fields that coerce input or use compound widget data.
-
-        This method indexes ordinary hashable members and falls back to semantic
-        scans for compound or custom child values.
         """
         if self.disabled:
             return False
         if isinstance(data, list) and self.limits.exceeded_by(len(data)):
             return True
         try:
-            initial = list(self.compress(self._initial_values(initial)))
+            members = list(self.compress(self._initial_values(initial)))
         except (InvalidInitialValueError, ValidationError):
             return True
         try:
@@ -638,46 +687,19 @@ class SetField(SequenceField):
             return True
 
         try:
-            # compress() already rejected unhashable members, so index them all.
-            indexed: dict[object, list[int]] = defaultdict(list)
-            for index, value in enumerate(initial):
-                indexed[value].append(index)
-
-            matched: set[int] = set()
-            all_indexes = range(len(initial))
-
-            def matching_index(
-                value: object, candidates: Collection[int]
-            ) -> int | None:
-                # Prefer an unmatched member, and prefer an equal-hash candidate.
-                for already_matched in (False, True):
-                    for indexes in (candidates, all_indexes):
-                        for index in indexes:
-                            if (index in matched) != already_matched:
-                                continue
-                            if not self.child_field.has_changed(initial[index], value):
-                                return index
-                return None
-
-            for data_value in data:
+            match = self.Match(self.child_field, members)
+            for row in data:
                 try:
-                    value = self.child_field.to_python(data_value)
+                    value = self.child_field.to_python(row)
                 except (TypeError, ValidationError):
                     return True
-                try:
-                    candidates = indexed.get(value, ())
-                except TypeError:
-                    candidates = ()
-
-                match = matching_index(data_value, candidates)
-                if match is None:
-                    if self.child_field.has_changed(None, data_value):
-                        return True
-                    continue
-                matched.add(match)
+                if not match.claim(row, match.candidates(value)) and (
+                    self.child_field.has_changed(None, row)
+                ):
+                    return True
         except (TypeError, ValidationError):
             return True
-        return len(matched) != len(initial)
+        return not match.complete
 
 
 class FrozenSetField(SetField):
@@ -965,6 +987,11 @@ class SequenceWidget(CompositeWidget):
         if self.is_localized:
             child_widget.is_localized = True
 
+        final_attrs = context["widget"]["attrs"]
+        final_attrs.pop("aria-invalid", None)
+        id_ = final_attrs.get("id")
+        disabled = bool(final_attrs.get("disabled"))
+
         if self.bound.hidden_initial_value is not None:
             value = cast(Sequence[object] | None, self.bound.hidden_initial_value)
         # Keep runtime initials from expanding rendering without a bound.
@@ -991,10 +1018,13 @@ class SequenceWidget(CompositeWidget):
                 },
             )
             management_invalid = False
-        final_attrs = context["widget"]["attrs"]
-        final_attrs.pop("aria-invalid", None)
-        id_ = final_attrs.get("id")
-        disabled = bool(final_attrs.get("disabled"))
+        if not self.is_hidden:
+            management_form.fields[TOTAL_FORM_COUNT].widget.attrs[
+                "data-sequence-total"
+            ] = ""
+        if disabled:
+            for management_field in management_form.fields.values():
+                management_field.widget.attrs["disabled"] = True
 
         def make_row(index: int | str, item: object | None) -> dict[str, object]:
             row_name = f"{name}-{index}"
@@ -1026,14 +1056,6 @@ class SequenceWidget(CompositeWidget):
                     row["error_id"] = error_id
                 self._mark_row_invalid(subwidget, error_id)
             return row
-
-        if not self.is_hidden:
-            management_form.fields[TOTAL_FORM_COUNT].widget.attrs[
-                "data-sequence-total"
-            ] = ""
-        if disabled:
-            for management_field in management_form.fields.values():
-                management_field.widget.attrs["disabled"] = True
 
         context["widget"].update(
             {

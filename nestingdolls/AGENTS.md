@@ -128,6 +128,14 @@ Alias of `FrozenSequenceField`. It defines no methods of its own.
 - `compress`
 - `has_changed`
 
+#### SetField.Match
+
+##### Methods introduced here
+
+- `candidates`
+- `claim`
+- `complete`
+
 ### FrozenSetField
 
 `FrozenSetField` defines no methods of its own.
