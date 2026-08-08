@@ -389,3 +389,118 @@ test("add and remove manage limits, focus, and change events", () => {
     { action: "remove", index: 2 },
   ]);
 });
+
+test("removing a row marks deletion, disables stale controls, and keeps focus", () => {
+  const dom = new JSDOM(
+    `
+      <div
+        data-widget="sequence"
+        data-sequence-maximum="3"
+        data-sequence-absolute-maximum="4"
+      >
+        <input type="hidden" value="2" data-sequence-total>
+        <div data-sequence-rows>
+          <div data-sequence-row data-sequence-index="0">
+            <input type="hidden" name="values-0-DELETE" value="" data-sequence-delete>
+            <input id="value-0" name="values-0" value="first">
+            <select id="choice-0" name="choices-0"><option>a</option></select>
+            <textarea id="note-0" name="notes-0"></textarea>
+          </div>
+          <div data-sequence-row data-sequence-index="1">
+            <input type="hidden" name="values-1-DELETE" value="" data-sequence-delete>
+            <input id="value-1" name="values-1" value="second">
+          </div>
+        </div>
+        <input
+          type="hidden"
+          name="values-9-DELETE"
+          value="1"
+          data-sequence-deleted-row
+        >
+        <template data-sequence-empty-row>
+          <div data-sequence-row>
+            <input
+              type="hidden"
+              name="values-__prefix__-DELETE"
+              value=""
+              data-sequence-delete
+            >
+            <input id="value-__prefix__" name="values-__prefix__">
+          </div>
+        </template>
+        <template data-sequence-remove-button>
+          <button
+            type="button"
+            data-sequence-remove
+            id="values___prefix___remove"
+          >Remove</button>
+        </template>
+        <template data-sequence-add-button>
+          <button type="button" data-sequence-add id="values_add">Add</button>
+        </template>
+      </div>
+    `,
+    { runScripts: "outside-only" },
+  );
+  dom.window.eval(controller);
+  dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded"));
+
+  const { document } = dom.window;
+  const totalInput = document.querySelector("[data-sequence-total]");
+  const deletedRow = document.querySelector("[data-sequence-deleted-row]");
+  const firstRow = document.querySelector('[data-sequence-index="0"]');
+  const secondRow = document.querySelector('[data-sequence-index="1"]');
+  const addButton = document.querySelector("[data-sequence-add]");
+  assert.ok(totalInput instanceof dom.window.HTMLInputElement);
+  assert.ok(deletedRow instanceof dom.window.HTMLInputElement);
+  assert.ok(firstRow instanceof dom.window.HTMLElement);
+  assert.ok(secondRow instanceof dom.window.HTMLElement);
+  assert.ok(addButton instanceof dom.window.HTMLButtonElement);
+
+  // Each hoisted remove button carries the index of its own row, so ids stay
+  // unique and the markup keeps matching the server-rendered row ids.
+  const removeIds = [...document.querySelectorAll("[data-sequence-remove]")].map(
+    (button) => button.id,
+  );
+  assert.deepEqual(removeIds, ["values_0_remove", "values_1_remove"]);
+
+  // A row deleted on a previous request is not a row: it must not count toward
+  // the limits and must keep posting its deletion flag.
+  assert.equal(addButton.hidden, false);
+  assert.equal(deletedRow.value, "1");
+  assert.equal(deletedRow.disabled, false);
+
+  const firstRemove = firstRow.querySelector("[data-sequence-remove]");
+  const firstDelete = firstRow.querySelector("[data-sequence-delete]");
+  assert.ok(firstRemove instanceof dom.window.HTMLButtonElement);
+  assert.ok(firstDelete instanceof dom.window.HTMLInputElement);
+
+  firstRemove.click();
+
+  // The deletion flag is the only thing the server sees, so it must be set and
+  // must stay enabled; every other control in the row must stop posting.
+  assert.equal(firstDelete.value, "1");
+  assert.equal(firstDelete.disabled, false);
+  assert.equal(firstRow.hidden, true);
+  for (const id of ["value-0", "choice-0", "note-0"]) {
+    const control = document.querySelector(`#${id}`);
+    assert.ok(control);
+    assert.equal(control.disabled, true, `${id} should be disabled`);
+  }
+  assert.equal(firstRemove.disabled, true);
+  assert.equal(document.activeElement, document.querySelector("#value-1"));
+  // Removing never renumbers: the total form count stays the high-water mark.
+  assert.equal(totalInput.value, "2");
+
+  const secondRemove = secondRow.querySelector("[data-sequence-remove]");
+  assert.ok(secondRemove instanceof dom.window.HTMLButtonElement);
+
+  // Without data-sequence-minimum the minimum is zero, so the last row goes
+  // too, and focus lands on the add button instead of being lost to the body.
+  secondRemove.click();
+
+  assert.equal(secondRow.hidden, true);
+  assert.equal(document.activeElement, addButton);
+  assert.equal(addButton.hidden, false);
+  assert.equal(totalInput.value, "2");
+});

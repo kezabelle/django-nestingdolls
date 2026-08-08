@@ -44,6 +44,17 @@
     );
   }
 
+  function ownedElement<E extends Element>(
+    root: HTMLElement,
+    parent: ParentNode,
+    selector: string,
+  ): E {
+    return requiredElement(
+      ownedElements<E>(root, parent, selector)[0],
+      selector,
+    );
+  }
+
   function parseRequiredInteger(
     value: string | undefined,
     description: string,
@@ -66,19 +77,13 @@
     ).filter((row) => !row.hidden);
   }
 
-  function ensureRemoveButton(
-    root: HTMLElement,
-    row: HTMLElement,
-  ): void {
+  function ensureRemoveButton(root: HTMLElement, row: HTMLElement): void {
     if (ownedElements(root, row, "[data-sequence-remove]").length > 0) {
       return;
     }
-    const template = requiredElement(
-      ownedElements<HTMLTemplateElement>(
-        root,
-        root,
-        "[data-sequence-remove-button]",
-      )[0],
+    const template = ownedElement<HTMLTemplateElement>(
+      root,
+      root,
       "[data-sequence-remove-button]",
     );
     const fragment = template.content.cloneNode(true) as DocumentFragment;
@@ -99,19 +104,18 @@
     if (existing) {
       return existing;
     }
-    const template = requiredElement(
-      ownedElements<HTMLTemplateElement>(
-        root,
-        root,
-        "[data-sequence-add-button]",
-      )[0],
+    const template = ownedElement<HTMLTemplateElement>(
+      root,
+      root,
       "[data-sequence-add-button]",
     );
-    root.append(template.content.cloneNode(true));
-    return requiredElement(
-      ownedElements<HTMLButtonElement>(root, root, "[data-sequence-add]")[0],
+    const fragment = template.content.cloneNode(true) as DocumentFragment;
+    const button = requiredElement(
+      fragment.querySelector<HTMLButtonElement>("[data-sequence-add]"),
       "[data-sequence-add]",
     );
+    root.append(fragment);
+    return button;
   }
 
   function canAddRow(
@@ -142,8 +146,9 @@
 
   function syncButtons(root: HTMLElement): void {
     const rows = activeRows(root);
-    const totalInput = requiredElement(
-      ownedElements<HTMLInputElement>(root, root, "[data-sequence-total]")[0],
+    const totalInput = ownedElement<HTMLInputElement>(
+      root,
+      root,
       "[data-sequence-total]",
     );
     const nextIndex = parseRequiredInteger(
@@ -190,18 +195,6 @@
     );
   }
 
-  function disableRemovedControl(
-    control:
-      | HTMLButtonElement
-      | HTMLInputElement
-      | HTMLSelectElement
-      | HTMLTextAreaElement,
-  ): void {
-    if (!control.matches("[data-sequence-delete]")) {
-      control.disabled = true;
-    }
-  }
-
   function removeRow(root: HTMLElement, row: HTMLElement): void {
     const rows = activeRows(root);
     const rowPosition = rows.indexOf(row);
@@ -209,17 +202,22 @@
       return;
     }
     const focusRow = rows[rowPosition + 1] ?? rows[rowPosition - 1];
-    const deleteInput = requiredElement(
-      ownedElements<HTMLInputElement>(root, row, "[data-sequence-delete]")[0],
+    const deleteInput = ownedElement<HTMLInputElement>(
+      root,
+      row,
       "[data-sequence-delete]",
     );
     deleteInput.value = "1";
     row.hidden = true;
-    row
-      .querySelectorAll<
-        HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
-      >("input, select, textarea, button")
-      .forEach(disableRemovedControl);
+    for (const control of row.querySelectorAll<
+      HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
+    >("input, select, textarea, button")) {
+      // Deletion flags are the only fields the server still needs from a
+      // removed row, so they keep posting while the stale values stop.
+      if (!control.matches("[data-sequence-delete]")) {
+        control.disabled = true;
+      }
+    }
     syncButtons(root);
     if (!focusRow || !focusFirstControl(focusRow)) {
       ensureAddButton(root).focus();
@@ -257,8 +255,9 @@
   }
 
   function addRow(root: HTMLElement): void {
-    const totalInput = requiredElement(
-      ownedElements<HTMLInputElement>(root, root, "[data-sequence-total]")[0],
+    const totalInput = ownedElement<HTMLInputElement>(
+      root,
+      root,
       "[data-sequence-total]",
     );
     const index = parseRequiredInteger(totalInput.value, "data-sequence-total");
@@ -266,12 +265,9 @@
       return;
     }
 
-    const template = requiredElement(
-      ownedElements<HTMLTemplateElement>(
-        root,
-        root,
-        "[data-sequence-empty-row]",
-      )[0],
+    const template = ownedElement<HTMLTemplateElement>(
+      root,
+      root,
       "[data-sequence-empty-row]",
     );
     const fragment = template.content.cloneNode(true) as DocumentFragment;
@@ -282,10 +278,7 @@
     );
     row.dataset.sequenceIndex = String(index);
     ensureRemoveButton(root, row);
-    requiredElement(
-      ownedElements(root, root, "[data-sequence-rows]")[0],
-      "[data-sequence-rows]",
-    ).append(fragment);
+    ownedElement(root, root, "[data-sequence-rows]").append(fragment);
     totalInput.value = String(index + 1);
     row
       .querySelectorAll<HTMLElement>(sequenceWidgetSelector)
