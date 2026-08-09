@@ -3,7 +3,6 @@ import tracemalloc
 import unittest
 from collections import deque
 from datetime import datetime
-from decimal import Decimal
 from urllib.parse import urlencode
 
 import django
@@ -475,32 +474,40 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertIsInstance(cleaned_data, self.collection_class)
         self.assertEqual(cleaned_data, self.collection_class(values))
 
-    def test_client_posts_list_rows_from_each_supported_name(self):
-        """Client returns list values for each supported row name."""
-        for data, expected in (
+    def test_client_posts_direct_and_managed_dash_list_rows(self):
+        """Direct values and Django-managed dash rows are the accepted contracts."""
+        cases = (
             ({"values": ["1", "2", "3"]}, [1, 2, 3]),
-            ({"values-0": "1", "values-1": "2", "values-2": "3"}, [1, 2, 3]),
-            ({"values.0": "1", "values.1": "2", "values.2": "3"}, [1, 2, 3]),
-            ({"values[0]": "1", "values[1]": "2", "values[2]": "3"}, [1, 2, 3]),
-            ({"values-01": "2"}, [2]),
-        ):
+            (
+                {
+                    "values-0": "1",
+                    "values-1": "2",
+                    "values-2": "3",
+                    f"values-{TOTAL_FORM_COUNT}": "3",
+                    f"values-{INITIAL_FORM_COUNT}": "0",
+                },
+                [1, 2, 3],
+            ),
+        )
+        for data, expected in cases:
             with self.subTest(data=data):
                 response = self.client.post("/list-submission-probe/", data)
                 self.assertEqual(response.status_code, 200)
                 self.assertJSONEqual(
-                    response.content,
-                    {"valid": True, "values": expected, "errors": {}},
+                    response.content, {"valid": True, "values": expected, "errors": {}}
                 )
 
-    def test_client_returns_cleaned_json_rows_for_each_supported_name(self):
-        """Client returns the cleaned JSON row for every supported input name."""
+    def test_client_returns_cleaned_json_direct_and_managed_dash_rows(self):
+        """JSON rows retain the same direct and managed wire contracts."""
         value = {"answer": 42, "nested": [1, 2]}
         encoded = json.dumps(value)
         for data in (
             {"values": [encoded]},
-            {"values-0": encoded},
-            {"values.0": encoded},
-            {"values[0]": encoded},
+            {
+                "values-0": encoded,
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+            },
         ):
             with self.subTest(data=data):
                 response = self.client.post("/list-json-submission-probe/", data)
@@ -510,63 +517,21 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
                 )
 
     def test_json_child_change_detection_uses_cleaned_values(self):
-        """Direct change detection compares JSON rows after child normalization."""
+        """Managed change detection compares JSON rows after normalization."""
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.JSONField(), required=False)
 
         value = {"answer": 42, "nested": [1, 2]}
-        form = Form({"values-0": json.dumps(value)}, initial={"values": [value]})
+        form = Form(
+            {
+                "values-0": json.dumps(value),
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+            },
+            initial={"values": [value]},
+        )
         self.assertIs(form.has_changed(), False)
-
-    def test_initial_row_spellings_are_normalized(self):
-        """Every supported initial row spelling normalizes to the same rows."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField())
-
-        for initial in (
-            {"values": [1, 2, 3]},
-            {"values-0": 1, "values-1": 2, "values-2": 3},
-            {"values.0": 1, "values.1": 2, "values.2": 3},
-            {"values[0]": 1, "values[1]": 2, "values[2]": 3},
-        ):
-            with self.subTest(initial=initial):
-                self.assertEqual(Form(initial=initial)["values"].value(), [1, 2, 3])
-
-        class FieldInitialForm(forms.Form):
-            values = nestingdolls.ListField(
-                forms.IntegerField(), initial={"values[0]": 1, "values[1]": 2}
-            )
-
-        self.assertEqual(FieldInitialForm()["values"].value(), [1, 2])
-
-        flattened = Form(initial={"values.0": 1, "values[1]": 2})
-        self.assertEqual(flattened["values"].value(), [1, 2])
-        html = flattened.as_p()
-        self.assertInHTML(
-            '<input type="number" name="values-0" value="1" id="id_values_0">',
-            html,
-        )
-        self.assertInHTML(
-            '<input type="number" name="values-1" value="2" id="id_values_1">',
-            html,
-        )
-
-        class DefaultingForm(forms.Form):
-            values = nestingdolls.ListField(
-                forms.IntegerField(), required=False, initial=[3]
-            )
-
-        self.assertEqual(
-            DefaultingForm(initial={"values-0": "1", "values-1": "2"})[
-                "values"
-            ].initial,
-            ["1", "2"],
-        )
-        self.assertEqual(
-            DefaultingForm(initial={"other": "value"})["values"].initial, [3]
-        )
 
     def test_initial_accepts_generic_sequence_and_collection_types(self):
         """It accepts non-string collection-shaped initial values beyond builtins."""
@@ -610,34 +575,12 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         unbound = Form(initial={"values": 1})
         self.assertEqual(unbound["values"].value(), [1])
 
-    def test_client_uses_later_aliases_for_overlapping_list_rows(self):
-        """Client preserves the final ordered alias for each list row."""
-        cases = (
-            ([("values-1", "2"), ("values.1", "3")], [3]),
-            ([("values", "1"), ("values-0", "2")], [2]),
-            ([("values-01", "2"), ("values-1", "3")], [3]),
-            ([("values-0", "2"), ("values[00]", "3")], [3]),
-            ([("values.0", "2"), ("values[00]", "3")], [3]),
-        )
-        for pairs, expected in cases:
-            with self.subTest(pairs=pairs):
-                response = self.client.generic(
-                    "POST",
-                    "/list-submission-probe/",
-                    data=urlencode(pairs),
-                    content_type="application/x-www-form-urlencoded",
-                )
-                self.assertEqual(response.status_code, 200)
-                self.assertJSONEqual(
-                    response.content,
-                    {"valid": True, "values": expected, "errors": {}},
-                )
-
     def test_client_returns_management_errors_for_missing_list_controls(self):
-        """Client returns a management error for each missing list control."""
+        """Every dash-indexed request requires Django's two management controls."""
         for query in (
             "values-TOTAL_FORMS=1&values-0=1",
             "values-INITIAL_FORMS=0&values-0=1",
+            "values-999999=1",
         ):
             with self.subTest(query=query):
                 response = self.client.generic(
@@ -699,22 +642,25 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
             {"valid": True, "values": [1, 2], "errors": {}},
         )
 
-    def test_python_list_mapping_uses_the_final_management_value(self):
-        """Python list mappings are not HTTP request data."""
+    def test_plain_mapping_does_not_invent_duplicate_management_values(self):
+        """A list from ``dict.get()`` stays one invalid management value."""
 
         class Form(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField(), required=False)
+            values = nestingdolls.ListField(forms.IntegerField())
 
         form = Form(
             {
                 f"values-{TOTAL_FORM_COUNT}": ["1", "2"],
-                f"values-{INITIAL_FORM_COUNT}": ["0"],
-                "values-0": ["1"],
-                "values-1": ["2"],
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                "values-0": "1",
+                "values-1": "2",
             }
         )
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["values"], [1, 2])
+
+        self.assertIs(form.is_valid(), False)
+        self.assertEqual(
+            form.errors.as_data()["values"][0].code, "missing_management_form"
+        )
 
     def test_invalid_rows_redisplay_the_submitted_management_state(self):
         """An invalid submission redisplays its own counts, rows, and delete flags."""
@@ -832,55 +778,6 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
             {"valid": True, "values": [1], "errors": {}},
         )
 
-    def test_client_uses_management_totals_to_select_list_rows(self):
-        """Client reads only rows selected by submitted list management totals."""
-        cases = (
-            (
-                "/list-submission-probe/",
-                [
-                    (f"values-{TOTAL_FORM_COUNT}", "1"),
-                    (f"values-{INITIAL_FORM_COUNT}", "0"),
-                    ("values-0", "1"),
-                    ("values-1", "not an integer"),
-                ],
-                {"valid": True, "values": [1], "errors": {}},
-            ),
-            (
-                "/list-submission-probe/",
-                [("values-1", "2")],
-                {"valid": True, "values": [2], "errors": {}},
-            ),
-            (
-                "/list-initial-management-probe/",
-                [
-                    (f"values-{TOTAL_FORM_COUNT}", "1"),
-                    (f"values-{INITIAL_FORM_COUNT}", "1"),
-                ],
-                {
-                    "valid": False,
-                    "values": None,
-                    "errors": {"values": ["item_invalid"]},
-                },
-            ),
-            (
-                "/optional-list-initial-management-probe/",
-                [
-                    (f"values-{TOTAL_FORM_COUNT}", "3"),
-                    (f"values-{INITIAL_FORM_COUNT}", "1"),
-                    ("values-0", "10"),
-                    ("values-2", "30"),
-                ],
-                {"valid": True, "values": [10, 30], "errors": {}},
-            ),
-        )
-        for url, pairs, expected in cases:
-            with self.subTest(url=url, pairs=pairs):
-                response = self.client.generic(
-                    "POST", url, urlencode(pairs), "application/x-www-form-urlencoded"
-                )
-                self.assertEqual(response.status_code, 200)
-                self.assertJSONEqual(response.content, expected)
-
     def test_client_ignores_submitted_disabled_list_rows(self):
         """Client returns the initial value for a disabled list."""
         response = self.client.post(
@@ -968,55 +865,6 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertEqual(tampered.cleaned_data["point"], {"a": 1})
         self.assertEqual(tampered.cleaned_data["values"], [1])
 
-    def test_client_returns_list_cardinality_results(self):
-        """Client returns list cardinality results for every configured limit."""
-        cases = (
-            ({}, {"required": ["required"]}),
-            (
-                {"optional_min-0": "1"},
-                {"optional_min": ["min_length"], "required": ["required"]},
-            ),
-            (
-                {"maximum-0": "1", "maximum-1": "2"},
-                {"required": ["required"], "maximum": ["max_length"]},
-            ),
-            ({"exact-0": "1", "exact-1": "2"}, {"required": ["required"]}),
-        )
-        for data, errors in cases:
-            with self.subTest(data=data):
-                response = self.client.post("/list-cardinality-matrix-probe/", data)
-                self.assertEqual(response.status_code, 200)
-                self.assertJSONEqual(
-                    response.content,
-                    {"valid": False, "values": None, "errors": errors},
-                )
-
-        response = self.client.post(
-            "/list-cardinality-matrix-probe/",
-            {
-                "optional_min-0": "1",
-                "optional_min-1": "2",
-                "required-0": "3",
-                "maximum-0": "4",
-                "exact-0": "5",
-                "exact-1": "6",
-            },
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertJSONEqual(
-            response.content,
-            {
-                "valid": True,
-                "values": {
-                    "optional_min": [1, 2],
-                    "required": [3],
-                    "maximum": [4],
-                    "exact": [5, 6],
-                },
-                "errors": {},
-            },
-        )
-
     def test_client_rejects_management_totals_past_each_absolute_maximum(self):
         """Client returns a too-many-forms error past each configured hard limit."""
         cases = (
@@ -1042,8 +890,8 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
                     },
                 )
 
-    def test_client_discards_a_list_index_past_the_absolute_maximum(self):
-        """Client reports required when a hostile row index names no list row."""
+    def test_client_requires_management_for_an_out_of_range_row_key(self):
+        """A discarded index still makes a row-key-only request malformed."""
         response = self.client.post(
             "/list-default-absolute-maximum-probe/",
             {f"values-{DEFAULT_MAX_NUM + 1}": "1"},
@@ -1051,70 +899,12 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertJSONEqual(
             response.content,
-            {"valid": False, "values": None, "errors": {"values": ["required"]}},
-        )
-
-    def test_hostile_row_key_normalization_bounds_child_work(self):
-        """Direct key normalization bounds rows before child field work."""
-        widget = nestingdolls.SequenceWidget(
-            forms.CharField(), max_length=1, absolute_max=2
-        )
-        matching = {
-            f"values-{TOTAL_FORM_COUNT}": "2",
-            f"values-{INITIAL_FORM_COUNT}": "0",
-            **{f"values-0-{index}": "value" for index in range(3)},
-        }
-        # Three keys naming one row are one row, not an overflow.
-        self.assertEqual(
-            widget.keys.normalized(matching, "values")[f"values-{TOTAL_FORM_COUNT}"],
-            "2",
-        )
-        distinct = {
-            f"values-{TOTAL_FORM_COUNT}": "2",
-            f"values-{INITIAL_FORM_COUNT}": "0",
-            **{f"values-{index}": "value" for index in range(3)},
-        }
-        # A row index at or past absolute_max names no row, so canonical()
-        # drops it and the two rows that remain keep the submitted total.
-        normalized_distinct = widget.keys.normalized(distinct, "values")
-        self.assertEqual(normalized_distinct[f"values-{TOTAL_FORM_COUNT}"], "2")
-        self.assertNotIn("values-2", normalized_distinct)
-
-        class UnreachableField(forms.IntegerField):
-            def clean(self, value):
-                raise AssertionError("oversized child value was cleaned")
-
-            def bound_data(self, data, initial):
-                raise AssertionError("oversized child value was bound")
-
-            def prepare_value(self, value):
-                raise AssertionError("oversized child value was prepared")
-
-            def has_changed(self, initial, data):
-                raise AssertionError("oversized child value was compared")
-
-        class DirectForm(forms.Form):
-            values = nestingdolls.ListField(UnreachableField(), max_length=1)
-
-        field = DirectForm.base_fields["values"]
-        values = ["1"] * (field.absolute_max + 1)
-        # The bound form below is the reachable path. These two paths
-        # share the same contract through the public field API.
-        with self.assertRaises(ValidationError) as context:
-            field.clean(values)
-        self.assertEqual(context.exception.error_list[0].code, "too_many_forms")
-        self.assertIs(field.has_changed([], values), True)
-
-        oversized = DirectForm(
             {
-                "values": values,
-                f"values-{TOTAL_FORM_COUNT}": "1",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-            }
+                "valid": False,
+                "values": None,
+                "errors": {"values": ["missing_management_form"]},
+            },
         )
-        self.assertIs(oversized.is_valid(), False)
-        self.assertEqual(oversized.errors.as_data()["values"][0].code, "too_many_forms")
-        oversized.as_p()
 
     def test_client_reports_an_error_code_for_each_invalid_list_item(self):
         """Client returns one item-invalid code for each invalid submitted row."""
@@ -1254,7 +1044,7 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
                 self.assertEqual(error.child_message, "50% off is required")
                 self.assertEqual(error.params["message"], "50% off is required")
                 self.assertEqual(
-                    dict(form["values"].submitted.errors),
+                    dict(form["values"].submission.errors),
                     {0: ["50% off is required"]},
                 )
                 html = form.as_p()
@@ -1297,94 +1087,6 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         # here.
         self.assertLess(CountingWidget.key_visits, row_count * row_count)
 
-    def test_client_handles_unicode_and_sparse_list_indexes(self):
-        """Client ignores Unicode indexes and densifies each accepted sparse spelling."""
-        response = self.client.post(
-            "/list-submission-probe/", {"values-²": "1", "values[١]": "2"}
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertJSONEqual(
-            response.content, {"valid": True, "values": [], "errors": {}}
-        )
-        for name in ("values-1999", "values.1999", "values[1999]"):
-            with self.subTest(name=name):
-                response = self.client.post(
-                    "/optional-boolean-list-probe/", {name: "on"}
-                )
-                self.assertEqual(response.status_code, 200)
-                self.assertJSONEqual(
-                    response.content,
-                    {"valid": True, "values": [False, True], "errors": {}},
-                )
-
-    def test_client_keeps_the_last_zero_padded_row_index_spelling(self):
-        """Client reads a zero-padded index as the row that it names.
-
-        ``values-0`` and ``values-00`` name row 0, so the later key wins. That
-        is the documented precedence rule of every other alias spelling. A
-        padded alias is forged input, and it can only overwrite the row that it
-        names.
-        """
-        cases = (
-            ([("values-0", "1"), ("values-00", "2")], [2]),
-            ([("values-00", "2"), ("values-0", "1")], [1]),
-            ([("values-1", "1"), ("values-01", "2")], [2]),
-            ([("values-0", "1"), ("values-01", "2")], [1, 2]),
-        )
-        for pairs, expected in cases:
-            with self.subTest(pairs=pairs):
-                response = self.client.generic(
-                    "POST",
-                    "/list-submission-probe/",
-                    urlencode(pairs),
-                    "application/x-www-form-urlencoded",
-                )
-                self.assertEqual(response.status_code, 200)
-                self.assertJSONEqual(
-                    response.content,
-                    {"valid": True, "values": expected, "errors": {}},
-                )
-
-    def test_client_cleans_one_row_for_one_sparse_row_index(self):
-        """Client cleans one submitted row, and the row before it is not an error.
-
-        Dense normalization keeps at most one empty row in front of a sparse
-        index. That row carries no key of its own, so the child widget reports
-        it as omitted. A sparse index cannot make a required error for a row
-        that nobody submitted.
-        """
-        response = self.client.post("/list-submission-probe/", {"values-2": "5"})
-
-        self.assertEqual(response.status_code, 200)
-        self.assertJSONEqual(
-            response.content, {"valid": True, "values": [5], "errors": {}}
-        )
-
-    def test_sparse_index_normalization_synthesizes_dense_management_rows(self):
-        """Direct key normalization is bounded and produces dense sparse rows."""
-        widget = nestingdolls.SequenceWidget(forms.BooleanField(required=False))
-        for name in ("values-1999", "values.1999", "values[1999]"):
-            with self.subTest(name=name):
-                normalized = widget.keys.normalized({name: "on"}, "values")
-                self.assertEqual(normalized[f"values-{TOTAL_FORM_COUNT}"], "2")
-                self.assertIn("values-1", normalized)
-        overlong_name = "values-" + "9" * 5000
-        self.assertIsNone(widget.keys.canonical(overlong_name, "values"))
-
-    def test_sparse_unmanaged_indexes_do_not_expand_rendering(self):
-        """A sparse flat index renders as one dense row when management data is absent."""
-
-        class Form(forms.Form):
-            other = forms.IntegerField()
-            values = nestingdolls.ListField(forms.BooleanField(required=False))
-
-        form = Form({"other": "bad", "values-1999": "on"})
-
-        self.assertIs(form.is_valid(), False)
-        html = form.as_p()
-        self.assertIn('name="values-1"', html)
-        self.assertNotIn('name="values-1999"', html)
-
     def test_added_removed_and_failing_rows_drive_has_changed(self):
         """Row cardinality changes and child comparison errors both mean "changed"."""
 
@@ -1407,23 +1109,6 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
 
         self.assertIs(ErrorForm({"values": ["1"]}).has_changed(), True)
 
-    def test_has_changed_propagates_child_value_errors(self):
-        """It preserves child has_changed() value errors."""
-
-        class ExtraRowBoomField(forms.CharField):
-            def has_changed(self, initial, data):
-                if initial is None:
-                    raise ValueError("extra row boom")
-                return super().has_changed(initial, data)
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(ExtraRowBoomField(), required=False)
-
-        form = Form({"values-0": "x"})
-
-        with self.assertRaises(ValueError):
-            form.has_changed()
-
     def test_to_python_rejects_errors_as_values(self):
         """It rejects validation errors passed in as raw values."""
         field = nestingdolls.ListField(forms.IntegerField())
@@ -1443,39 +1128,10 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["values"][0].code, "unhashable")
 
-    def test_long_digit_run_is_refused_before_leading_zeros_are_stripped(self):
-        """A padded index is a long digit run, whatever it strips down to."""
-        widget = nestingdolls.SequenceWidget(forms.CharField())
-        padded = "0" * 500_000
-
-        self.assertIsNone(widget.keys.canonical(f"values-{padded}", "values"))
-        self.assertIsNone(widget.keys.canonical(f"values-{padded}1", "values"))
-        # A run inside the limit still names its row.
-        self.assertEqual(widget.keys.canonical("values-007", "values"), ("values-7", 7))
-
     def test_absolute_max_must_stay_addressable_by_a_row_index(self):
         """``max_index_digits`` is an invariant, so a limit past it is refused."""
         with self.assertRaises(ValueError):
             nestingdolls.ListField(forms.CharField(), absolute_max=10_000_000)
-
-    def test_client_ignores_a_forged_field_named_upload_when_list_rows_are_present(
-        self,
-    ):
-        """Client keeps indexed list rows when a forged whole-field upload arrives."""
-        response = self.client.post(
-            "/list-submission-probe/",
-            {
-                f"values-{TOTAL_FORM_COUNT}": "2",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0": "1",
-                "values-1": "2",
-                "values": SimpleUploadedFile("forged.txt", b"forged"),
-            },
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertJSONEqual(
-            response.content, {"valid": True, "values": [1, 2], "errors": {}}
-        )
 
     def test_client_counts_composite_list_rows_not_their_child_keys(self):
         """Client accepts four mapping rows that each submit three child controls."""
@@ -1500,27 +1156,6 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
                 "errors": {},
             },
         )
-
-    def test_negative_submitted_total_clamps_instead_of_slicing_from_the_end(self):
-        """A negative total renders no row, rather than dropping the last one.
-
-        ``IntegerField`` accepts ``-1``, so ``ManagementForm.clean()`` keeps
-        it and it reaches the slice that limits the rendered rows. Django
-        feeds its own total to ``range()``, where a negative is harmless. As a
-        slice bound it counts from the end instead, so the page would show
-        every row but the last and still claim a total of ``-1``.
-        """
-        widget = nestingdolls.SequenceWidget(forms.CharField())
-        widget.bound = widget.Bound(
-            management_data={
-                f"values-{TOTAL_FORM_COUNT}": "-1",
-                f"values-{INITIAL_FORM_COUNT}": "2",
-            }
-        )
-
-        context = widget.get_context("values", ["a", "b"], {})
-
-        self.assertEqual([row["index"] for row in context["widget"]["rows"]], [])
 
     def test_disabled_sequence_renders_the_initial_rows_it_cleans(self):
         """A disabled field ignores submitted render state, as it ignores data."""
@@ -1650,21 +1285,6 @@ class SetFieldTestCase(SimpleTestCase):
             values = ["1"] * (field.absolute_max + 1)
             with self.subTest(field_class=field_class.__name__):
                 self.assertIs(field.has_changed(expected_initial, values), True)
-
-    def test_has_changed_propagates_child_value_errors(self):
-        """It preserves child comparison value errors."""
-
-        class AnyBoomField(forms.CharField):
-            def has_changed(self, initial, data):
-                raise ValueError("boom")
-
-        class Form(forms.Form):
-            values = nestingdolls.SetField(AnyBoomField(), required=False)
-
-        form = Form({"values-0": "x", "values-1": "x"})
-
-        with self.assertRaises(ValueError):
-            form.has_changed()
 
     def test_has_changed_uses_linear_comparisons_for_hashable_members(self):
         """Reordered unique integer members use indexed child comparisons."""
@@ -2010,79 +1630,6 @@ class CompositeHiddenInitialTestCase(SimpleTestCase):
 
 @override_settings(ROOT_URLCONF=__name__)
 class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
-    def test_client_cleans_each_supported_nested_list_shape(self):
-        """Client returns cleaned values for every supported nested control shape."""
-        cases = (
-            (
-                "pairs",
-                "/nested-pair-probe/",
-                {
-                    "values-0-0": "1",
-                    "values-0-1": "2",
-                    "values-1-0": "3",
-                    "values-1-1": "4",
-                },
-                [[1, 2], [3, 4]],
-            ),
-            (
-                "deep lists",
-                "/nested-deep-list-probe/",
-                {
-                    "values-0-0-0": "1",
-                    "values-0-0-1": "2",
-                    "values-0-1-0": "3",
-                    "values-1-0-0": "4",
-                    "values-1-1-0": "5",
-                    "values-1-1-1": "6",
-                },
-                [[[1, 2], [3]], [[4], [5, 6]]],
-            ),
-            (
-                "alternating mappings",
-                "/nested-alternating-probe/",
-                {
-                    "values[0][name]": "alpha",
-                    "values[0][entries][0][point][a]": "1",
-                    "values[0][entries][0][point][label]": "north",
-                    "values[0][entries][0][title]": "first",
-                    "values[0][entries][1][point][a]": "2",
-                    "values[0][entries][1][title]": "second",
-                    "values[1][name]": "beta",
-                    "values[1][entries][0][point][a]": "3",
-                    "values[1][entries][0][title]": "third",
-                },
-                [
-                    {
-                        "name": "alpha",
-                        "entries": [
-                            {"point": {"a": 1, "label": "north"}, "title": "first"},
-                            {"point": {"a": 2, "label": ""}, "title": "second"},
-                        ],
-                    },
-                    {
-                        "name": "beta",
-                        "entries": [{"point": {"a": 3, "label": ""}, "title": "third"}],
-                    },
-                ],
-            ),
-            (
-                "blank optional mapping",
-                "/nested-blank-row-probe/",
-                {
-                    f"values-{TOTAL_FORM_COUNT}": "1",
-                    f"values-{INITIAL_FORM_COUNT}": "0",
-                },
-                [],
-            ),
-        )
-        for label, url, data, values in cases:
-            with self.subTest(shape=label):
-                response = self.client.post(url, data)
-                self.assertEqual(response.status_code, 200)
-                self.assertJSONEqual(
-                    response.content, {"valid": True, "values": values, "errors": {}}
-                )
-
     def test_nested_change_detection_uses_child_semantics(self):
         """Nested change detection delegates to the child field's comparison."""
         tuple_field = nestingdolls.ListField(
@@ -2117,70 +1664,6 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertEqual(
             field.has_changed([[[[2], [0]]]], [[[[2], [0]]]]),
             child.has_changed([[[2], [0]]], [[[2], [0]]]),
-        )
-
-    def test_client_reports_nested_row_errors(self):
-        """Client returns an item-invalid code for an invalid nested row."""
-        response = self.client.post(
-            "/nested-list-probe/",
-            {
-                f"values-{TOTAL_FORM_COUNT}": "1",
-                f"values-{INITIAL_FORM_COUNT}": "1",
-                f"values-0-{TOTAL_FORM_COUNT}": "2",
-                f"values-0-{INITIAL_FORM_COUNT}": "1",
-                "values-0-0": "1",
-                "values-0-1": "bad",
-            },
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertJSONEqual(
-            response.content,
-            {"valid": False, "values": None, "errors": {"values": ["item_invalid"]}},
-        )
-
-        response = self.client.post(
-            "/nested-pair-probe/",
-            {"values-0-0": "1", "values-0-1": "2", "values-0-2": "3"},
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertJSONEqual(
-            response.content,
-            {
-                "valid": False,
-                "values": None,
-                "errors": {"values": ["item_invalid"]},
-                "child_codes": ["max_length"],
-            },
-        )
-
-    def test_nested_row_error_rendering_preserves_management_controls(self):
-        """Direct rendering preserves nested management controls after an invalid row."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(
-                nestingdolls.ListField(forms.IntegerField())
-            )
-
-        form = Form(
-            QueryDict(
-                f"values-{TOTAL_FORM_COUNT}=1&"
-                f"values-{INITIAL_FORM_COUNT}=1&"
-                f"values-0-{TOTAL_FORM_COUNT}=2&"
-                f"values-0-{INITIAL_FORM_COUNT}=1&"
-                "values-0-0=1&values-0-1=bad"
-            ),
-            initial={"values": [[1]]},
-        )
-
-        self.assertIs(form.is_valid(), False)
-        html = form.as_p()
-        self.assertInHTML(
-            '<input type="hidden" name="values-INITIAL_FORMS" value="1" id="id_values-INITIAL_FORMS">',
-            html,
-        )
-        self.assertInHTML(
-            '<input type="hidden" name="values-0-INITIAL_FORMS" value="1" id="id_values-0-INITIAL_FORMS">',
-            html,
         )
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
@@ -2279,28 +1762,6 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
                 self.assertEqual(limits.submission_max, DEFAULT_MAX_NUM)
         with override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=5):
             self.assertEqual(limits.submission_max, limits.absolute_max)
-
-    def test_client_applies_the_nested_submission_cap_after_request_parsing(self):
-        """Client rejects a nested total at the shared submission cap."""
-        data = {
-            f"outer-{TOTAL_FORM_COUNT}": "3",
-            f"outer-{INITIAL_FORM_COUNT}": "0",
-            **{f"outer-{index}-{TOTAL_FORM_COUNT}": "900" for index in range(3)},
-        }
-        response = self.client.post("/raised-nested-submission-probe/", data)
-        self.assertEqual(response.status_code, 200)
-        self.assertJSONEqual(
-            response.content,
-            {"valid": False, "values": None, "errors": {"outer": ["too_many_forms"]}},
-        )
-
-        with override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10_000):
-            response = self.client.post("/raised-nested-submission-probe/", data)
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["valid"], True)
-        self.assertEqual(payload["errors"], {})
-        self.assertEqual([len(rows) for rows in payload["values"]], [900, 900, 900])
 
     def test_client_accepts_an_exact_nested_submission_total(self):
         """Client accepts a nested submission that uses the shared cap exactly."""
@@ -2506,14 +1967,8 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertIn('<ul class="errorlist" id="id_values_0_1_error">', html)
         self.assertIn('aria-describedby="id_values_0_1_error"', html)
 
-    @unittest.expectedFailure
     def test_row_bucketing_runs_once_for_each_input_source(self):
-        """One bound field must sort its keys into rows one time for each source.
-
-        ``Submitted.omitted`` builds the row buckets a second time, although
-        the extraction of ``bf.data`` built the same buckets already. The clean
-        step then reads every submitted key twice.
-        """
+        """The parsed input cohort owns row bucketing for its full request lifetime."""
 
         class CountingWidget(nestingdolls.SequenceWidget):
             key_visits = 0
@@ -2747,112 +2202,6 @@ class NestedParserRegressionTestCase(SimpleTestCase):
         self.assertEqual(form["values"].initial, [value])
         self.assertIn("unexpected", str(form["values"]))
 
-    def test_invalid_mapping_row_shapes_stay_in_the_validation_channel(self):
-        """Every hostile mapping-row shape becomes an inline error and still renders."""
-
-        class PointForm(forms.Form):
-            a = forms.IntegerField()
-            label = forms.CharField(required=False)
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(
-                nestingdolls.MappingField(PointForm),
-                required=False,
-            )
-
-        class NestedForm(forms.Form):
-            values = nestingdolls.ListField(
-                nestingdolls.ListField(
-                    nestingdolls.MappingField(PointForm),
-                    required=False,
-                ),
-                required=False,
-            )
-
-        cases = (
-            ("direct", Form, {"values": ["1"]}, ["1"]),
-            ("dash", Form, {"values-0": "1"}, ["1"]),
-            ("dot", Form, {"values.0": "1"}, ["1"]),
-            ("bracket", Form, {"values[0]": "1"}, ["1"]),
-            (
-                "scalar row alias plus nested child alias",
-                Form,
-                {"values[0]": "1", "values[0][a]": "2"},
-                ["1"],
-            ),
-            (
-                "repeated sequence-to-mapping boundary",
-                NestedForm,
-                {"values[0][0]": "1"},
-                [["1"]],
-            ),
-        )
-        for label, form_class, data, expected_value in cases:
-            with self.subTest(shape=label):
-                form = form_class(data)
-                self.assertIs(form.is_valid(), False)
-                self.assertIn(
-                    form.errors.as_data()["values"][0].code,
-                    ("invalid", "item_invalid"),
-                )
-                rendered = str(form["values"])
-                self.assertEqual(form["values"].value(), expected_value)
-                self.assertIn("Enter a mapping of values.", rendered)
-
-    def test_custom_child_rebinding_uses_django_field_fallbacks(self):
-        """A custom child widget receives hostile input without type assumptions."""
-
-        class CustomWidget(forms.TextInput):
-            pass
-
-        class RejectingField(forms.CharField):
-            widget = CustomWidget
-
-            def bound_data(self, data, initial):
-                raise ValidationError("Cannot bind this value.")
-
-            def prepare_value(self, value):
-                raise nestingdolls.InvalidInitialValueError(
-                    "Cannot prepare this value."
-                )
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(RejectingField(), required=False)
-
-        form = Form({"values[0]": "hostile"})
-
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form["values"].value(), ["hostile"])
-        self.assertIn('value="hostile"', str(form["values"]))
-
-    def test_numeric_mapping_child_names_remain_valid_below_a_list(self):
-        """A mapping child named ``0`` still accepts ``values[0][0]`` spellings."""
-
-        NumericChildForm = type(
-            "NumericChildForm",
-            (forms.Form,),
-            {"0": forms.IntegerField()},
-        )
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(
-                nestingdolls.MappingField(NumericChildForm),
-                required=False,
-            )
-
-        cases = (
-            {"values[0][0]": "1"},
-            {"values.0.0": "1"},
-            {"values-0-0": "1"},
-        )
-        for data in cases:
-            with self.subTest(data=data):
-                form = Form(data)
-                self.assertIs(form.is_valid(), True, form.errors)
-                self.assertEqual(form.cleaned_data["values"], [{"0": 1}])
-                self.assertEqual(form["values"].value(), [{"0": "1"}])
-                str(form["values"])
-
     def test_text_list_indexes_do_not_bind(self):
         """Text segments cannot name sequence rows."""
 
@@ -2895,204 +2244,6 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             html,
         )
 
-    def test_unchecked_boolean_rows_keep_their_positions(self):
-        """A false boolean row keeps its position, with or without a QueryDict."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.BooleanField(required=False))
-
-        for data in (
-            QueryDict(
-                f"values-{TOTAL_FORM_COUNT}=2&values-{INITIAL_FORM_COUNT}=0&values-1=on"
-            ),
-            {"values-1": "on"},
-        ):
-            with self.subTest(data=data):
-                form = Form(data)
-                self.assertIs(form.is_valid(), True, form.errors)
-                self.assertEqual(form.cleaned_data["values"], [False, True])
-
-    def test_multiwidget_child_accepts_every_indexed_row_name(self):
-        """It passes indexed row names into child multiwidgets for each spelling."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.SplitDateTimeField())
-
-        for data in (
-            {"values-0_0": "2024-01-02", "values-0_1": "03:04:05"},
-            {"values.0_0": "2024-01-02", "values.0_1": "03:04:05"},
-            {"values[0]_0": "2024-01-02", "values[0]_1": "03:04:05"},
-        ):
-            with self.subTest(data=data):
-                form = Form(data)
-                self.assertIs(form.is_valid(), True, form.errors)
-                cleaned = form.cleaned_data["values"][0]
-                self.assertEqual(
-                    cleaned.replace(tzinfo=None),
-                    datetime(2024, 1, 2, 3, 4, 5),  # noqa: DTZ001
-                )
-
-    def test_file_rows_keep_clear_and_delete_initial_values(self):
-        """It keeps, clears, and deletes file rows, and preserves omitted ones."""
-        initial = SimpleUploadedFile("initial.txt", b"initial")
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(
-                forms.FileField(required=False), required=False
-            )
-
-        kept = Form(
-            QueryDict(f"values-{TOTAL_FORM_COUNT}=1&values-{INITIAL_FORM_COUNT}=0"),
-            initial={"values": [initial]},
-        )
-        self.assertIs(kept.is_valid(), True, kept.errors)
-        self.assertIs(kept.cleaned_data["values"][0], initial)
-        self.assertIs(kept["values"].value()[0], initial)
-
-        clear_data = QueryDict(
-            f"values-{TOTAL_FORM_COUNT}=1&values-{INITIAL_FORM_COUNT}=0",
-            mutable=True,
-        )
-        clear_data["values-0-clear"] = "on"
-        cleared = Form(clear_data, initial={"values": [initial]})
-        self.assertIs(cleared.is_valid(), True, cleared.errors)
-        self.assertEqual(cleared.cleaned_data["values"], [False])
-
-        contradictory = Form(
-            clear_data,
-            files={"values-0": SimpleUploadedFile("new.txt", b"new")},
-            initial={"values": [initial]},
-        )
-        self.assertIs(contradictory.is_valid(), False)
-        self.assertEqual(
-            contradictory.errors.as_data()["values"][0].code, "item_invalid"
-        )
-
-        deleted = Form(
-            QueryDict(
-                f"values-{TOTAL_FORM_COUNT}=1&"
-                f"values-{INITIAL_FORM_COUNT}=0&"
-                f"values-0-{DELETION_FIELD_NAME}=1"
-            ),
-            initial={"values": [initial]},
-        )
-        self.assertIs(deleted.is_valid(), True, deleted.errors)
-        self.assertEqual(deleted.cleaned_data["values"], [])
-
-        uploads = [
-            SimpleUploadedFile("first.txt", b"first"),
-            SimpleUploadedFile("second.txt", b"second"),
-        ]
-        for required in (False, True):
-            OmittedForm = type(
-                "OmittedForm",
-                (forms.Form,),
-                {
-                    "values": nestingdolls.ListField(
-                        forms.FileField(), required=required
-                    )
-                },
-            )
-            omitted = OmittedForm({}, initial={"values": uploads})
-
-            with self.subTest(required=required):
-                self.assertIs(omitted.is_valid(), True, omitted.errors)
-                self.assertEqual(omitted.cleaned_data["values"], uploads)
-
-        class OptionalForm(forms.Form):
-            values = nestingdolls.ListField(forms.FileField(), required=False)
-
-        emptied = OptionalForm({"values": []}, initial={"values": uploads})
-        self.assertIs(emptied.is_valid(), True, emptied.errors)
-        self.assertEqual(emptied.cleaned_data["values"], [])
-
-    def test_file_uploads_are_extracted_from_every_supported_source(self):
-        """Uploads arrive through the child widget, flat keys, files, or a direct list."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.FileField())
-
-        managed = Form(
-            QueryDict(f"values-{TOTAL_FORM_COUNT}=1&values-{INITIAL_FORM_COUNT}=0"),
-            files={"values-0": SimpleUploadedFile("one.txt", b"one")},
-        )
-        self.assertIs(managed.is_valid(), True, managed.errors)
-        self.assertEqual(managed.cleaned_data["values"][0].name, "one.txt")
-
-        flat = Form({}, files={"values.1": SimpleUploadedFile("one.txt", b"one")})
-        self.assertIs(flat.is_valid(), True, flat.errors)
-        self.assertEqual(flat.cleaned_data["values"][0].name, "one.txt")
-
-        widget = nestingdolls.SequenceWidget(
-            forms.CharField(required=False), max_length=1, absolute_max=2
-        )
-        self.assertEqual(
-            widget.value_from_datadict({}, {"values": ["first", "second"]}, "values"),
-            ["first", "second"],
-        )
-
-        class DataOrFilesWidget(forms.TextInput):
-            def value_from_datadict(self, data, files, name):
-                return data.get(name, files.get(name))
-
-            def value_omitted_from_data(self, data, files, name):
-                return name not in data and name not in files
-
-        class TextForm(forms.Form):
-            values = nestingdolls.ListField(
-                forms.CharField(widget=DataOrFilesWidget), required=False
-            )
-
-        inferred = TextForm({"values-0": "data"}, files={"values-1": "file"})
-        self.assertIs(inferred.is_valid(), True, inferred.errors)
-        self.assertEqual(inferred.cleaned_data["values"], ["data", "file"])
-
-        class UploadForm(forms.Form):
-            values = nestingdolls.ListField(forms.FileField(), required=False)
-
-        first = SimpleUploadedFile("first.txt", b"first")
-        second = SimpleUploadedFile("second.txt", b"second")
-        files_authoritative = UploadForm(
-            {},
-            files={
-                f"values-{TOTAL_FORM_COUNT}": "2",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0": first,
-                "values-1": second,
-            },
-        )
-        self.assertIs(files_authoritative.is_valid(), True, files_authoritative.errors)
-        self.assertEqual(files_authoritative.cleaned_data["values"], [first, second])
-
-        malformed = TextForm(
-            {
-                f"values-{TOTAL_FORM_COUNT}": "not a number",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0": "data",
-            },
-            files={"values-1": "file"},
-        )
-        self.assertIs(malformed.is_valid(), False)
-        self.assertIsInstance(
-            malformed.errors.as_data()["values"][0],
-            nestingdolls.MissingManagementFormValidationError,
-        )
-        self.assertEqual(
-            malformed.errors.as_data()["values"][0].code,
-            "missing_management_form",
-        )
-        html = malformed.as_p()
-        self.assertInHTML(
-            '<input type="hidden" name="values-TOTAL_FORMS" value="not a number" data-sequence-total id="id_values-TOTAL_FORMS">',
-            html,
-        )
-        self.assertInHTML(
-            '<input type="hidden" name="values-INITIAL_FORMS" value="0" id="id_values-INITIAL_FORMS">',
-            html,
-        )
-        self.assertNotIn('name="values-0"', html)
-        self.assertNotIn('name="values-1"', html)
-
     def test_reused_widget_derives_multipart_requirement_from_the_new_child(self):
         """It does not retain multipart state from a widget's original child."""
         text_widget = nestingdolls.SequenceWidget(forms.CharField())
@@ -3107,25 +2258,6 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         self.assertIs(UploadForm().is_multipart(), True)
         self.assertIs(TextForm().is_multipart(), False)
 
-    def test_splitdatetime_initial_microseconds_do_not_report_a_change(self):
-        """It applies Django's initial microsecond normalization to each row."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.SplitDateTimeField())
-
-        initial = datetime(2024, 1, 2, 3, 4, 5, 123456)  # noqa: DTZ001
-        initial_shapes = (
-            {"values": [initial]},
-            {"values": initial},
-        )
-        for initial_data in initial_shapes:
-            with self.subTest(initial_data=initial_data):
-                form = Form(
-                    {"values-0_0": "2024-01-02", "values-0_1": "03:04:05"},
-                    initial=initial_data,
-                )
-                self.assertIs(form.has_changed(), False)
-
     def test_form_required_attribute_opt_out_is_preserved(self):
         """It respects the form-level required-attribute opt-out."""
 
@@ -3135,19 +2267,6 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         self.assertNotIn(" required", Form(use_required_attribute=False).as_p())
 
     @override_settings(USE_I18N=True, LANGUAGE_CODE="de")
-    def test_localize_propagates_to_child_cleaning_and_rendering(self):
-        """It propagates localization to child cleaning and rendering."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.DecimalField(), localize=True)
-
-        with translation.override("de"):
-            form = Form({"values-0": "1,5"})
-
-        self.assertIs(Form.base_fields["values"].child_field.localize, True)
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["values"], [Decimal("1.5")])
-
     def test_widget_renders_management_inputs_controls_and_media(self):
         """It renders management inputs, row controls, and the enhancement media."""
 

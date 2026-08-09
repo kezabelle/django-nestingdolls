@@ -20,8 +20,7 @@ from django.forms.formsets import (
     ManagementForm,
 )
 from django.forms.widgets import Media as WidgetMedia
-from django.forms.widgets import Widget
-from django.http import QueryDict
+from django.forms.widgets import MultiWidget, Widget
 from django.utils.datastructures import MultiValueDict
 from django.utils.functional import cached_property
 
@@ -35,122 +34,81 @@ __all__ = ["MappingWidget", "SequenceWidget"]
 
 class CompositeWidget(Widget):
     class Keys:
-        """Read the submitted input keys of one composite field.
-
-        A composite field accepts a dash, a dot, or a bracket between its own
-        name and the name of a child. This object changes each accepted
-        spelling into one canonical key. It is the base for the row keys of a
-        sequence and for the child keys of a mapping. It holds only the
-        configuration of the field that owns it, and it does no widget work.
-
-        This base holds no state, so each subclass can keep its own state in
-        slots.
-        """
+        """Hold static parsing configuration for one composite widget."""
 
         __slots__ = ()
 
         @staticmethod
-        def split(key: object, name: str) -> tuple[str, str] | None:
-            """Split one supported child key spelling into its token and suffix.
-
-            The dash, dot, and bracket spellings all name one child of ``name``.
-            This returns the text that identifies the child and the text that
-            follows it, which each composite widget reads in its own way.
-            """
+        def _split(key: object, name: str) -> tuple[str, str] | None:
+            """Split Django's dash-prefixed child grammar."""
             if not isinstance(key, str):
                 return None
-            for separator in ("-", ".", "["):
-                prefix = f"{name}{separator}"
-                if not key.startswith(prefix):
-                    continue
-                remainder = key.removeprefix(prefix)
-                if separator != "[":
-                    return (remainder, "") if remainder else None
-                end = remainder.find("]")
-                if end <= 0:
-                    return None
-                suffix = remainder[end + 1 :]
-                if suffix and suffix[0] not in "_-.[":
-                    return None
-                return (remainder[:end], suffix)
-            return None
+            prefix = f"{name}-"
+            if not key.startswith(prefix):
+                return None
+            remainder = key.removeprefix(prefix)
+            return (remainder, "") if remainder else None
 
-        def canonical(self, key: object, name: str) -> object | None:
-            """Return the canonical key for one accepted key spelling, or None."""
-            raise NotImplementedError
+        @staticmethod
+        def _values(data: Mapping[str, object], key: str) -> list[object]:
+            """Read repeated values through Django's mapping protocol."""
+            if key not in data:
+                return []
+            try:
+                return list(data.getlist(key))  # type: ignore[attr-defined]
+            except AttributeError:
+                return [data.get(key)]
 
-        def reads_whole_value(self, data: Mapping[str, object], name: str) -> bool:
-            """Report whether to read the value from the one key named ``name``.
+        @staticmethod
+        def _copy_key(
+            result: MultiValueDict[str, object],
+            data: Mapping[str, object],
+            source: str,
+            target: str,
+        ) -> None:
+            """Copy one key without depending on its concrete mapping type."""
+            result.setlist(target, CompositeWidget.Keys._values(data, source))
 
-            A composite value arrives in one of two spellings. A programmer
-            gives the whole value under the field's own name, as in
-            ``{"point": {"a": 1}}``. A browser gives one key for each child,
-            as in ``point-a=1``. This method picks the spelling to read when
-            the data holds both.
+    @dataclasses.dataclass(frozen=True, slots=True)
+    class Input:
+        """Hold the canonical data and file values of one submission."""
 
-            The choice matters because a browser can send a key that is named
-            after the field but holds no value of the field. A submit button
-            named ``point`` sends ``point=save``. If the whole value won
-            there, that button would replace every real child value. So the
-            whole value wins in two cases only:
-
-            1. The data is not a ``QueryDict``. A programmer built the data,
-               and a whole value is the point of that spelling.
-            2. The data holds no child key for ``name``. Nothing else can
-               supply the value.
-            """
-            # An UploadedFile is never a composite value, and request.FILES is a
-            # plain MultiValueDict, so the QueryDict test below cannot see it.
-            if isinstance(data.get(name), UploadedFile):
-                return False
-            if not isinstance(data, QueryDict):
-                return True
-            return not any(self.canonical(key, name) is not None for key in data)
-
-        def normalized(
-            self, data: Mapping[str, object], name: str
-        ) -> Mapping[str, object]:
-            """Return the submitted data under canonical child keys."""
-            raise NotImplementedError
+        data: MultiValueDict[str, object]
+        files: MultiValueDict[str, object]
 
     @dataclasses.dataclass(frozen=True, slots=True)
     class Bound:
-        """Hold the submitted state that one render of a composite widget needs.
-
-        Widget.render() cannot give this state to get_context(), so the bound
-        field puts it here first. Each render replaces the whole object, because
-        a hidden initial render must not keep the state of a visible render. A
-        Form deep-copies its fields, so this state stays with one field of one
-        form.
-        """
+        """Hold the submitted state that one render of a composite widget needs."""
 
         hidden_initial_value: object = None
 
     _template_name: str
     input_type: str | None = None
-    # The key reader of this widget. Each composite widget builds one when a
-    # field configures it.
     keys: Keys
-    # The state of the current render. Every widget starts with this one frozen
-    # default. A render replaces it with a new object, and nothing can change a
-    # frozen object, so no widget can pass its state to another widget.
     bound: Bound = Bound()
+
+    def read_input(
+        self,
+        data: Mapping[str, object],
+        files: Mapping[str, object],
+        name: str,
+    ) -> Input:
+        """Read one submission into this widget's canonical input cohort."""
+        raise NotImplementedError
+
+    def value_from_input(self, input: Input, name: str) -> object:
+        """Extract this widget's value from a canonical input cohort."""
+        raise NotImplementedError
 
     def _child_widget(self, field: Field) -> Widget:
         """Return the widget one child renders with, hidden when this widget is."""
         widget: Widget = field.widget
         if self.input_type != "hidden":
             return widget
-        # Test the hidden mode of this widget. Do not test is_hidden. A child
-        # widget can be hidden already and keep its own attributes and choices.
-        # Django's field.hidden_widget() makes a new HiddenInput and loses them.
         return field.hidden_widget()
 
     @property
     def template_name(self) -> str:
-        # A developer can set any template name. Only a name with the
-        # {layout} placeholder needs substitution. Formatting a name
-        # without the placeholder can raise an error on its own braces.
         if "{layout}" not in self._template_name:
             return self._template_name
         return self._template_name.format(layout=FormLayout.current().value)
@@ -161,15 +119,7 @@ class CompositeWidget(Widget):
 
     @property
     def media(self) -> WidgetMedia:
-        """Merge every ``class Media`` in the MRO. Then add the children's media.
-
-        ``MediaDefiningClass`` installs ``media_property`` only for a class
-        that omits ``media`` from its body.
-        A composite widget must add media from the child form or the child
-        field. The metaclass cannot know about that media. So this class
-        must define ``media`` itself, and must merge the declarations that
-        the metaclass normally merges.
-        """
+        """Merge every ``class Media`` in the MRO and the children's media."""
         media = WidgetMedia()
         for klass in reversed(type(self).__mro__):
             if (definition := klass.__dict__.get("Media")) is not None:
@@ -186,12 +136,8 @@ class CompositeWidget(Widget):
         files: Mapping[str, object],
         name: str,
     ) -> object:
-        """Return the submitted composite value extracted by child widgets."""
-        return self.value_from_normalized_data(
-            self.keys.normalized(data, name),
-            self.keys.normalized(files, name) if files else {},
-            name,
-        )
+        """Read once and extract the submitted composite value."""
+        return self.value_from_input(self.read_input(data, files, name), name)
 
     def value_omitted_from_data(
         self,
@@ -199,25 +145,14 @@ class CompositeWidget(Widget):
         files: Mapping[str, object],
         name: str,
     ) -> bool:
-        """Report whether all supported composite inputs are absent."""
-        return not (
-            self.keys.normalized(data, name) or self.keys.normalized(files, name)
-        )
-
-    def value_from_normalized_data(
-        self,
-        data: Mapping[str, object],
-        files: Mapping[str, object],
-        name: str,
-    ) -> object:
-        raise NotImplementedError
+        """Report whether no supported composite input was submitted."""
+        input = self.read_input(data, files, name)
+        return not input.data and not input.files
 
     def use_required_attribute(self, initial: object) -> bool:
-        """Let child fields own HTML required attributes."""
         return False
 
     def id_for_label(self, id_: str) -> str:
-        """Suppress label targeting, as ``MultiWidget.id_for_label`` does."""
         return ""
 
 
@@ -262,87 +197,21 @@ class MappingWidget(CompositeWidget):
             return tuple(self.form_class().fields)
 
         def canonical(self, key: object, name: str) -> str | None:
-            """Return the canonical child key of one accepted key, or None."""
-            if (child_key := self.split(key, name)) is None:
+            """Return the canonical declared-child key, or ``None``."""
+            if (child_key := self._split(key, name)) is None:
                 return None
             token, suffix = child_key
             key = f"{name}-{token}{suffix}"
-            # A key that only starts with the field name is not a child key.
-            # Refuse it, so that forged input cannot stay in the value.
             return (
                 key
                 if any(
                     key == f"{name}-{child_name}"
                     or key.startswith(f"{name}-{child_name}{separator}")
                     for child_name in self.names
-                    for separator in "_-.["
+                    for separator in ("_", "-")
                 )
                 else None
             )
-
-        def reads_whole_value(self, data: Mapping[str, object], name: str) -> bool:
-            """Refuse a browser value under this field's own name.
-
-            A browser cannot submit a mapping under one key, so a key spelled
-            exactly like the field name is a submit button or forged input.
-            """
-            return not isinstance(data, QueryDict) and super().reads_whole_value(
-                data, name
-            )
-
-        def normalized(
-            self, data: Mapping[str, object], name: str
-        ) -> Mapping[str, object]:
-            """Return the data of the children under canonical keys.
-
-            The values stay as the caller gave them.
-            """
-            if not data:
-                return MultiValueDict()
-
-            if name in data and self.reads_whole_value(data, name):
-                # A whole mapping value and flat child keys can both be
-                # present. See reads_whole_value() for which one wins.
-                value = data.get(name)
-                if not isinstance(value, Mapping):
-                    normalized = MultiValueDict[str, object]()
-                    normalized.setlist(name, [value])
-                    return normalized
-                if isinstance(value, MultiValueDict):
-                    # Keep every repeated value, because a child widget can
-                    # read all values of one key.
-                    normalized = MultiValueDict[str, object]()
-                    for child_name in self.names:
-                        if child_name in value:
-                            normalized.setlist(
-                                f"{name}-{child_name}", value.getlist(child_name)
-                            )
-                    return normalized
-                # Copy the declared children only, so that forged keys do not
-                # stay in the value.
-                normalized = MultiValueDict[str, object]()
-                for child_name in self.names:
-                    if child_name in value:
-                        normalized.setlist(f"{name}-{child_name}", [value[child_name]])
-                return normalized
-
-            if isinstance(data, MultiValueDict):
-                # Keep repeated values in a MultiValueDict, as Django request
-                # data does.
-                normalized = MultiValueDict[str, object]()
-                for source_key in data:
-                    key = self.canonical(source_key, name)
-                    if key is not None:
-                        normalized.setlist(key, data.getlist(source_key))
-                return normalized
-
-            # Plain mappings keep one value for each child key.
-            result: dict[str, object] = {}
-            for source_key, value in data.items():
-                key = self.canonical(source_key, name)
-                if key is not None:
-                    result[key] = value
-            return result
 
     keys: Keys
 
@@ -375,35 +244,71 @@ class MappingWidget(CompositeWidget):
         """Return the fields of one instance of the child Form."""
         return self.form_class().fields
 
-    def value_from_normalized_data(
+    def read_input(
         self,
         data: Mapping[str, object],
         files: Mapping[str, object],
         name: str,
-    ) -> object:
+    ) -> CompositeWidget.Input:
+        """Canonicalize declared children in each input channel once."""
+
+        def canonicalize(source: Mapping[str, object]) -> MultiValueDict[str, object]:
+            result = MultiValueDict[str, object]()
+            if name in source and isinstance(source.get(name), Mapping):
+                value = source.get(name)
+                assert isinstance(value, Mapping)
+                for child_name in self.keys.names:
+                    if child_name in value:
+                        self.keys._copy_key(
+                            result, value, child_name, f"{name}-{child_name}"
+                        )
+                return result
+            for source_key in source:
+                if (target := self.keys.canonical(source_key, name)) is None:
+                    continue
+                previous = result.getlist(target)
+                self.keys._copy_key(result, source, source_key, target)
+                if previous:
+                    previous.extend(result.getlist(target))
+                    result.setlist(target, previous)
+            if not result and name in source:
+                self.keys._copy_key(result, source, name, name)
+            return result
+
+        return self.Input(canonicalize(data), canonicalize(files))
+
+    def value_from_input(self, input: CompositeWidget.Input, name: str) -> object:
         """Extract child values from canonical data and files."""
-        # A whole value holds the whole mapping. Return it, because the caller
-        # gave Python data and no child widget must read it again.
-        if name in data:
-            return data.get(name)
-        if name in files:
-            return files.get(name)
-        if not data and not files:
+        if name in input.data:
+            return input.data.get(name)
+        if name in input.files and not input.data:
+            return input.files.get(name)
+        if not input.data and not input.files:
             return {}
 
-        files = cast("MultiValueDict[str, UploadedFile[Any]]", files)
         value: dict[str, object] = {}
-        # Only a child widget knows how to read its own input, and only it
-        # knows when the browser sent nothing. A child that sent nothing stays
-        # out of the value, so that its initial value survives.
         for child_name, field in self.fields.items():
             child_widget = self._child_widget(field)
-            child_input_name = f"{name}-{child_name}"
-            if child_widget.value_omitted_from_data(data, files, child_input_name):
-                continue
-            value[child_name] = child_widget.value_from_datadict(
-                data, files, child_input_name
-            )
+            input_name = f"{name}-{child_name}"
+            if isinstance(child_widget, CompositeWidget):
+                child_input = child_widget.read_input(
+                    input.data, input.files, input_name
+                )
+                if not child_input.data and not child_input.files:
+                    continue
+                value[child_name] = child_widget.value_from_input(
+                    child_input, input_name
+                )
+            elif not child_widget.value_omitted_from_data(
+                input.data,
+                cast("MultiValueDict[str, UploadedFile[Any]]", input.files),
+                input_name,
+            ):
+                value[child_name] = child_widget.value_from_datadict(
+                    input.data,
+                    cast("MultiValueDict[str, UploadedFile[Any]]", input.files),
+                    input_name,
+                )
         return value
 
     def get_context(
@@ -552,10 +457,11 @@ class SequenceWidget(CompositeWidget):
         each row. ``deleted_indexes`` holds the rows the user deleted.
         """
 
-        management_data: Mapping[str, object] | None = None
+        management_input: MultiValueDict[str, object] | None = None
         management_form: ManagementForm | None = None
         row_errors: Mapping[int, list[object]] = MappingProxyType({})
         deleted_indexes: Collection[int] = frozenset()
+        submission_overflow: bool = False
 
     bound: Bound = Bound()
 
@@ -565,105 +471,29 @@ class SequenceWidget(CompositeWidget):
         js = ("nestingdolls/sequence.js",)
 
     @dataclasses.dataclass(frozen=True, slots=True)
-    class Keys(CompositeWidget.Keys):
-        """Read the input keys of one sequence field as row keys.
+    class Input(CompositeWidget.Input):
+        """Hold one complete, parsed sequence submission."""
 
-        Every row of a sequence has an index. This object changes each accepted
-        key format into one canonical row key, and it gives each row its own
-        input. It knows the management keys of the field. It holds the row
-        limit, so it can refuse an index that is too large.
-        """
+        management_form: ManagementForm | None
+        direct_rows: list[object] | None
+        data_rows: list[MultiValueDict[str, object]]
+        file_rows: list[MultiValueDict[str, object]]
+
+    @dataclasses.dataclass(frozen=True)
+    class Keys(CompositeWidget.Keys):
+        """Hold the bounded dash-index parser for one sequence widget."""
 
         absolute_max: int
-        # The longest digit run that can name a row. A longer run is forged
-        # input, refused before it becomes an integer.
         max_index_digits: ClassVar[int] = 7
 
         def __post_init__(self) -> None:
-            # An index this reader cannot spell names no row, so a limit above
-            # the digit run would leave its upper rows unaddressable. Every
-            # field builds one of these, so this guards every field.
             addressable = 10**self.max_index_digits
             if self.absolute_max >= addressable:
                 raise ValueError(f"absolute_max must be below {addressable}")
 
-        @staticmethod
-        def management_names(name: str) -> set[str]:
-            """Return the management keys for a sequence field name."""
-            return {
-                f"{name}-{TOTAL_FORM_COUNT}",
-                f"{name}-{INITIAL_FORM_COUNT}",
-                f"{name}-{MIN_NUM_FORM_COUNT}",
-                f"{name}-{MAX_NUM_FORM_COUNT}",
-            }
-
-        def has_management_data(self, data: Mapping[str, object], name: str) -> bool:
-            """Report whether the data carries a management key of this field."""
-            return any(key in data for key in self.management_names(name))
-
-        def reads_whole_value(self, data: Mapping[str, object], name: str) -> bool:
-            """Refuse a browser value under this field's own name.
-
-            A rendered sequence always submits management inputs. A key that is
-            only spelled like the field name is then a submit button or forged
-            input, never the whole collection. Data with no management input can
-            still carry the repeated-value spelling of the collection.
-            """
-            if isinstance(data, QueryDict) and self.has_management_data(data, name):
-                return False
-            # ``dataclass(slots=True)`` rebuilds the class, so the zero-argument
-            # ``super()`` of this body would look up the discarded original.
-            return CompositeWidget.Keys.reads_whole_value(self, data, name)
-
-        def total_forms(self, data: Mapping[str, object], name: str) -> int | None:
-            """Return the submitted number of rows, or None when there is none."""
-            value = data.get(f"{name}-{TOTAL_FORM_COUNT}")
-            if value is None or not isinstance(value, (str, int)):
-                return None
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return None
-
-        def whole_value_rows(
-            self, data: Mapping[str, object], name: str
-        ) -> list[object] | None:
-            """Return the rows of a whole list value, or None.
-
-            The return value has three states, and each state matters:
-
-            - ``None`` means there is no usable whole value. The
-              caller must read the flat row keys instead.
-            - ``[]`` means a whole value is present, but is not a
-              list. The sequence is then empty.
-            - A list holds the rows themselves.
-
-            Keep one row more than the limit. The clean step then sees
-            that the input is too large. It reports too_many_forms,
-            instead of silently truncating the input.
-            """
-            if name not in data or not self.reads_whole_value(data, name):
-                return None
-            value = data.get(name)
-            if not isinstance(value, list):
-                return []
-            return value[: self.absolute_max + 1]
-
-        def canonical(self, key: object, name: str) -> tuple[str, int] | None:
-            """Return the canonical row key and the row index, or None.
-
-            This method slices the digit run, instead of parsing it one
-            digit at a time. The token can carry a suffix, as in
-            ``values-2-name``. A digit run longer than
-            ``max_index_digits`` is refused outright. A forged key of
-            thousands of digits never becomes an integer.
-
-            An index at or past ``absolute_max`` names no row, so this
-            method refuses it. It does not clamp the index. A clamped
-            index returns a plausible-looking canonical key, and two
-            different forged keys can then collide on it.
-            """
-            if (child_key := self.split(key, name)) is None:
+        def parsed(self, key: object, name: str) -> tuple[str, int] | None:
+            """Parse a dash-indexed key before applying its row bound."""
+            if (child_key := self._split(key, name)) is None:
                 return None
             token, suffix = child_key
             index_end = 0
@@ -671,159 +501,21 @@ class SequenceWidget(CompositeWidget):
                 index_end += 1
             if not index_end:
                 return None
-            if index_end > self.max_index_digits:
+            digits = token[:index_end]
+            if len(digits) > self.max_index_digits:
                 return None
-            # A leading-zero alias is an attack. It names the same row, so the later key wins.
-            digits = token[:index_end].lstrip("0")
+            digits = digits.lstrip("0")
             index = int(digits) if digits else 0
-            if index >= self.absolute_max:
-                return None
             suffix = token[index_end:] + suffix
-            if suffix and suffix[0] not in "_-.[":
+            if suffix and suffix[0] not in ("_", "-"):
                 return None
-            return (f"{name}-{index}{suffix}", index)
+            return f"{name}-{index}{suffix}", index
 
-        @staticmethod
-        def dense_index_map(indexes: Collection[int]) -> dict[int, int]:
-            """Return a new index for each row index, without the gaps.
-
-            Only the unmanaged flat-key path calls this. When the
-            browser sends management input, Django's management form
-            owns the row count. The original indexes then stay
-            unchanged.
-
-            A plain mapping can have gaps between the indexes, for example 0 and
-            1999. An index that is dense already keeps its place. A larger index
-            moves down to one place after the row before it, so at most one empty
-            row stays in front of it. The order of the rows survives, and a
-            forged index cannot make thousands of rows. An index that
-            ``canonical()`` discarded never reaches this map. It
-            disappears from the dense mapping on its own.
-            """
-            return {
-                original_index: min(original_index, dense_index + 1)
-                for dense_index, original_index in enumerate(sorted(indexes))
-            }
-
-        def rows(
-            self, data: Mapping[str, object], name: str, form_count: int
-        ) -> list[MultiValueDict[str, object]]:
-            """Return one input dict for each row, from index 0 to form_count.
-
-            A composite child widget reads the full input of its row, so a scan
-            for each row would cost the size of the input for each row. This
-            method scans the input one time.
-            """
-            rows = [MultiValueDict[str, object]() for _ in range(form_count)]
-            for key, value in data.items():
-                if (row_key := self.canonical(key, name)) is None:
-                    continue
-                row_name, index = row_key
-                if index < form_count:
-                    rows[index].setlist(
-                        row_name,
-                        data.getlist(key)
-                        if isinstance(data, MultiValueDict)
-                        else [value],
-                    )
-            return rows
-
-        def normalized(
-            self, data: Mapping[str, object], name: str
-        ) -> MultiValueDict[str, object]:
-            """Canonicalize accepted row spellings into Django-style keys and dense rows.
-
-            The result is empty for empty input. A whole value under
-            ``name`` survives under that same key. Every other key of
-            the result is ``name`` itself, or starts with ``name-``.
-            The result holds at most two keys more than the input: the
-            two management keys this method can add.
-            """
-            normalized = MultiValueDict[str, object]()
-            if not data:
-                return normalized
-
-            def values_for(key: str) -> list[object]:
-                # Read repeated input as Django request data reads it.
-                if isinstance(data, MultiValueDict):
-                    return list(data.getlist(key))
-                value = data.get(key)
-                return value if isinstance(value, list) else [value]
-
-            # Keep the management input in the repeated-value structure that
-            # Django expects.
-            management_keys = {
-                key for key in self.management_names(name) if key in data
-            }
-            for key in management_keys:
-                normalized.setlist(key, values_for(key))
-
-            if name in data and self.reads_whole_value(data, name):
-                # A whole list value and flat row keys can both be present.
-                # reads_whole_value() for which one wins.
-                whole_value = values_for(name)
-                normalized[name] = whole_value
-                # A whole value owns the row count. A submitted management
-                # total must not contradict the rows the clean step reads.
-                normalized[f"{name}-{TOTAL_FORM_COUNT}"] = str(len(whole_value))
-                normalized[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
-                return normalized
-
-            overflowed_index = False
-            row_inputs: list[tuple[int, str, list[object]]] = []
-            seen_indexes: set[int] = set()
-            for key in data:
-                if key in management_keys:
-                    continue
-                if (row_key := self.canonical(key, name)) is None:
-                    continue
-                row_name, index = row_key
-                # An index past the row limit never reaches here.
-                # canonical() discards it. Only the row-count cap below
-                # can overflow.
-                if index not in seen_indexes:
-                    if len(seen_indexes) >= self.absolute_max:
-                        # Stop here. Many matching rows must not use memory
-                        # without a limit.
-                        overflowed_index = True
-                        break
-                    seen_indexes.add(index)
-                row_inputs.append((index, row_name, values_for(key)))
-
-            if management_keys:
-                # The management form of Django is in control when the browser
-                # sent management input. Keep the original indexes.
-                if overflowed_index:
-                    # Set a total above the limit, so that the field reports
-                    # the usual too_many_forms error.
-                    normalized.setlist(
-                        f"{name}-{TOTAL_FORM_COUNT}", [str(self.absolute_max + 1)]
-                    )
-                for _, row_name, values in row_inputs:
-                    normalized.setlist(row_name, values)
-                return normalized
-
-            if not row_inputs and not overflowed_index:
-                return normalized
-
-            dense_indexes = self.dense_index_map(seen_indexes)
-            for original_index, row_name, values in row_inputs:
-                # Keep the text after the index, as in ``values-2-name``, so
-                # that a composite child keeps its own key.
-                suffix = row_name.removeprefix(f"{name}-{original_index}")
-                normalized.setlist(
-                    f"{name}-{dense_indexes[original_index]}{suffix}",
-                    values,
-                )
-
-            total_forms = max(dense_indexes.values(), default=-1) + 1
-            if overflowed_index:
-                # Set a total above the limit, so that the field reports the
-                # usual too_many_forms error.
-                total_forms = self.absolute_max + 1
-            normalized[f"{name}-{TOTAL_FORM_COUNT}"] = str(total_forms)
-            normalized[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
-            return normalized
+        def canonical(self, key: object, name: str) -> tuple[str, int] | None:
+            """Return one in-range canonical row key, or ``None``."""
+            if (row_key := self.parsed(key, name)) is None:
+                return None
+            return row_key if row_key[1] < self.absolute_max else None
 
     def __init__(
         self,
@@ -858,42 +550,150 @@ class SequenceWidget(CompositeWidget):
         self.limits = limits
         self.keys = self.Keys(limits.absolute_max)
 
-    def value_from_normalized_data(
+    def _management_form_data(
+        self, input_data: MultiValueDict[str, object], name: str
+    ) -> MultiValueDict[str, object]:
+        """Build Django's management input from data-channel controls only."""
+        result = MultiValueDict[str, object]()
+        for field_name in (TOTAL_FORM_COUNT, INITIAL_FORM_COUNT):
+            key = f"{name}-{field_name}"
+            if key in input_data:
+                self.keys._copy_key(result, input_data, key, key)
+        result[f"{name}-{MIN_NUM_FORM_COUNT}"] = str(self.limits.min_length)
+        result[f"{name}-{MAX_NUM_FORM_COUNT}"] = str(self.limits.max_length)
+        return result
+
+    def read_input(
         self,
         data: Mapping[str, object],
         files: Mapping[str, object],
         name: str,
-    ) -> list[object]:
-        """Extract canonical rows without building past the shared allowance."""
-        with self.SubmissionCountdown(self.limits.submission_max) as countdown:
-            for source in (data, files):
-                if (
-                    whole_value_rows := self.keys.whole_value_rows(source, name)
-                ) is not None:
-                    return whole_value_rows
+    ) -> Input:
+        """Parse canonical channels, management state, and paired row buckets once."""
+        input_data = MultiValueDict[str, object]()
+        input_files = MultiValueDict[str, object]()
 
-            counts = [
-                count
-                for source in (data, files)
-                if (count := self.keys.total_forms(source, name)) is not None
-            ]
-            if not counts:
-                return []
-            form_count = max(counts)
-            if form_count < 0 or form_count > self.limits.absolute_max:
-                return []
-            form_count = countdown.take(form_count)
-            child_widget = self._child_widget(self.child_field)
-            row_data = self.keys.rows(data, name, form_count)
-            row_files = self.keys.rows(files, name, form_count)
-            return [
-                child_widget.value_from_datadict(
-                    row_data[index],
-                    cast("MultiValueDict[str, UploadedFile[Any]]", row_files[index]),
-                    f"{name}-{index}",
+        def direct_rows(source: Mapping[str, object]) -> list[object] | None:
+            values = self.keys._values(source, name)
+            if not values:
+                return None
+            return (
+                values[0]
+                if len(values) == 1 and isinstance(values[0], list)
+                else values
+            )
+
+        data_direct = direct_rows(data)
+        file_direct = direct_rows(files)
+        data_keys: list[tuple[str, int, str]] = []
+        file_keys: list[tuple[str, int, str]] = []
+        indexed = False
+
+        for field_name in (TOTAL_FORM_COUNT, INITIAL_FORM_COUNT):
+            key = f"{name}-{field_name}"
+            if key in data:
+                self.keys._copy_key(input_data, data, key, key)
+        for source, result, collected in (
+            (data, input_data, data_keys),
+            (files, input_files, file_keys),
+        ):
+            for source_key in source:
+                if self.keys.parsed(source_key, name) is not None:
+                    indexed = True
+                if (row_key := self.keys.canonical(source_key, name)) is None:
+                    continue
+                canonical_key, index = row_key
+                self.keys._copy_key(result, source, source_key, canonical_key)
+                collected.append((canonical_key, index, source_key))
+
+        has_management = any(
+            f"{name}-{field_name}" in input_data
+            for field_name in (TOTAL_FORM_COUNT, INITIAL_FORM_COUNT)
+        )
+        if not indexed and data_direct is not None:
+            self.keys._copy_key(input_data, data, name, name)
+            return self.Input(input_data, input_files, None, data_direct, [], [])
+        if not indexed and file_direct is not None:
+            self.keys._copy_key(input_files, files, name, name)
+            return self.Input(input_data, input_files, None, file_direct, [], [])
+        if not indexed and not has_management:
+            return self.Input(input_data, input_files, None, None, [], [])
+
+        management_form = ManagementForm(
+            self._management_form_data(input_data, name), prefix=name
+        )
+        management_form.full_clean()
+        if not management_form.is_valid():
+            return self.Input(input_data, input_files, management_form, None, [], [])
+        total = management_form.cleaned_data[TOTAL_FORM_COUNT]
+        if not isinstance(total, int) or total < 0 or total > self.limits.absolute_max:
+            return self.Input(input_data, input_files, management_form, None, [], [])
+        data_rows = [MultiValueDict[str, object]() for _ in range(total)]
+        file_rows = [MultiValueDict[str, object]() for _ in range(total)]
+        for source, collected, rows in (
+            (data, data_keys, data_rows),
+            (files, file_keys, file_rows),
+        ):
+            for canonical_key, index, source_key in collected:
+                if index < total:
+                    self.keys._copy_key(rows[index], source, source_key, canonical_key)
+        return self.Input(
+            input_data, input_files, management_form, None, data_rows, file_rows
+        )
+
+    def value_from_datadict(
+        self,
+        data: Mapping[str, object],
+        files: Mapping[str, object],
+        name: str,
+    ) -> object:
+        """Read once and extract a standalone sequence submission."""
+        return self.value_from_input(self.read_input(data, files, name), name)
+
+    def value_from_input(self, input: CompositeWidget.Input, name: str) -> list[object]:
+        """Extract rows under an active sequence scope, creating a root if needed."""
+        assert isinstance(input, self.Input), (
+            "SequenceWidget requires SequenceWidget.Input"
+        )
+        if self.SubmissionCountdown._current.get() is None:
+            with self.SubmissionCountdown(self.limits.submission_max):
+                return self._value_from_input(input, name)
+        return self._value_from_input(input, name)
+
+    def _value_from_input(self, input: Input, name: str) -> list[object]:
+        """Extract rows from a parsed sequence cohort under the active budget."""
+        if input.direct_rows is not None:
+            return input.direct_rows[
+                : self.SubmissionCountdown(self.limits.submission_max).take(
+                    len(input.direct_rows)
                 )
-                for index in range(form_count)
             ]
+        if input.management_form is None or not input.management_form.is_valid():
+            return []
+        child_widget = self._child_widget(self.child_field)
+        allowed = self.SubmissionCountdown(self.limits.submission_max).take(
+            len(input.data_rows)
+        )
+        rows: list[object] = []
+        for index in range(allowed):
+            row_name = f"{name}-{index}"
+            if isinstance(child_widget, CompositeWidget):
+                child_input = child_widget.read_input(
+                    input.data_rows[index], input.file_rows[index], row_name
+                )
+                rows.append(child_widget.value_from_input(child_input, row_name))
+            else:
+                rows.append(
+                    child_widget.value_from_datadict(
+                        input.data_rows[index],
+                        cast(
+                            "MultiValueDict[str, UploadedFile[Any]]",
+                            input.file_rows[index],
+                        ),
+                        row_name,
+                    )
+                )
+        return rows
 
     def get_context(
         self,
@@ -924,36 +724,28 @@ class SequenceWidget(CompositeWidget):
             id_ = final_attrs.get("id")
             disabled = bool(final_attrs.get("disabled"))
 
-            # A hidden initial render must show the initial rows, because change
-            # detection compares them with the rows that the browser sent.
-            if self.bound.hidden_initial_value is not None:
+            bound_management_input = self.bound.management_input
+            if self.bound.submission_overflow:
+                # A rejected aggregate submission must not pay to render itself again.
+                value = None
+                bound_management_input = None
+            elif self.bound.hidden_initial_value is not None:
                 value = cast(Sequence[object] | None, self.bound.hidden_initial_value)
-            # Keep runtime initials from expanding rendering without a bound.
             value = (
                 [] if value is None else list(islice(value, self.limits.absolute_max))
             )
-            if self.bound.management_data is not None and self.keys.has_management_data(
-                self.bound.management_data, name
-            ):
-                # The bound field parsed this input already. Reuse that
-                # form, instead of building a second, independent set of
-                # errors.
-                management_form = self.bound.management_form or ManagementForm(
-                    self.bound.management_data, prefix=name
-                )
-                # Bad management input means that the row count is not trustworthy.
-                # Turn off the add and remove controls.
+            management_form = self.bound.management_form
+            if bound_management_input is not None and management_form is not None:
                 management_invalid = not management_form.is_valid()
-                total_forms = cast(int, management_form.cleaned_data[TOTAL_FORM_COUNT])
-                # Show the rows that the management input declares, and no more.
-                # A submitted total can be negative: IntegerField accepts it, so
-                # ManagementForm.clean() keeps it. A negative slice bound would
-                # drop rows off the end of the render, so clamp it at zero.
-                value = value[: max(0, min(total_forms, self.limits.absolute_max))]
+                if management_invalid:
+                    value = []
+                else:
+                    total_forms = cast(
+                        int, management_form.cleaned_data[TOTAL_FORM_COUNT]
+                    )
+                    value = value[: max(0, min(total_forms, self.limits.absolute_max))]
             else:
                 initial_forms = len(value)
-                # An unbound field with no value still needs empty rows, so that
-                # the user can give one.
                 if not value:
                     value = [None] * self.limits.empty_count(self.is_required)
                 management_form = ManagementForm(
@@ -985,11 +777,17 @@ class SequenceWidget(CompositeWidget):
                     child_attrs["id"] = f"{id_}_{index}"
                 if self.child_field.disabled:
                     child_attrs["disabled"] = True
+                if isinstance(item, (str, bytes, bytearray)) and isinstance(
+                    child_widget, (MultiWidget, SequenceWidget)
+                ):
+                    # These widgets have no scalar browser representation. Keep the
+                    # validation error, but never feed a forged scalar to decompress().
+                    item = None
                 if isinstance(child_widget, SequenceWidget):
                     # Give a nested sequence the same management input, as
                     # MultiWidget gives its own input to each child widget.
                     child_widget.bound = child_widget.Bound(
-                        management_data=self.bound.management_data
+                        management_input=bound_management_input
                     )
                     item = cast(Sequence[object] | None, item)
                 subwidget = child_widget.get_context(row_name, item, child_attrs)[
@@ -1042,7 +840,7 @@ class SequenceWidget(CompositeWidget):
             )
             # Keep one hidden delete input for each deleted row, so that the
             # deletion survives the next submission.
-            if self.bound.deleted_indexes:
+            if self.bound.deleted_indexes and not self.bound.submission_overflow:
                 context["widget"]["deleted_rows"] = [
                     {"delete_name": f"{name}-{index}-{DELETION_FIELD_NAME}"}
                     for index in sorted(self.bound.deleted_indexes)

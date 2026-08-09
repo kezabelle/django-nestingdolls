@@ -63,25 +63,16 @@ class CompositeBoundField(BoundField):
         )
 
     @cached_property
-    def _data_input(self) -> Mapping[str, object]:
-        """Cache normalized submitted form data for this field."""
-        return self.field.widget.keys.normalized(self.form.data, self.html_name)
-
-    @cached_property
-    def _file_input(self) -> Mapping[str, object]:
-        """Cache normalized submitted files for this field."""
-        if not self.form.files:
-            return MultiValueDict()
-        return self.field.widget.keys.normalized(self.form.files, self.html_name)
+    def input(self) -> CompositeWidget.Input:
+        """Cache this field's canonical submission cohort."""
+        return self.field.widget.read_input(
+            self.form.data, self.form.files, self.html_name
+        )
 
     @cached_property
     def data(self) -> object:
-        """Return the bound value extracted from normalized data and files."""
-        return self.field.widget.value_from_normalized_data(
-            self._data_input,
-            self._file_input,
-            self.html_name,
-        )
+        """Return the value extracted from the cached submission cohort."""
+        return self.field.widget.value_from_input(self.input, self.html_name)
 
     def as_widget(
         self,
@@ -98,47 +89,25 @@ class CompositeBoundField(BoundField):
     def _prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
         """Put the submitted state this render needs on the widget."""
         widget.bound = widget.Bound(
-            hidden_initial_value=(
-                self._hidden_initial_value(widget)[0] if only_initial else None
-            )
+            hidden_initial_value=self._hidden_initial_value(widget)
+            if only_initial
+            else None
         )
 
-    def _hidden_initial_value(
-        self, widget: CompositeWidget
-    ) -> tuple[object, Mapping[str, object] | None]:
-        """Return the submitted hidden initial value and the data it came from.
-
-        Django only propagates a hidden initial when the initial name is a key of
-        the submitted data. A composite submits child names instead, so read the
-        value here. Django's value would be the current data, which would replace
-        the hidden initial and hide a change.
-
-        Only ``SequenceBoundField._prepare_widget`` uses the second element.
-        It passes that normalized input into ``SequenceWidget.Bound`` as
-        the management data for the hidden initial render. Every other
-        caller discards the second element.
-        """
+    def _hidden_initial_value(self, widget: CompositeWidget) -> object:
+        """Return a hidden initial rebuilt from the submitted composite keys."""
         name = self.html_initial_name
-        data_input = widget.keys.normalized(self.form.data, name)
-        file_input = (
-            widget.keys.normalized(self.form.files, name) if self.form.files else {}
-        )
-        if data_input or file_input:
-            return (
-                widget.value_from_normalized_data(data_input, file_input, name),
-                data_input,
-            )
-        return self.value(), None
+        input = widget.read_input(self.form.data, self.form.files, name)
+        if input.data or input.files:
+            return widget.value_from_input(input, name)
+        return self.value()
 
     def _initial_from_flat_keys(self, source: Mapping[str, object]) -> object | None:
-        """Return an initial value rebuilt from flattened child keys, if any match."""
-        normalized = self.field.widget.keys.normalized(source, self.name)
-        if not normalized:
+        """Return an initial value rebuilt from flattened child keys, if present."""
+        input = self.field.widget.read_input(source, {}, self.name)
+        if not input.data and not input.files:
             return None
-        value: object = self.field.widget.value_from_normalized_data(
-            normalized, {}, self.name
-        )
-        return value
+        return self.field.widget.value_from_input(input, self.name)
 
     def _has_changed(self) -> bool:
         """Read hidden composite initial values through the composite widget."""
@@ -234,7 +203,7 @@ class MappingBoundField(CompositeBoundField):
             return False
         if not isinstance(self.data, Mapping):
             return False
-        if self._data_input or self._file_input:
+        if self.input.data or self.input.files:
             return True
         return (
             isinstance(self.initial, dict)
@@ -248,8 +217,8 @@ class MappingBoundField(CompositeBoundField):
         is_bound = self.is_bound_subform
         initial = self.initial
         subform = self.field.form_class(
-            data=self._data_input if is_bound else None,
-            files=cast("MultiValueDict[str, UploadedFile[Any]]", self._file_input)
+            data=self.input.data if is_bound else None,
+            files=cast("MultiValueDict[str, UploadedFile[Any]]", self.input.files)
             if is_bound
             else None,
             initial=initial if isinstance(initial, dict) else {},
@@ -273,7 +242,7 @@ class MappingBoundField(CompositeBoundField):
             return super()._prepare_widget(widget, only_initial)
         # A hidden initial render must not use the bound child Form, because
         # that Form holds the prefix and the data of the visible render.
-        value, _ = self._hidden_initial_value(widget) if only_initial else (None, None)
+        value = self._hidden_initial_value(widget) if only_initial else None
         widget.bound = widget.Bound(
             hidden_initial_value=value,
             subform=None if only_initial else self.subform,
@@ -292,8 +261,6 @@ class SequenceBoundField(CompositeBoundField):
 
     field: SequenceField
 
-    _over_submission_max: bool = False
-
     def __init__(self, form: BaseForm, field: Field, name: str) -> None:
         from nestingdolls.fields import SequenceField
 
@@ -302,83 +269,78 @@ class SequenceBoundField(CompositeBoundField):
             raise TypeError("field must be a SequenceField")
 
     @dataclasses.dataclass(frozen=True)
-    class Submitted:
-        """Report what the browser sent for the rows of one bound field.
-
-        It reports the rows that the management form declares. It reports the
-        rows that the user deleted, the rows that the child widget did not
-        find, and the errors of each row. It holds the bound field, and it
-        finds each answer one time only. This dataclass has no ``slots``,
-        because ``cached_property`` needs the instance dictionary.
-        """
+    class Submission:
+        """Hold the one parsed request cohort and derived sequence state."""
 
         bound_field: SequenceBoundField
-        # to_python() is a pure function of value; required=False is
-        # unused by it. One shared instance avoids rebuilding a Field
-        # for every row.
         deletion_field: ClassVar[BooleanField] = BooleanField(required=False)
+        rows: list[object] = dataclasses.field(init=False)
+        over_submission_max: bool = dataclasses.field(init=False)
 
-        @cached_property
-        def management_form(self) -> ManagementForm | None:
-            """Build a management form from the canonical sequence input.
-
-            Return None when the input holds no management key. The field then
-            uses the normal Django path and does no formset work.
-            """
+        def __post_init__(self) -> None:
             bf = self.bound_field
-            data = bf._data_input
-            if not bf.field.widget.keys.has_management_data(data, bf.html_name):
-                return None
-            management_form = ManagementForm(data, prefix=bf.html_name)
-            management_form.full_clean()
-            return management_form
+            widget = bf.field.widget
+            with widget.SubmissionCountdown(
+                bf.field.limits.submission_max
+            ) as countdown:
+                rows = widget.value_from_input(bf.input, bf.html_name)
+            object.__setattr__(self, "rows", rows)
+            object.__setattr__(self, "over_submission_max", bool(countdown))
+
+        @property
+        def input(self) -> SequenceWidget.Input:
+            """Return the already-cached, sequence-specific input cohort."""
+            input = self.bound_field.input
+            assert isinstance(input, SequenceWidget.Input)
+            return input
+
+        @property
+        def management_form(self) -> ManagementForm | None:
+            return self.input.management_form
 
         @cached_property
         def deleted(self) -> frozenset[int]:
-            """Return submitted deleted rows, as ``BaseFormSet.deleted_forms`` does."""
+            """Return rows marked for deletion."""
             bf = self.bound_field
             return frozenset(
                 index
-                for index in range(len(bf.data))
+                for index in range(len(self.rows))
                 if self.deletion_field.to_python(
-                    bf._data_input.get(f"{bf.html_name}-{index}-{DELETION_FIELD_NAME}")
+                    self.input.data.get(f"{bf.html_name}-{index}-{DELETION_FIELD_NAME}")
                 )
             )
 
         @cached_property
         def omitted(self) -> frozenset[int]:
-            """Return the extra rows that the child widget did not find.
-
-            A row can have keys in the input but no value for the child widget.
-            Django's formsets ignore such an extra row, and this field does the
-            same. A row that matches an initial row stays, because its value
-            must not disappear.
-            """
-            bf = self.bound_field
-            field = bf.field
-            name = bf.html_name
-            data_input = bf._data_input
-            file_input = bf._file_input
-            if name in data_input or name in file_input:
+            """Return extra rows that their child widget considers omitted."""
+            if self.input.direct_rows is not None:
                 return frozenset()
-            initial_count = len(field.initial_values(bf.initial))
-            row_count = len(bf.data)
-            row_data = field.widget.keys.rows(data_input, name, row_count)
-            row_files = field.widget.keys.rows(file_input, name, row_count)
-            return frozenset(
-                index
-                for index in range(row_count)
-                if index >= initial_count
-                and field.widget.child_field.widget.value_omitted_from_data(
-                    row_data[index],
-                    row_files[index],
-                    f"{name}-{index}",
-                )
-            )
+            bf = self.bound_field
+            child_widget = bf.field.widget._child_widget(bf.field.widget.child_field)
+            initial_count = len(bf.field.initial_values(bf.initial))
+            omitted: set[int] = set()
+            for index, (data, files) in enumerate(
+                zip(self.input.data_rows, self.input.file_rows, strict=True)
+            ):
+                if index < initial_count:
+                    continue
+                name = f"{bf.html_name}-{index}"
+                if isinstance(child_widget, CompositeWidget):
+                    child_input = child_widget.read_input(data, files, name)
+                    is_omitted = not child_input.data and not child_input.files
+                else:
+                    is_omitted = child_widget.value_omitted_from_data(
+                        data,
+                        cast("MultiValueDict[str, UploadedFile[Any]]", files),
+                        name,
+                    )
+                if is_omitted:
+                    omitted.add(index)
+            return frozenset(omitted)
 
         @cached_property
         def errors(self) -> Mapping[int, list[object]]:
-            """Return the child error messages of each row, by row index."""
+            """Return child error messages by row index."""
             row_errors: dict[int, list[object]] = {}
             for error in self.bound_field._all_errors.as_data():
                 if isinstance(error, ItemValidationError) and isinstance(
@@ -388,46 +350,42 @@ class SequenceBoundField(CompositeBoundField):
             return row_errors
 
     @cached_property
-    def submitted(self) -> Submitted:
-        """Return what the browser sent for these rows."""
-        return self.Submitted(self)
+    def submission(self) -> Submission:
+        """Return the one bound-request cohort for this sequence."""
+        return self.Submission(self)
 
     @cached_property
     def data(self) -> list[object]:
-        """Extract rows and retain whether recursive extraction reached its cap."""
-        widget = self.field.widget
-        with widget.SubmissionCountdown(self.field.limits.submission_max) as countdown:
-            rows = widget.value_from_normalized_data(
-                self._data_input, self._file_input, self.html_name
-            )
-        self._over_submission_max = bool(countdown)
-        return rows
+        """Return extracted rows unless nested extraction exceeded its budget."""
+        return [] if self.submission.over_submission_max else self.submission.rows
 
     def _prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
-        """Give the sequence widget the submitted rows, errors, and deletions."""
+        """Give the sequence widget its cached input, errors, and deletions."""
         if not isinstance(widget, SequenceWidget):
             super()._prepare_widget(widget, only_initial)
         elif only_initial:
-            # A hidden initial render must show the initial rows. It shows no
-            # errors, and it keeps a row that the user deleted, because
-            # _has_changed() compares the current rows with these rows.
-            value, management_data = self._hidden_initial_value(widget)
+            name = self.html_initial_name
+            input = widget.read_input(self.form.data, self.form.files, name)
+            assert isinstance(input, SequenceWidget.Input)
             widget.bound = widget.Bound(
-                hidden_initial_value=value, management_data=management_data
+                hidden_initial_value=(
+                    widget.value_from_input(input, name)
+                    if input.data or input.files
+                    else self.value()
+                ),
+                management_input=input.data if input.data else None,
+                management_form=input.management_form,
             )
         elif self.field.disabled:
-            # A disabled field ignores the input everywhere else. The render must
-            # ignore it too, or the page contradicts the value that is saved.
             widget.bound = widget.Bound()
         else:
+            submission = self.submission
             widget.bound = widget.Bound(
-                management_data=self._data_input,
-                # The hidden initial branch above must not reuse this
-                # field. Its data is the initial input, under a different
-                # name.
-                management_form=self.submitted.management_form,
-                row_errors=self.submitted.errors,
-                deleted_indexes=self.submitted.deleted,
+                management_input=submission.input.data,
+                management_form=submission.management_form,
+                row_errors=submission.errors,
+                deleted_indexes=submission.deleted,
+                submission_overflow=submission.over_submission_max,
             )
 
     @cached_property
@@ -475,8 +433,7 @@ class SequenceBoundField(CompositeBoundField):
         number of initial rows instead.
         """
         changed = super()._has_changed()
-        if changed or self.field.disabled or not self.submitted.deleted:
+        if changed or self.field.disabled or not self.submission.deleted:
             return changed
-        # `initial` is a list on every path, so it needs no re-wrapping.
         initial_length = len(self.initial)
-        return any(index < initial_length for index in self.submitted.deleted)
+        return any(index < initial_length for index in self.submission.deleted)

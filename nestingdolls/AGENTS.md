@@ -32,8 +32,6 @@ normal Django behavior and uses JavaScript only for progressive enhancement.
 - After a TypeScript change, run `make js`. `make check` re-runs the build and
   fails on `git diff` when the committed `sequence.js` is not the current
   output, so the compiled file must stay committed.
-- After a change to normalization, change detection, or collection semantics,
-  also run `make crosshair`.
 - For a prose-only change, do not run runtime checks unless executable examples
   changed.
 

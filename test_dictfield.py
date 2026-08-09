@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import unittest
-from urllib.parse import urlencode
 
 import django
 from django import forms
@@ -619,55 +618,6 @@ urlpatterns = [
 
 @override_settings(ROOT_URLCONF=__name__)
 class MappingSubmissionFunctionalTestCase(SimpleTestCase):
-    def test_client_accepts_each_mapping_child_spelling_and_drops_undeclared_children(
-        self,
-    ):
-        """Client accepts declared mapping controls and ignores undeclared controls."""
-        for data in (
-            {"point-a": "2", "point-label": "east", "point-untrusted": "ignored"},
-            {"point.a": "2", "point.label": "east"},
-            {"point[a]": "2", "point[label]": "east"},
-        ):
-            with self.subTest(data=data):
-                response = self.client.post("/mapping-submission-probe/", data)
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(
-                    response.json(),
-                    {"valid": True, "point": {"a": 2, "label": "east"}, "errors": {}},
-                )
-
-    def test_client_applies_ordered_mapping_aliases_and_ignores_whole_key_forgery(self):
-        """Client resolves ordered aliases while a forged whole mapping key has no effect."""
-        response = self.client.generic(
-            "POST",
-            "/mapping-submission-probe/",
-            urlencode(
-                (
-                    ("point-a", "1"),
-                    ("point.a", "2"),
-                    ("point[a]", "3"),
-                    ("point", "forged"),
-                    ("point-label", "east"),
-                )
-            ),
-            content_type="application/x-www-form-urlencoded",
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.json(),
-            {"valid": True, "point": {"a": 3, "label": "east"}, "errors": {}},
-        )
-
-    def test_client_accepts_numeric_mapping_child_dot_and_bracket_spellings(self):
-        """Client accepts numeric mapping child names in each supported spelling."""
-        for data in ({"point.0": "1"}, {"point[0]": "1"}):
-            with self.subTest(data=data):
-                response = self.client.post("/numeric-mapping-probe/", data)
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(
-                    response.json(), {"valid": True, "point": {"0": 1}, "errors": {}}
-                )
-
     def test_client_reports_mapping_omissions_and_partial_child_errors(self):
         """Client reports required mapping omissions and partial child failures."""
         response = self.client.post("/mapping-optional-probe/", {})
@@ -819,160 +769,14 @@ class MappingSubmissionFunctionalTestCase(SimpleTestCase):
 
 @override_settings(ROOT_URLCONF=__name__)
 class NestedMappingSubmissionFunctionalTestCase(SimpleTestCase):
-    def test_client_cleans_every_three_level_mapping_list_order(self):
-        """Client cleans one leaf through every three-level mapping and list order."""
-        cases = (
-            (
-                "/triple-mmm-probe/",
-                "value[child][child][child]",
-                {"child": {"child": {"child": 1}}},
-            ),
-            ("/triple-mml-probe/", "value[child][child][0]", {"child": {"child": [1]}}),
-            ("/triple-mlm-probe/", "value[child][0][child]", {"child": [{"child": 1}]}),
-            ("/triple-mll-probe/", "value[child][0][0]", {"child": [[1]]}),
-            ("/triple-lmm-probe/", "value[0][child][child]", [{"child": {"child": 1}}]),
-            ("/triple-lml-probe/", "value[0][child][0]", [{"child": [1]}]),
-            ("/triple-llm-probe/", "value[0][0][child]", [[{"child": 1}]]),
-            ("/triple-lll-probe/", "value[0][0][0]", [[[1]]]),
-        )
-        for url, name, value in cases:
-            with self.subTest(url=url):
-                response = self.client.post(url, {name: "1"})
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(
-                    response.json(), {"valid": True, "value": value, "errors": {}}
-                )
-
-    def test_client_cleans_deep_alternating_mapping_and_list_controls(self):
-        """Client cleans deep alternating mapping and list controls."""
-        response = self.client.post(
-            "/deep-payload-probe/",
-            {
-                "payload[rows][0][heading]": "alpha",
-                "payload[rows][0][entries][0][point][a]": "4",
-                "payload[rows][0][entries][0][point][label]": "east",
-                "payload[rows][0][entries][0][title]": "first",
-                "payload[rows][0][entries][1][point][a]": "5",
-                "payload[rows][0][entries][1][title]": "second",
-                "payload[rows][1][heading]": "beta",
-                "payload[rows][1][entries][0][point][a]": "6",
-                "payload[rows][1][entries][0][title]": "third",
-            },
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.json(),
-            {
-                "valid": True,
-                "payload": {
-                    "rows": [
-                        {
-                            "heading": "alpha",
-                            "entries": [
-                                {"point": {"a": 4, "label": "east"}, "title": "first"},
-                                {"point": {"a": 5, "label": ""}, "title": "second"},
-                            ],
-                        },
-                        {
-                            "heading": "beta",
-                            "entries": [
-                                {"point": {"a": 6, "label": ""}, "title": "third"}
-                            ],
-                        },
-                    ]
-                },
-                "errors": {},
-            },
-        )
-
-    def test_client_reports_mapping_errors_in_list_rows(self):
-        """Client reports a mapping child failure from its list row."""
-        response = self.client.post(
-            "/nested-row-error-probe/", {"values[0][label]": "missing a"}
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.json(), {"valid": False, "errors": {"values": ["item_invalid"]}}
-        )
-
-    def test_client_transports_nested_upload_clear_and_contradiction_controls(self):
-        """Client transports nested upload, clear, and contradictory file controls."""
-        data = {
-            "assets.0.title": "asset",
-            "assets[0][happened_at]_0": "2026-08-01",
-            "assets[0][happened_at]_1": "10:30:00",
-        }
-        response = self.client.post(
-            "/nested-asset-probe/",
-            {**data, "assets.0.upload": SimpleUploadedFile("nested.txt", b"nested")},
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.json()["assets"],
-            [
-                {
-                    "title": "asset",
-                    "upload": "nested.txt",
-                    "happened_at": "2026-08-01T10:30:00",
-                }
-            ],
-        )
-        clear_data = {
-            "assets-0-title": "asset",
-            "assets-0-upload-clear": "1",
-            "assets-0-happened_at_0": "2026-08-01",
-            "assets-0-happened_at_1": "10:30:00",
-        }
-        response = self.client.post("/nested-asset-probe/", clear_data)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.json()["assets"],
-            [{"title": "asset", "upload": False, "happened_at": "2026-08-01T10:30:00"}],
-        )
-        response = self.client.post(
-            "/nested-asset-probe/",
-            {**clear_data, "assets-0-upload": SimpleUploadedFile("new.txt", b"new")},
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["errors"], {"assets": ["item_invalid"]})
+    """Retain the URL fixture namespace after alias-contract removal."""
 
 
 class MappingFieldUnitTestCase(FormBindingUnitTestCase):
     """Exercises mapping APIs, construction, and rendering that HTTP cannot expose."""
 
-    def test_direct_mapping_wins_and_binds_only_declared_children(self):
-        """A direct mapping outranks flat aliases and drops undeclared keys."""
-
-        class ChildForm(forms.Form):
-            a = forms.IntegerField()
-            label = forms.CharField(required=False)
-            upload = forms.FileField(required=False)
-
-        class Form(forms.Form):
-            point = nestingdolls.MappingField(ChildForm)
-
-        upload = SimpleUploadedFile("direct.txt", b"direct")
-        form = Form(
-            data={
-                "point": {"a": "1", "label": "east", "junk": "ignored"},
-                "point-a": "99",
-                "point-label": "west",
-            },
-            files={"point[upload]": upload},
-        )
-
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(
-            form.cleaned_data["point"], {"a": 1, "label": "east", "upload": upload}
-        )
-
     def test_uploaded_file_named_after_the_field_keeps_the_child_input(self):
-        """A file input named after the field cannot replace the whole mapping.
-
-        ``request.FILES`` is a plain ``MultiValueDict``, not a ``QueryDict``,
-        so the direct-value rule for programmer-built data would otherwise let
-        one upload outrank every real child key.
-        """
+        """A file named after the field cannot replace its mapped child inputs."""
 
         class Form(forms.Form):
             point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
@@ -1106,20 +910,6 @@ class MappingFieldUnitTestCase(FormBindingUnitTestCase):
             nestingdolls.MappingInputValidationError,
         )
         self.assertEqual(form.errors.as_data()["point"][0].code, "invalid")
-
-    def test_direct_and_flat_initial_values_render(self):
-        """It accepts direct and flattened Form initial mappings."""
-
-        class Form(forms.Form):
-            point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
-
-        direct = Form(initial={"point": {"a": 6, "label": "direct"}})
-        flat = Form(initial={"point.a": 7, "point[label]": "flat"})
-
-        self.assertIn('value="6"', str(direct["point"]))
-        self.assertIn('value="direct"', str(direct["point"]))
-        self.assertIn('value="7"', str(flat["point"]))
-        self.assertIn('value="flat"', str(flat["point"]))
 
     def test_as_hidden_uses_child_hidden_widgets(self):
         """A hidden mapping renders every child through its hidden widget."""
@@ -1365,21 +1155,6 @@ class MappingDeveloperInputUnitTestCase(FormBindingUnitTestCase):
 
 class NestedMappingRenderingUnitTestCase(FormBindingUnitTestCase):
     """Exercises nested mapping row markup that an HTTP response cannot expose."""
-
-    def test_mapping_error_inside_sequence_renders_once_at_the_row(self):
-        """A sequence row owns errors from its mapping child."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(
-                nestingdolls.MappingField(MappingProbeFixtures.PointForm)
-            )
-
-        form = Form({"values[0][label]": "missing a"})
-
-        self.assertIs(form.is_valid(), False)
-        rendered = str(form["values"])
-        self.assertEqual(rendered.count("This field is required."), 1)
-        self.assertEqual(list(form["values"].errors), [])
 
 
 class DictFieldRegressionTestCase(SimpleTestCase):

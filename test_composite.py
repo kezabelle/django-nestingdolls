@@ -12,6 +12,7 @@ import copy
 import dataclasses
 import unittest
 from collections.abc import Callable
+from typing import ClassVar
 
 import django
 from django import forms
@@ -21,6 +22,7 @@ from django.forms.formsets import INITIAL_FORM_COUNT, TOTAL_FORM_COUNT
 from django.http import QueryDict
 from django.test import SimpleTestCase
 from django.test.utils import setup_test_environment, teardown_test_environment
+from django.utils.datastructures import MultiValueDict
 
 import nestingdolls
 
@@ -54,7 +56,7 @@ class PointForm(forms.Form):
 
 
 @dataclasses.dataclass(frozen=True)
-class Family:
+class CompositeCase:
     """One composite family, described by what a shared test needs from it."""
 
     name: str
@@ -62,29 +64,22 @@ class Family:
     widget_class: type[nestingdolls.CompositeWidget]
     bound_field_class: type
     make_field: Callable[..., forms.Field]
-    # A submission with one valid child, spelled with the dot separator.
-    dotted_data: dict[str, str]
-    # The same submission as a QueryDict, plus a forged value under the field
-    # name itself.
+    # A submission with one valid child in Django's dash grammar.
+    dash_data: dict[str, str]
+    # The same submission in a repeated-key mapping, plus a forged exact key.
     forged_query: str
-    # What the forged submission must still clean to.
-    forged_cleaned: object
-    # A QueryDict submission whose only key for the field is the forged one.
-    empty_forged_query: str
-    # What that submission must clean to: the empty composite.
-    empty_forged_cleaned: object
     # A direct Python value a programmer would pass, and its cleaned form.
     direct_data: dict[str, object]
     direct_cleaned: object
     # A submission whose only child is invalid.
     invalid_data: dict[str, str]
     invalid_message: str
-    # An initial equal to ``dotted_data`` once the child field converts it.
+    # An initial equal to ``dash_data`` once the child field converts it.
     unchanged_initial: object
 
 
-FAMILIES = (
-    Family(
+COMPOSITE_CASES = (
+    CompositeCase(
         name="sequence",
         field_name="values",
         widget_class=nestingdolls.SequenceWidget,
@@ -92,43 +87,43 @@ FAMILIES = (
         make_field=lambda **kwargs: nestingdolls.ListField(
             forms.IntegerField(), **kwargs
         ),
-        dotted_data={"values.0": "1"},
+        dash_data={
+            "values-0": "1",
+            f"values-{TOTAL_FORM_COUNT}": "1",
+            f"values-{INITIAL_FORM_COUNT}": "0",
+        },
         forged_query=(
             "values=forged&values-0=1&values-1=2&"
             f"values-{TOTAL_FORM_COUNT}=2&values-{INITIAL_FORM_COUNT}=0"
         ),
-        forged_cleaned=[1, 2],
-        empty_forged_query=(
-            f"values=save&values-{TOTAL_FORM_COUNT}=0&values-{INITIAL_FORM_COUNT}=0"
-        ),
-        empty_forged_cleaned=[],
         direct_data={"values": ["3", "4"]},
         direct_cleaned=[3, 4],
-        invalid_data={"values.0": "bad"},
+        invalid_data={
+            "values-0": "bad",
+            f"values-{TOTAL_FORM_COUNT}": "1",
+            f"values-{INITIAL_FORM_COUNT}": "0",
+        },
         invalid_message="Enter a whole number.",
         unchanged_initial=[1],
     ),
-    Family(
+    CompositeCase(
         name="mapping",
         field_name="point",
         widget_class=nestingdolls.MappingWidget,
         bound_field_class=nestingdolls.MappingBoundField,
         make_field=lambda **kwargs: nestingdolls.DictField(PointForm, **kwargs),
-        dotted_data={"point.a": "1"},
+        dash_data={"point-a": "1"},
         forged_query="point=forged&point-a=1&point-label=kept",
-        forged_cleaned={"a": 1, "label": "kept"},
-        empty_forged_query="point=save",
-        empty_forged_cleaned={},
         direct_data={"point": {"a": "3", "label": "direct"}},
         direct_cleaned={"a": 3, "label": "direct"},
-        invalid_data={"point.a": "bad"},
+        invalid_data={"point-a": "bad"},
         invalid_message="Enter a whole number.",
         unchanged_initial={"a": 1},
     ),
 )
 
 
-def form_class_for(family: Family, **kwargs: object) -> type[forms.Form]:
+def form_class_for(family: CompositeCase, **kwargs: object) -> type[forms.Form]:
     """Return a Form with one field of this family, named after the family."""
     return type(
         "Form",
@@ -138,32 +133,28 @@ def form_class_for(family: Family, **kwargs: object) -> type[forms.Form]:
 
 
 class SharedCompositeTestCase(SimpleTestCase):
-    def test_normalizes_bound_data_once(self):
-        """One render normalizes one form's bound data one time."""
-        for family in FAMILIES:
+    def test_reads_bound_input_once(self):
+        """Validation, change detection, and rendering share one input cohort."""
+        for family in COMPOSITE_CASES:
             with self.subTest(family=family.name):
-                counter = {"normalizations": 0}
+                counter = {"reads": 0}
 
-                class CountingKeys(family.widget_class.Keys):
-                    def normalized(self, data, name, _counter=counter):
-                        _counter["normalizations"] += 1
-                        return super().normalized(data, name)
+                class CountingWidget(family.widget_class):
+                    def read_input(self, data, files, name, _counter=counter):
+                        _counter["reads"] += 1
+                        return super().read_input(data, files, name)
 
-                widget_class = type(
-                    "CountingWidget", (family.widget_class,), {"Keys": CountingKeys}
-                )
-                form_class = form_class_for(family, widget=widget_class)
-
-                form = form_class(family.dotted_data)
+                form_class = form_class_for(family, widget=CountingWidget)
+                form = form_class(family.dash_data)
 
                 self.assertIs(form.is_valid(), True, form.errors)
                 self.assertIs(form.has_changed(), True)
                 form.as_p()
-                self.assertEqual(counter["normalizations"], 1)
+                self.assertEqual(counter["reads"], 1)
 
     def test_render_state_is_not_shared_between_form_instances(self):
         """Errors and per-render state of one form never reach another."""
-        for family in FAMILIES:
+        for family in COMPOSITE_CASES:
             with self.subTest(family=family.name):
                 form_class = form_class_for(family, required=False)
 
@@ -183,18 +174,18 @@ class SharedCompositeTestCase(SimpleTestCase):
 
     def test_has_changed_uses_child_field_semantics(self):
         """Change detection asks the child field, not ``==`` on raw input."""
-        for family in FAMILIES:
+        for family in COMPOSITE_CASES:
             with self.subTest(family=family.name):
                 form_class = form_class_for(family, required=False)
 
                 # The child field converts "1" to 1, so a raw `==` on the
                 # submitted strings would call this changed.
                 unchanged = form_class(
-                    family.dotted_data,
+                    family.dash_data,
                     initial={family.field_name: family.unchanged_initial},
                 )
                 changed = form_class(
-                    family.dotted_data,
+                    family.dash_data,
                     initial={family.field_name: family.direct_cleaned},
                 )
 
@@ -211,7 +202,7 @@ class SharedCompositeTestCase(SimpleTestCase):
                 params={"index": "0", "message": "outer", "child_code": "outer"},
             )
 
-        for family in FAMILIES:
+        for family in COMPOSITE_CASES:
             with self.subTest(family=family.name):
                 form_class = form_class_for(family, validators=[reject])
 
@@ -229,7 +220,7 @@ class SharedCompositeTestCase(SimpleTestCase):
         same problem twice. ``_all_errors`` keeps the unfiltered list for the
         row and subform machinery.
         """
-        for family in FAMILIES:
+        for family in COMPOSITE_CASES:
             with self.subTest(family=family.name):
                 form = form_class_for(family, required=False)(family.invalid_data)
 
@@ -252,7 +243,7 @@ class SharedCompositeTestCase(SimpleTestCase):
         def reject_with_two_messages(value):
             raise ValidationError(["First outer.", "Second outer."])
 
-        for family in FAMILIES:
+        for family in COMPOSITE_CASES:
             with self.subTest(family=family.name):
                 form_class = form_class_for(
                     family, required=False, validators=[reject_with_two_messages]
@@ -266,58 +257,74 @@ class SharedCompositeTestCase(SimpleTestCase):
                     ["First outer.", "Second outer."],
                 )
 
-    def test_forged_field_name_key_does_not_discard_child_input(self):
-        """A stray control named after the field cannot wipe the real input.
+    def test_direct_values_do_not_depend_on_mapping_type(self):
+        """A direct composite value works in ordinary and repeated-key mappings."""
+        for family in COMPOSITE_CASES:
+            form_class = form_class_for(family, required=False)
+            inputs = (
+                family.direct_data,
+                MultiValueDict(
+                    {key: [value] for key, value in family.direct_data.items()}
+                ),
+            )
+            for data in inputs:
+                with self.subTest(family=family.name, data_type=type(data).__name__):
+                    form = form_class(data)
 
-        A ``QueryDict`` is the browser's own data. A submit button, or a forged
-        key, sharing the field's name must not outrank the flat child keys.
-        """
-        for family in FAMILIES:
-            with self.subTest(family=family.name):
-                form_class = form_class_for(family, required=False)
+                    self.assertIs(form.is_valid(), True, form.errors)
+                    self.assertEqual(
+                        form.cleaned_data[family.field_name], family.direct_cleaned
+                    )
 
-                form = form_class(QueryDict(family.forged_query))
+    def test_mapping_accepts_declared_dash_children_only(self):
+        """Dot, bracket, and undeclared mapping keys cannot enter a child form."""
 
-                self.assertIs(form.is_valid(), True, form.errors)
-                self.assertEqual(
-                    form.cleaned_data[family.field_name], family.forged_cleaned
-                )
+        class Form(forms.Form):
+            point = nestingdolls.DictField(PointForm, required=False)
 
-    def test_forged_field_name_key_is_ignored_on_an_empty_field(self):
-        """A control named after a field with no child input injects nothing.
+        form = Form(
+            {
+                "point-a": "1",
+                "point-label": "kept",
+                "point-undeclared": "ignored",
+                "point.a": "ignored",
+                "point[a]": "ignored",
+            }
+        )
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["point"], {"a": 1, "label": "kept"})
 
-        ``test_forged_field_name_key_does_not_discard_child_input`` always
-        submits child keys, so the direct value loses to them. With no child
-        key at all, the submit button is the only candidate, and it must still
-        not become the value of the field.
-        """
-        for family in FAMILIES:
-            with self.subTest(family=family.name):
-                form_class = form_class_for(family, required=False)
+    def test_mapping_preserves_getlist_values_for_child_widgets(self):
+        """Canonicalization copies every repeated value through Django's protocol."""
 
-                form = form_class(QueryDict(family.empty_forged_query))
+        class RepeatedInput(dict[str, object]):
+            def getlist(self, key: str) -> list[object]:
+                return self.lists.get(key, [])
 
-                self.assertIs(form.is_valid(), True, form.errors)
-                self.assertEqual(
-                    form.cleaned_data[family.field_name], family.empty_forged_cleaned
-                )
+            def __init__(self) -> None:
+                super().__init__({"point-a": "second"})
+                self.lists = {"point-a": ["first", "second"]}
 
-    def test_programmer_data_keeps_direct_value_precedence(self):
-        """Data a programmer built keeps direct-wins precedence."""
-        for family in FAMILIES:
-            with self.subTest(family=family.name):
-                form_class = form_class_for(family, required=False)
+        class CaptureWidget(forms.TextInput):
+            values: ClassVar[list[object]] = []
 
-                form = form_class(family.direct_data)
+            def value_from_datadict(self, data, files, name):
+                type(self).values = data.getlist(name)
+                return super().value_from_datadict(data, files, name)
 
-                self.assertIs(form.is_valid(), True, form.errors)
-                self.assertEqual(
-                    form.cleaned_data[family.field_name], family.direct_cleaned
-                )
+        class CaptureForm(forms.Form):
+            a = forms.CharField(widget=CaptureWidget)
+
+        class Form(forms.Form):
+            point = nestingdolls.DictField(CaptureForm)
+
+        form = Form(RepeatedInput())
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(CaptureWidget.values, ["first", "second"])
 
     def test_custom_bound_field_keeps_error_integration(self):
         """A bound-field subclass keeps the family's error rendering."""
-        for family in FAMILIES:
+        for family in COMPOSITE_CASES:
             with self.subTest(family=family.name):
                 custom = type("CustomBoundField", (family.bound_field_class,), {})
                 form_class = form_class_for(family, bound_field_class=custom)
@@ -330,7 +337,7 @@ class SharedCompositeTestCase(SimpleTestCase):
 
     def test_bound_field_rejects_a_foreign_field(self):
         """Direct misuse raises even when asserts are stripped."""
-        for family in FAMILIES:
+        for family in COMPOSITE_CASES:
             with (
                 self.subTest(family=family.name),
                 self.assertRaisesRegex(TypeError, "field must be a"),
@@ -339,7 +346,7 @@ class SharedCompositeTestCase(SimpleTestCase):
 
     def test_widget_uses_helper_specific_wrapper_markup(self):
         """Each form helper selects the widget template of the same layout."""
-        for family in FAMILIES:
+        for family in COMPOSITE_CASES:
             with self.subTest(family=family.name):
                 form = form_class_for(family)()
 
@@ -352,7 +359,7 @@ class SharedCompositeTestCase(SimpleTestCase):
 
     def test_widget_switches_layout_between_sequential_renders(self):
         """Layout is per render: no render leaks its choice into the next."""
-        for family in FAMILIES:
+        for family in COMPOSITE_CASES:
             with self.subTest(family=family.name):
                 form = form_class_for(family)()
 
@@ -364,7 +371,7 @@ class SharedCompositeTestCase(SimpleTestCase):
 
     def test_default_render_uses_the_layout_django_will_use(self):
         """``{{ form }}`` picks the layout of the form's own template."""
-        for family in FAMILIES:
+        for family in COMPOSITE_CASES:
             with self.subTest(family=family.name):
                 form = form_class_for(family)()
 
@@ -424,7 +431,7 @@ class SharedCompositeTestCase(SimpleTestCase):
 
     def test_custom_template_name_without_a_layout_placeholder_survives(self):
         """A developer's own template name is used verbatim, braces and all."""
-        for family in FAMILIES:
+        for family in COMPOSITE_CASES:
             with self.subTest(family=family.name):
                 form = form_class_for(family)()
                 widget = copy.deepcopy(form.fields[family.field_name].widget)

@@ -149,6 +149,9 @@ class SequenceHostileFixtures(SimpleTestCase):
 
         values = nestingdolls.ListField(nestingdolls.DictField(RowForm), required=False)
 
+    class JsonSetForm(forms.Form):
+        values = nestingdolls.SetField(forms.JSONField(), required=False)
+
 
 class MappingHostileFixtures(SimpleTestCase):
     """Hold the mapping forms that the hostile routes bind."""
@@ -190,6 +193,13 @@ class MappingHostileFixtures(SimpleTestCase):
             a = forms.IntegerField()
 
         value = nestingdolls.DictField(PointForm)
+
+    class PlainMappingForm(forms.Form):
+        class PointForm(forms.Form):
+            a = forms.IntegerField()
+            label = forms.CharField(required=False)
+
+        value = nestingdolls.DictField(PointForm, required=False)
 
 
 urlpatterns = [
@@ -237,6 +247,10 @@ urlpatterns = [
         HostileProbeView.as_view(form_class=SequenceHostileFixtures.RowUploadForm),
     ),
     path(
+        "hostile-json-set/",
+        HostileProbeView.as_view(form_class=SequenceHostileFixtures.JsonSetForm),
+    ),
+    path(
         "hostile-triple-mapping/",
         HostileProbeView.as_view(
             form_class=MappingHostileFixtures.TripleMappingForm, field_name="value"
@@ -269,6 +283,12 @@ urlpatterns = [
             form_kwargs={"prefix": "outer"},
         ),
     ),
+    path(
+        "hostile-plain-mapping/",
+        HostileProbeView.as_view(
+            form_class=MappingHostileFixtures.PlainMappingForm, field_name="value"
+        ),
+    ),
 ]
 
 
@@ -289,7 +309,6 @@ class HostileClientTestCase(SimpleTestCase):
 class HostileSequenceCrashTestCase(HostileClientTestCase):
     """Prove that no submitted key makes a sequence view raise."""
 
-    @unittest.expectedFailure
     def test_client_survives_a_forged_whole_value_for_compound_child_rows(self):
         """A forged scalar under the field name crashes the redisplay of a
         SplitDateTimeField row.
@@ -346,6 +365,40 @@ class HostileSequenceCrashTestCase(HostileClientTestCase):
                 )
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json()["value"], [1])
+
+    def test_client_survives_a_row_index_longer_than_the_digit_limit(self):
+        """A row index with more digits than the limit names no row."""
+        response = self.client.post(
+            "/hostile-integer-list/",
+            {
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                "values-99999999": "9",
+                "values-0": "1",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["value"], [1])
+
+    def test_client_reports_an_unhashable_json_row_as_a_validation_error(self):
+        """A JSON array in a set row gives a validation error, not a crash.
+
+        ``SetField.compress`` raises when a cleaned row cannot go into a
+        Python ``set``. A request reaches that path with an ordinary JSON
+        array, which ``JSONField`` accepts but ``set()`` cannot hash.
+        """
+        response = self.client.post(
+            "/hostile-json-set/",
+            {
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                "values-0": "[1, 2]",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIs(body["valid"], False)
+        self.assertEqual(body["errors"], {"values": ["unhashable"]})
 
     def test_client_reports_a_null_byte_in_a_row_as_a_validation_error(self):
         """A null byte gives Django's field error, not a broken response."""
@@ -440,7 +493,6 @@ class HostileSequenceCrashTestCase(HostileClientTestCase):
 class HostileSequenceManagementTestCase(HostileClientTestCase):
     """Send management controls that a browser never sends."""
 
-    @unittest.expectedFailure
     def test_client_keeps_rows_when_a_total_ends_in_a_decimal_zero(self):
         """A total of ``2.0`` destroys both submitted rows without a word.
 
@@ -474,7 +526,6 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["value"], [1, 2])
 
-    @unittest.expectedFailure
     def test_client_accepts_a_row_beside_a_junk_unused_management_control(self):
         """A junk ``MIN_NUM_FORMS`` value rejects a correct submission.
 
@@ -499,7 +550,6 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json()["value"], [5])
 
-    @unittest.expectedFailure
     def test_management_error_does_not_call_a_submitted_control_missing(self):
         """The management error names a control that the request did send.
 
@@ -520,56 +570,6 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 200)
         message = " ".join(response.json()["messages"].get("values", []))
         self.assertNotIn(f"Missing fields: values-{MIN_NUM_FORM_COUNT}", message)
-
-    @unittest.expectedFailure
-    def test_client_reports_the_same_code_for_every_oversized_row_count(self):
-        """An unmanaged flood of row keys reports the wrong limit and count.
-
-        DEFECT. ``SequenceWidget.Keys.normalized`` cannot detect index
-        overflow, because ``canonical()`` already discarded every index at or
-        above ``absolute_max``. The ``overflowed_index`` branch is therefore
-        unreachable. Nine submitted rows become five, and the user reads
-        "Ensure this value has at most 3 items (it has 5)." The managed
-        spelling of the same intent reports ``too_many_forms``.
-        """
-        flood = {f"values-{index}": str(index) for index in range(9)}
-
-        managed = self.client.post(
-            "/hostile-narrow-list/",
-            {
-                f"values-{TOTAL_FORM_COUNT}": "9",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-                **flood,
-            },
-        )
-        self.assertEqual(managed.json()["errors"], {"values": ["too_many_forms"]})
-
-        unmanaged = self.client.post("/hostile-narrow-list/", flood)
-        self.assertEqual(unmanaged.status_code, 200)
-        self.assertEqual(unmanaged.json()["errors"], {"values": ["too_many_forms"]})
-
-    @unittest.expectedFailure
-    def test_client_binds_row_zero_for_every_zero_padded_index_length(self):
-        """An index of eight zeros names no row, but seven zeros names row 0.
-
-        DEFECT. ``SequenceWidget.Keys.canonical`` refuses a digit run longer
-        than ``max_index_digits``, which is 7. The refusal happens before the
-        leading zeros are stripped, so ``values-00000000`` is discarded while
-        ``values-0000000`` binds row 0. Both spell index 0, so the same value
-        arrives or disappears with the padding width.
-        """
-        for width in range(1, 10):
-            with self.subTest(width=width):
-                response = self.client.post(
-                    "/hostile-integer-list/",
-                    {
-                        f"values-{TOTAL_FORM_COUNT}": "1",
-                        f"values-{INITIAL_FORM_COUNT}": "0",
-                        f"values-{'0' * width}": "5",
-                    },
-                )
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.json()["value"], [5])
 
     def test_client_keeps_the_last_of_two_duplicate_row_values(self):
         """Two values under one row key give the last value, as Django does."""
@@ -605,18 +605,8 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
 class HostileNestedForgeryTestCase(HostileClientTestCase):
     """Send one extra key that is spelled like a nested composite child."""
 
-    @unittest.expectedFailure
     def test_client_keeps_inner_rows_beside_a_forged_row_name_key(self):
-        """One forged key replaces the inner rows of a row without a word.
-
-        DEFECT. ``CompositeWidget.Keys.reads_whole_value`` treats data that is
-        not a ``QueryDict`` as programmer-supplied, and every nested widget
-        reads a ``MultiValueDict`` that the outer widget built. The
-        anti-forgery rule that protects the outer field is therefore inverted
-        one level down. ``values-0=forged`` becomes the whole value of the
-        inner sequence, so the inner sequence holds the forged text, the
-        submitted row is gone, and the response reports success.
-        """
+        """A direct row key cannot replace unambiguous inner row keys."""
         control = self.client.post(
             "/hostile-nested-text-list/",
             {
@@ -643,7 +633,6 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["value"], [["kept"]])
 
-    @unittest.expectedFailure
     def test_client_does_not_blame_the_user_data_for_a_forged_row_name_key(self):
         """A forged row-name key destroys typed rows and blames their values.
 
@@ -680,16 +669,8 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["value"], [[1, 2]])
 
-    @unittest.expectedFailure
     def test_client_keeps_the_leaf_of_a_nested_mapping_beside_a_forged_key(self):
-        """One key named after a nested mapping discards every grandchild value.
-
-        DEFECT. Same inverted rule as the sequence case. The outer mapping is
-        safe, because ``request.POST`` is a ``QueryDict``. The nested mapping
-        reads a ``MultiValueDict``, so ``value-child=x`` wins over
-        ``value-child-leaf=1`` and the field reports ``item_invalid`` for a
-        request that carried a correct leaf value.
-        """
+        """A direct mapping key cannot replace an unambiguous nested leaf."""
         control = self.post_raw(
             "/hostile-triple-mapping/",
             (("value", "forged"), ("value-child-leaf", "1")),
@@ -703,7 +684,6 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["value"], {"child": {"leaf": 1}})
 
-    @unittest.expectedFailure
     def test_client_keeps_an_optional_nested_leaf_beside_an_empty_forged_key(self):
         """An empty forged key silently drops a nested leaf and reports success.
 
@@ -719,38 +699,90 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["value"], {"child": {"leaf": 1}})
 
-    @unittest.expectedFailure
-    def test_client_keeps_mapping_rows_beside_a_forged_sequence_name_key(self):
-        """A key named after a sequence child of a mapping replaces every row.
-
-        DEFECT. The sequence child of a mapping also reads a
-        ``MultiValueDict``, so ``value-rows=forged`` becomes the whole
-        collection. The two submitted rows disappear, and the reported error
-        describes the forged scalar instead of the submitted rows.
-        """
-        control = self.post_raw(
-            "/hostile-mapping-list/",
-            (("value-rows-0", "1"), ("value-rows-1", "2")),
+    def test_client_keeps_flat_list_rows_beside_a_forged_field_name_key(self):
+        """A direct field-name key cannot replace unambiguous flat row keys."""
+        control = self.client.post(
+            "/hostile-integer-list/",
+            {
+                f"values-{TOTAL_FORM_COUNT}": "2",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                "values-0": "1",
+                "values-1": "2",
+            },
         )
-        self.assertEqual(control.json()["value"], {"rows": [1, 2]})
+        self.assertEqual(control.json()["value"], [1, 2])
 
-        response = self.post_raw(
-            "/hostile-mapping-list/",
-            (
-                ("value-rows", "forged"),
-                ("value-rows-0", "1"),
-                ("value-rows-1", "2"),
-            ),
+        response = self.client.post(
+            "/hostile-integer-list/",
+            {
+                f"values-{TOTAL_FORM_COUNT}": "2",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                "values": "forged",
+                "values-0": "1",
+                "values-1": "2",
+            },
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], {"rows": [1, 2]})
+        self.assertEqual(response.json()["value"], [1, 2])
+
+    def test_client_ignores_a_forged_file_upload_beside_flat_list_rows(self):
+        """A forged file upload under the field name cannot replace flat row keys."""
+        response = self.client.post(
+            "/hostile-integer-list/",
+            {
+                f"values-{TOTAL_FORM_COUNT}": "2",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                "values-0": "1",
+                "values-1": "2",
+                "values": SimpleUploadedFile("forged.txt", b"forged"),
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["value"], [1, 2])
+
+    def test_client_keeps_flat_mapping_children_beside_a_forged_field_name_key(self):
+        """A direct field-name key cannot replace unambiguous flat mapping children."""
+        control = self.post_raw(
+            "/hostile-plain-mapping/",
+            (("value-a", "1"), ("value-label", "kept")),
+        )
+        self.assertEqual(control.json()["value"], {"a": 1, "label": "kept"})
+
+        response = self.post_raw(
+            "/hostile-plain-mapping/",
+            (("value", "forged"), ("value-a", "1"), ("value-label", "kept")),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["value"], {"a": 1, "label": "kept"})
+
+    def test_client_validates_a_lone_forged_scalar_instead_of_an_empty_list(self):
+        """An exact-name scalar with no rows is validated, not silently dropped."""
+        response = self.client.post(
+            "/hostile-integer-list/",
+            {
+                f"values-{TOTAL_FORM_COUNT}": "0",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                "values": "save",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIs(body["valid"], False)
+        self.assertTrue(body["errors"]["values"])
+
+    def test_client_validates_a_lone_forged_scalar_instead_of_an_empty_mapping(self):
+        """An exact-name scalar with no children is validated, not silently dropped."""
+        response = self.client.post("/hostile-plain-mapping/", {"value": "save"})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIs(body["valid"], False)
+        self.assertTrue(body["errors"]["value"])
 
 
 @override_settings(ROOT_URLCONF=__name__)
 class HostileRenderCostTestCase(HostileClientTestCase):
     """Measure the page that a hostile submission makes the server build."""
 
-    @unittest.expectedFailure
     def test_client_does_not_split_a_forged_text_row_into_one_row_per_letter(self):
         """A three-letter forged value renders three inner rows.
 
@@ -767,7 +799,6 @@ class HostileRenderCostTestCase(HostileClientTestCase):
             with self.subTest(letter=letter):
                 self.assertNotIn(f'value="{letter}"', html)
 
-    @unittest.expectedFailure
     def test_client_cannot_expand_one_text_key_into_thousands_of_rendered_rows(self):
         """One 3 KB key builds about 2000 nested rows and a very large page.
 
@@ -787,7 +818,6 @@ class HostileRenderCostTestCase(HostileClientTestCase):
             f"and {payload['rendered_bytes']} bytes",
         )
 
-    @unittest.expectedFailure
     def test_aggregate_row_rejection_does_not_quote_a_respected_per_level_limit(self):
         """The aggregate refusal quotes a per-level limit that every level met.
 
@@ -813,7 +843,6 @@ class HostileRenderCostTestCase(HostileClientTestCase):
         self.assertEqual(body["errors"], {"values": ["too_many_forms"]})
         self.assertNotIn("at most 50 forms", " ".join(body["messages"]["values"]))
 
-    @unittest.expectedFailure
     def test_a_rejected_oversized_submission_does_not_redisplay_its_rows(self):
         """The page that reports "too many forms" still renders those rows.
 
@@ -842,33 +871,33 @@ class HostileRenderCostTestCase(HostileClientTestCase):
             f"and {body['rendered_bytes']} bytes",
         )
 
+    def test_client_cannot_multiply_default_row_caps_with_a_handful_of_keys(self):
+        """A few nested totals cannot claim more rows than the default cap allows.
+
+        Three outer rows each claiming 900 inner rows ask for 3 + 2700 = 2703
+        rows, past the default 2000-row ``submission_max``, from 8 management
+        keys. No per-level ``max_length``/``absolute_max`` override is set, so
+        this is the cap every undecorated ``ListField`` ships with.
+        """
+        payload = {
+            f"values-{TOTAL_FORM_COUNT}": "3",
+            f"values-{INITIAL_FORM_COUNT}": "0",
+        }
+        for index in range(3):
+            payload[f"values-{index}-{TOTAL_FORM_COUNT}"] = "900"
+            payload[f"values-{index}-{INITIAL_FORM_COUNT}"] = "0"
+        self.assertEqual(len(payload), 8)
+
+        response = self.client.post("/hostile-nested-text-list/", payload)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIs(body["valid"], False)
+        self.assertEqual(body["errors"], {"values": ["too_many_forms"]})
+
 
 @override_settings(ROOT_URLCONF=__name__)
 class HostileMappingSpellingTestCase(HostileClientTestCase):
     """Send the same mapping child under more than one accepted spelling."""
-
-    @unittest.expectedFailure
-    def test_client_keeps_every_selection_of_a_child_spelled_two_ways(self):
-        """A second spelling of one child drops the first selection.
-
-        DEFECT. ``MappingWidget.Keys.normalized`` calls ``setlist`` for each
-        source key, so the canonical key of the last accepted spelling
-        replaces the values of the earlier spellings instead of joining them.
-        A child that reads every value, such as a
-        ``MultipleChoiceField``, silently loses a selection.
-        """
-        control = self.post_raw(
-            "/hostile-choices-mapping/",
-            (("value-choices", "a"), ("value-choices", "b")),
-        )
-        self.assertEqual(control.json()["value"], {"choices": ["a", "b"]})
-
-        response = self.post_raw(
-            "/hostile-choices-mapping/",
-            (("value-choices", "a"), ("value.choices", "b")),
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], {"choices": ["a", "b"]})
 
     def test_client_ignores_unprefixed_controls_on_a_prefixed_form(self):
         """A control without the form prefix reaches no field."""

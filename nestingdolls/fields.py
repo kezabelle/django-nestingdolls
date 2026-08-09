@@ -230,7 +230,7 @@ class MappingField(CompositeField):
         - An empty value with no bound subform. The base field turns
           this into "required", or into the empty default.
 
-        One scope makes sequence descendants share the aggregate-row budget:
+        A nested sequence, not this mapping, owns the aggregate-row budget.
         Django formsets cap each level but not nested-row work.
         """
         assert isinstance(bound_field, MappingBoundField), "for mypy"
@@ -269,7 +269,7 @@ class MappingField(CompositeField):
     def prepare_value(self, value: object) -> object:
         """Prepare each mapping member for widget rendering.
 
-        The shared scope clips nested sequence descendants before recursive
+        A nested sequence owns its own render budget before recursive
         preparation, which Django's per-formset limits cannot do.
         """
         try:
@@ -316,6 +316,9 @@ class SequenceField(CompositeField):
             "missing_management_form"
         ],
         "too_many_forms": BaseFormSet.default_error_messages["too_many_forms"],
+        "submission_too_many_forms": _(
+            "Please submit at most %(num)d rows across nested sequences."
+        ),
         "min_length": ngettext_lazy(
             "Ensure this value has at least %(limit_value)d item (it has %(show_value)d).",
             "Ensure this value has at least %(limit_value)d items (it has %(show_value)d).",
@@ -612,16 +615,17 @@ class SequenceField(CompositeField):
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
         rows = bound_field.data
-        if bound_field._over_submission_max:
+        submission = bound_field.submission
+        if submission.over_submission_max:
             raise TooManyFormsValidationError(
-                self.error_messages["too_many_forms"], num=self.limits.max_length
+                self.error_messages["submission_too_many_forms"],
+                num=self.limits.submission_max,
             )
-        submitted = bound_field.submitted
-        management_form = submitted.management_form
+        management_form = submission.management_form
         if (
             management_form is None
-            and not submitted.deleted
-            and not submitted.omitted
+            and not submission.deleted
+            and not submission.omitted
             and not isinstance(self.child_field, FileField)
         ):
             return cast(
@@ -653,7 +657,7 @@ class SequenceField(CompositeField):
             and initial
         ):
             data = [None] * len(initial)
-        return self._clean_values(data, initial, submitted.deleted, submitted.omitted)
+        return self._clean_values(data, initial, submission.deleted, submission.omitted)
 
     def validate(self, value: Collection[object]) -> None:
         """Apply required, minimum, and maximum length checks."""

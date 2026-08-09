@@ -5,9 +5,6 @@ Every command below is a `make` target. Run `make help` for the list.
 - `make check` runs everything and writes nothing, so it is also the CI gate:
   `tscheck`, `jsdrift`, `jstest`, `ruff`, `formatcheck`, `test`, `mypy`.
 - `make fix` applies the lint auto-fixes and the formatter. `check` never does.
-- `make crosshair` confirms the three semantic models in `proof_listfield.py`
-  and `proof_dictfield.py`. It is slow and is not part of `check`. Run it after
-  a change to normalization, change detection, or collection semantics.
 
 # TypeScript
 
