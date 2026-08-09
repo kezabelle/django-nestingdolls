@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .boundfield import MappingBoundField, SequenceBoundField
 from .errors import (
     InvalidInitialValueError,
     ItemValidationError,
@@ -8,24 +9,19 @@ from .errors import (
     SequenceInputValidationError,
     TooManyFormsValidationError,
 )
-from .mappings import (
+from .fields import (
     DictField,
     FormField,
-    MappingBoundField,
-    MappingField,
-    MappingWidget,
-    Subform,
-)
-from .sequences import (
     FrozenSequenceField,
     FrozenSetField,
     ListField,
-    SequenceBoundField,
+    MappingField,
     SequenceField,
-    SequenceWidget,
     SetField,
+    Subform,
     TupleField,
 )
+from .widgets import MappingWidget, SequenceWidget
 
 __all__ = [
     "DictField",

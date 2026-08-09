@@ -1,7 +1,7 @@
 """Contracts that both composite families share.
 
-Every test here exercises ``CompositeWidget``/``CompositeBoundField`` in
-``_shared.py`` rather than either field, so each one runs against both
+Every test here exercises shared ``CompositeWidget``/``CompositeBoundField``
+behavior rather than either field, so each one runs against both
 ``ListField`` and ``DictField``. A behaviour that only one family has belongs in
 ``test_listfield.py`` or ``test_dictfield.py``.
 """
