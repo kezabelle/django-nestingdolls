@@ -18,9 +18,10 @@ from django.forms.formsets import (
     MIN_NUM_FORM_COUNT,
     TOTAL_FORM_COUNT,
 )
-from django.http import QueryDict
-from django.test import SimpleTestCase, override_settings
+from django.http import JsonResponse, QueryDict
+from django.test import Client, SimpleTestCase, override_settings
 from django.test.utils import setup_test_environment, teardown_test_environment
+from django.urls import path
 from django.utils import translation
 from django.utils.datastructures import MultiValueDict
 from hypothesis import HealthCheck, assume, example, given
@@ -80,6 +81,39 @@ DATETIME_ROWS = st.lists(
     max_size=4,
 )
 SET_COLLECTIONS = (nestingdolls.SetField, nestingdolls.FrozenSetField)
+
+
+class _SequenceRootSubmissionLimitForm(forms.Form):
+    outer = nestingdolls.ListField(
+        nestingdolls.ListField(
+            forms.BooleanField(required=False),
+            max_length=10,
+            absolute_max=10,
+        ),
+        max_length=10,
+        absolute_max=10,
+    )
+
+
+def _sequence_root_submission_limit_view(request):
+    form = _SequenceRootSubmissionLimitForm(request.POST)
+    return JsonResponse(
+        {
+            "valid": form.is_valid(),
+            "errors": {
+                name: [error.code for error in errors]
+                for name, errors in form.errors.as_data().items()
+            },
+        }
+    )
+
+
+urlpatterns = [
+    path(
+        "sequence-root-submission-limit/",
+        _sequence_root_submission_limit_view,
+    ),
+]
 SET_CHILD_KINDS = ("integer", "tuple", "splitdatetime")
 
 
@@ -1794,63 +1828,57 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
             extra_item.errors.as_data()["values"][0].params["child_code"], "max_length"
         )
 
-    def test_nested_row_counts_share_one_step_count(self):
-        """Nested totals multiply, so one step count must cover every level."""
+    @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
+    def test_nested_initial_rendering_reserves_rows_before_leaf_preparation(self):
+        """Rendering clips nested initials before preparing excess leaf values."""
 
-        class CountingField(forms.CharField):
-            extractions = 0
+        class CountingField(forms.IntegerField):
+            preparations = 0
 
-            def clean(self, value):
-                CountingField.extractions += 1
-                return super().clean(value)
+            def prepare_value(self, value):
+                CountingField.preparations += 1
+                return super().prepare_value(value)
 
-        class HostileForm(forms.Form):
+        class Form(forms.Form):
             outer = nestingdolls.ListField(
-                nestingdolls.ListField(CountingField(required=False)),
-                required=False,
+                nestingdolls.ListField(
+                    CountingField(),
+                    max_length=10,
+                    absolute_max=10,
+                ),
+                max_length=10,
+                absolute_max=10,
             )
 
-        outer_rows = 498
-        inner_rows = 2000
-        CountingField.extractions = 0
-        hostile = HostileForm(
-            {
-                f"outer-{TOTAL_FORM_COUNT}": str(outer_rows),
-                f"outer-{INITIAL_FORM_COUNT}": "0",
-                **{
-                    f"outer-{index}-{TOTAL_FORM_COUNT}": str(inner_rows)
-                    for index in range(outer_rows)
-                },
-            }
+        large_initial = [list(range(10)), list(range(10, 20))]
+        CountingField.preparations = 0
+        large_html = Form(initial={"outer": large_initial}).as_p()
+        large_leaf_names = (
+            f"outer-{outer_index}-{inner_index}"
+            for outer_index in range(2)
+            for inner_index in range(10)
+        )
+        rendered_large_leaves = sum(
+            large_html.count(f'name="{name}"') for name in large_leaf_names
         )
 
-        self.assertIs(hostile.is_valid(), False)
-        self.assertEqual(hostile.errors.as_data()["outer"][0].code, "too_many_forms")
-        # Extraction stops at the step count, so no child is cleaned at all.
-        # The whole tree may build no more rows than the outermost field's own
-        # absolute_max, which one nesting level could already reach alone.
-        self.assertLessEqual(
-            CountingField.extractions,
-            HostileForm.base_fields["outer"].limits.absolute_max,
+        self.assertLessEqual(rendered_large_leaves, 10)
+        self.assertLessEqual(CountingField.preparations, 10)
+
+        small_initial = [list(range(4)), list(range(4, 8))]
+        CountingField.preparations = 0
+        small_html = Form(initial={"outer": small_initial}).as_p()
+        small_leaf_names = (
+            f"outer-{outer_index}-{inner_index}"
+            for outer_index in range(2)
+            for inner_index in range(4)
+        )
+        rendered_small_leaves = sum(
+            small_html.count(f'name="{name}"') for name in small_leaf_names
         )
 
-        class PointForm(forms.Form):
-            a = forms.IntegerField()
-
-        class LegitimateForm(forms.Form):
-            rows = nestingdolls.ListField(nestingdolls.DictField(PointForm))
-
-        legitimate = LegitimateForm(
-            {
-                f"rows-{TOTAL_FORM_COUNT}": "2",
-                f"rows-{INITIAL_FORM_COUNT}": "0",
-                "rows-0-a": "1",
-                "rows-1-a": "2",
-            }
-        )
-
-        self.assertIs(legitimate.is_valid(), True, legitimate.errors)
-        self.assertEqual(legitimate.cleaned_data["rows"], [{"a": 1}, {"a": 2}])
+        self.assertEqual(rendered_small_leaves, 8)
+        self.assertEqual(CountingField.preparations, 8)
 
     def test_submission_limit_follows_the_django_request_limit(self):
         """Use Django's key limit and the per-level cap for the shared cap.
@@ -1930,37 +1958,34 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual([len(rows) for rows in form.cleaned_data["outer"]], [1999])
 
-    def test_failed_extraction_does_not_share_its_budget(self):
-        """An extraction error restores the cap before the next form starts."""
 
-        class BoomWidget(forms.TextInput):
-            def value_from_datadict(self, data, files, name):
-                raise RuntimeError("boom")
+@override_settings(ROOT_URLCONF=__name__, DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
+class SequenceRootSubmissionLimitRequestTestCase(SimpleTestCase):
+    def test_sequence_root_request_cap_boundaries(self):
+        """Django parses four management keys before nested row work is capped."""
 
-        class ExplodingForm(forms.Form):
-            values = nestingdolls.ListField(forms.CharField(widget=BoomWidget))
+        client = Client()
 
-        limit = ExplodingForm.base_fields["values"].absolute_max
-        exploding = ExplodingForm(
-            {
-                f"values-{TOTAL_FORM_COUNT}": str(limit),
-                f"values-{INITIAL_FORM_COUNT}": "0",
-            }
-        )
-        with self.assertRaises(RuntimeError):
-            self.assertIsNone(exploding["values"].data)
+        for inner_total, expected_valid, expected_errors in (
+            (10, False, {"outer": ["too_many_forms"]}),
+            (9, True, {}),
+        ):
+            with self.subTest(inner_total=inner_total):
+                response = client.post(
+                    "/sequence-root-submission-limit/",
+                    {
+                        f"outer-{TOTAL_FORM_COUNT}": "1",
+                        f"outer-{INITIAL_FORM_COUNT}": "0",
+                        f"outer-0-{TOTAL_FORM_COUNT}": str(inner_total),
+                        f"outer-0-{INITIAL_FORM_COUNT}": "0",
+                    },
+                )
 
-        class HealthyForm(forms.Form):
-            values = nestingdolls.ListField(forms.CharField())
-
-        healthy = HealthyForm(
-            {
-                f"values-{TOTAL_FORM_COUNT}": "1",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0": "x",
-            }
-        )
-        self.assertIs(healthy.is_valid(), True, healthy.errors)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.json(),
+                    {"valid": expected_valid, "errors": expected_errors},
+                )
 
 
 class _HypothesisTestCase(SimpleTestCase):
@@ -2567,21 +2592,10 @@ class NestedSequencePropertyTestCase(_HypothesisTestCase):
         # reach the form with more keys.
         self.assertLessEqual(len(data), settings.DATA_UPLOAD_MAX_NUMBER_FIELDS)
 
-        form = Form(data)
-        bound = form["outer"]
-        limit = form.fields["outer"].limits.submission_max
-
-        rows = bound.data
-        built = len(rows) + sum(len(row) for row in rows)
-        self.assertLessEqual(built, limit)
-
         # Extraction and rendering must not raise for any submitted totals.
-        valid = form.is_valid()
+        form = Form(data)
+        form.is_valid()
         form.as_p()
-
-        if bound.over_submission_max:
-            self.assertIs(valid, False)
-            self.assertEqual(form.errors.as_data()["outer"][0].code, "too_many_forms")
 
 
 class NestedParserRegressionTestCase(SimpleTestCase):

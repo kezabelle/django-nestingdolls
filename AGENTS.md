@@ -60,40 +60,21 @@ keys can ask for about 996000 rows across two levels. It stays below every
 Django request limit. The nested multiplication is the only limit that belongs
 to this package.
 
-`SubmissionCountdown` limits rows for one extraction or render. Follow these
-rules:
+`SequenceWidget.SubmissionCountdown` is the one limit that belongs to this package. It protects attacker-controlled multiplication from recursive sequence nesting, not every collection configured by an application.
 
-- Start the outer scope with
-  `with SubmissionCountdown(limits.submission_max) as countdown`. It stores
-  the counter in its context. An inner scope gets the same counter. All levels
-  spend one cap. `absolute_max` already limits one level. Do not add another
-  per-level limit.
-- Use `Limits.submission_max`. It is
-  `max(absolute_max, DATA_UPLOAD_MAX_NUMBER_FIELDS)`. Do not use a constant
-  and do not walk the field tree. The key limit covers populated rows.
-  `absolute_max` covers empty rows. The default result is 2000, not 1000,
-  because one `TOTAL_FORMS` key can ask for 2000 unchecked checkbox rows.
-- Read the setting for each submission. Do not cache it on the field. A higher
-  Django key limit gives a higher shared cap.
-- A counter at zero must be safe. Extraction stops row building. Cleaning raises
-  `too_many_forms` for the complete submission. Do not remove rows without an
-  error. Rendering only shows rows that fit and does not raise.
-- Keep the class inside `SequenceWidget`. It owns the row extraction and render
-  lifetimes. `SequenceBoundField` reaches it through its configured widget. The
-  class owns its `ContextVar` as a `ClassVar`. Do not move this state to
-  `SequenceField`.
+- Enter `with SubmissionCountdown(limits.submission_max)` only in sequence extraction or rendering. It starts one context-local counter at the outer sequence; nested sequences reuse it. Do not open it in a mapping, `clean()`, a shared composite base class, or a field-tree walk.
+- Call `take(count)` before a sequence builds rows. It returns only rows that fit. Cleaning reports `too_many_forms` for the complete bound submission when extraction ran out; rendering shows only the prefix that fits. Exact use succeeds.
+- `Limits.submission_max` is `max(absolute_max, DATA_UPLOAD_MAX_NUMBER_FIELDS)`. The key limit covers populated rows and `absolute_max` covers empty rows. Read the setting for each submission.
+- Keep the class inside `SequenceWidget`. Its `ContextVar` is a `ClassVar` containing only the remaining row count and overflow state. Do not store field objects, add sentinels, or make mappings depend on it.
 
-Example: three outer rows with 900 inner rows each need 3 + 2700 = 2703 rows.
-The default shared cap of 2000 refuses the complete submission. Two outer rows
-with three inner rows each use 2 + 6 = 8 rows. Parent rows and child rows both
-use the shared cap.
+A request can hold a few nested `TOTAL_FORMS` keys that ask for 2,000 empty rows at each sequence level. Django limits parser keys, files, bytes, and one formset level; it cannot count that recursive row product. Two outer rows with three inner rows spend `2 + 6 = 8` rows. Three outer rows with 900 inner rows spend `3 + 2700 = 2703`, so the default 2,000-row cap rejects the complete submission.
 
 `SetField.Match` counts the members that one comparison looks at with
 `members_left`, which is a plain integer. `members_to_check()` counts them as
 it yields them, so no caller can read a member without paying for it. Keep this
-separate from `SubmissionCountdown`. The two share only the idea of a limit,
-and `Match` needs none of the shared-countdown behaviour. A comparison must not
-fail because an earlier extraction built rows. When `members_left` reaches
+separate from `SubmissionBudget`. The two share only the idea of a limit, and
+`Match` needs none of the shared-budget behaviour. A comparison must not fail
+because an earlier extraction built rows. When `members_left` reaches
 zero, the field reports a change, which causes one more save.
 
 `SequenceWidget.Keys` discards bad keys before they use memory. It discards a

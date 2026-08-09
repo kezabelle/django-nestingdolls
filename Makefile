@@ -4,7 +4,7 @@ RUFF := $(UV_RUN) ruff
 MYPY := $(UV_RUN) mypy
 NPM := npm --silent
 
-PYTHON_FILES := demo.py nestingdolls test_composite.py test_dictfield.py test_listfield.py test_patches.py mypy_settings.py proof_dictfield.py proof_listfield.py
+PYTHON_FILES := demo.py nestingdolls test_composite.py test_dictfield.py test_listfield.py test_patches.py mypy_settings.py
 COMPILED_JS := nestingdolls/static/nestingdolls/sequence.js
 
 .PHONY: js jsdrift tscheck jstest format formatcheck ruff rufffix mypy test check fix

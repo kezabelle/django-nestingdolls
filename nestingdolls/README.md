@@ -248,3 +248,12 @@ use that to select their inner layout.
 This patch is included because Django does not tell a widget which helper method
 rendered the parent form. If the parent form uses `as_p()`, `as_table()`,
 `as_ul()`, or `as_div()`, the widget does not know that by default.
+
+
+## Resource limits
+
+Django limits request parsing before a form receives data. `DATA_UPLOAD_MAX_NUMBER_FIELDS` limits keys, the file setting limits uploads, and the memory settings limit bytes. Django formsets also enforce `max_num` and `absolute_max` for one level. These limits are necessary but do not bound a recursive `ListField`: a small set of nested `TOTAL_FORMS` keys can request many empty rows without exceeding the request-key limit.
+
+`ListField` therefore has one narrow extra guard. `SequenceWidget.SubmissionCountdown` starts at the outer sequence extraction or render with `max(absolute_max, DATA_UPLOAD_MAX_NUMBER_FIELDS)`. Nested sequences share its context-local remaining-row count and spend both parent and child rows. If extraction runs out, validation rejects the complete submission with `too_many_forms`; rendering shows only the rows that fit. Exact use of the count succeeds.
+
+`DictField` has no rows and does not participate. A mapping can contain independent list fields, just as an ordinary Django form can. Their number is application structure, not an attacker-created sequence level, so this package does not add a mapping policy or a global form-tree walk. Python values and decoded JSON bypass Django's request parser; callers accepting arbitrary structures must set their own size and depth limits before creating the form.

@@ -13,6 +13,7 @@ from django.forms.utils import ErrorList
 from django.forms.widgets import Media as WidgetMedia
 from django.forms.widgets import Widget
 from django.http import QueryDict
+from django.utils.datastructures import MultiValueDict
 from django.utils.functional import cached_property
 from django.utils.safestring import SafeString
 
@@ -279,7 +280,7 @@ class CompositeBoundField(BoundField):
     def _file_input(self) -> Mapping[str, object]:
         """Cache normalized submitted files for this field."""
         if not self.form.files:
-            return {}
+            return MultiValueDict()
         return self.field.widget.keys.normalized(self.form.files, self.html_name)
 
     @cached_property

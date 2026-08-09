@@ -66,6 +66,8 @@ class SequenceBoundField(CompositeBoundField):
 
     field: SequenceField
 
+    _over_submission_max: bool = False
+
     def __init__(self, form: BaseForm, field: Field, name: str) -> None:
         super().__init__(form, field, name)
         if not isinstance(self.field, SequenceField):
@@ -162,28 +164,16 @@ class SequenceBoundField(CompositeBoundField):
         """Return what the browser sent for these rows."""
         return self.Submitted(self)
 
-    # ``data`` sets this flag when its shared counter has no rows left.
-    # Extraction stops at the cap to protect memory. Cleaning reads the flag
-    # and raises ``too_many_forms`` for the complete submission.
-    over_submission_max: bool = False
-
     @cached_property
     def data(self) -> list[object]:
-        """Return bound rows and record when the submission exceeds its cap.
-
-        This outer extraction opens the shared counter. Every nested sequence
-        uses the same counter. It can stop row building without raising here.
-        Cleaning later rejects the complete submission when the counter ran out.
-        """
+        """Extract rows and retain whether recursive extraction reached its cap."""
         widget = self.field.widget
         with widget.SubmissionCountdown(self.field.limits.submission_max) as countdown:
-            value = widget.value_from_normalized_data(
-                self._data_input,
-                self._file_input,
-                self.html_name,
+            rows = widget.value_from_normalized_data(
+                self._data_input, self._file_input, self.html_name
             )
-        self.over_submission_max = bool(countdown)
-        return value
+        self._over_submission_max = bool(countdown)
+        return rows
 
     def _prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
         """Give the sequence widget the submitted rows, errors, and deletions."""
@@ -350,6 +340,7 @@ class SequenceField(CompositeField):
             It covers both cases. Read the setting for each submission. If the
             setting is off, use ``DEFAULT_MAX_NUM`` as its fallback.
             """
+            # Zero and None are not supported here. Both use Django's default row cap.
             keys = settings.DATA_UPLOAD_MAX_NUMBER_FIELDS or DEFAULT_MAX_NUM
             return max(self.absolute_max, keys)
 
@@ -528,22 +519,16 @@ class SequenceField(CompositeField):
     ) -> Collection[object]:
         """Clean each row, then validate the result, as ``MultiValueField`` does."""
         if self.limits.over_hard_cap(len(values)):
-            # Refuse too many rows before the field cleans them, because each
-            # row costs one full child validation.
             raise TooManyFormsValidationError(
                 self.error_messages["too_many_forms"], num=self.limits.max_length
             )
         cleaned_data: list[object] = []
         errors = []
         for index, value in enumerate(values):
-            # A deleted row and a row that the browser did not send have no
-            # value to clean.
             if index in deleted_indexes or index in omitted_indexes:
                 continue
             initial = initial_values[index] if index < len(initial_values) else None
             try:
-                # A disabled child ignores the input, so clean the initial
-                # value.
                 if self.child_field.disabled:
                     cleaned = self.child_field.clean(initial)
                 elif isinstance(self.child_field, FileField):
@@ -551,8 +536,6 @@ class SequenceField(CompositeField):
                 else:
                     cleaned = self.child_field.clean(value)
             except ValidationError as error:
-                # Collect the errors of all rows, so that the user sees every
-                # bad row one time.
                 errors.extend(ItemValidationError.for_messages_of(index, error))
             else:
                 cleaned_data.append(cleaned)
@@ -564,29 +547,19 @@ class SequenceField(CompositeField):
         return result
 
     def clean(self, value: object) -> Collection[object]:
-        """Clean an already-collected sequence value."""
+        """Clean caller-supplied values with this field's normal row rules."""
         return self._clean_values(self.to_python(value), [])
 
     def _clean_bound_field(self, bound_field: BoundField) -> Collection[object]:
-        """Clean the rows of a bound form.
-
-        ``ManagementForm`` checks the management input, because Django owns
-        those rules. A ``FileField`` child gets ``clean(data, initial)``,
-        because that API holds Django's rules for an upload, for a clear box,
-        and for a contradiction between them. Each other child field gets its
-        normal ``clean(value)``.
-        """
+        """Clean rows already extracted by the sequence-owned countdown."""
         assert isinstance(bound_field, SequenceBoundField), "for mypy"
         if self.disabled:
             return cast(
                 Collection[object],
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
-        # Build rows before child cleaning starts. If the shared cap stops row
-        # building, reject the complete submission. Do not clean only the rows
-        # that fit.
         rows = bound_field.data
-        if bound_field.over_submission_max:
+        if bound_field._over_submission_max:
             raise TooManyFormsValidationError(
                 self.error_messages["too_many_forms"], num=self.limits.max_length
             )
@@ -602,7 +575,6 @@ class SequenceField(CompositeField):
                 Collection[object],
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
-
         if management_form is not None:
             if not management_form.is_valid():
                 raise MissingManagementFormValidationError(
@@ -619,8 +591,6 @@ class SequenceField(CompositeField):
                 raise TooManyFormsValidationError(
                     self.error_messages["too_many_forms"], num=self.limits.max_length
                 )
-
-        # `initial` is a list on every path, so it needs no re-wrapping.
         initial = bound_field.initial
         data = self.to_python(rows)
         if (
@@ -629,9 +599,6 @@ class SequenceField(CompositeField):
             and not data
             and initial
         ):
-            # The browser sends no file input when the user changes nothing.
-            # Make one empty row for each initial file, so that
-            # FileField.clean() can keep that file.
             data = [None] * len(initial)
         return self._clean_values(data, initial, submitted.deleted, submitted.omitted)
 
@@ -665,14 +632,16 @@ class SequenceField(CompositeField):
         """Bind each submitted row against its matching initial value."""
         if self.disabled:
             return self.initial_values(initial)
+
+        data = self.to_python(data)
         # Show no rows for a submission that is too large. The clean step
         # records the too_many_forms error, and no row must reach a child
         # widget.
-        if isinstance(data, list) and self.limits.over_hard_cap(len(data)):
+        if self.limits.over_hard_cap(len(data)):
             return []
         initial = self.initial_values(initial)
         values = []
-        for index, value in enumerate(self.to_python(data)):
+        for index, value in enumerate(data):
             initial_value = initial[index] if index < len(initial) else None
             try:
                 value = self.child_field.bound_data(value, initial_value)
@@ -689,20 +658,30 @@ class SequenceField(CompositeField):
         return values
 
     def prepare_value(self, value: object) -> list[object]:
-        """Prepare each row for widget rendering."""
-        values = []
-        for row in self.initial_values(value, limit=self.limits.absolute_max):
-            try:
-                row = self.child_field.prepare_value(row)
-            except (InvalidInitialValueError, ValidationError):
-                # Same render-time fallback as bound_data(). A composite
-                # child can refuse a bad row, for example a nested
-                # MappingField row given as a scalar. Show the row the
-                # way Django does, instead of raising an error
-                # mid-render.
-                row = super().prepare_value(row)
-            values.append(row)
-        return values
+        """Prepare admitted initial rows for widget rendering.
+
+        Server-provided initial values bypass Django request parsing, so reserve
+        before recursive preparation. Rendering clips to the lazy shared maximum
+        rather than raising, without discovering every nested field first.
+        """
+        rows = self.initial_values(value, limit=self.limits.absolute_max)
+        with SequenceWidget.SubmissionCountdown(
+            self.limits.submission_max
+        ) as countdown:
+            rows = rows[: countdown.take(len(rows))]
+            values = []
+            for row in rows:
+                try:
+                    row = self.child_field.prepare_value(row)
+                except (InvalidInitialValueError, ValidationError):
+                    # Same render-time fallback as bound_data(). A composite
+                    # child can refuse a bad row, for example a nested
+                    # MappingField row given as a scalar. Show the row the
+                    # way Django does, instead of raising an error
+                    # mid-render.
+                    row = super().prepare_value(row)
+                values.append(row)
+            return values
 
     def has_changed(self, initial: object, data: object) -> bool:
         """Compare submitted rows using child-field change semantics."""
@@ -942,56 +921,42 @@ class SequenceWidget(CompositeWidget):
 
     @dataclasses.dataclass(slots=True)
     class SubmissionCountdown:
-        """Limit the rows that one submission can build.
+        """Limit rows built by one recursively nested sequence extraction or render.
 
-        The context holds only native integer state. ``None`` means no counter
-        is active. A non-negative integer is the remaining row count. ``-1``
-        means a level asked for more rows than fit. The outer extraction or
-        render sets the initial count. Inner scopes read and replace the same
-        integer.
-
-        Example: the default cap is 2000 rows. Three outer rows can each ask for
-        900 inner rows. The work would build 3 + 2700 = 2703 rows, so the context
-        becomes ``-1`` after it grants the first 2000 rows. Two outer rows that
-        each ask for three inner rows use 2 + 6 = 8 rows. Parent rows count too.
-
-        ``take(n)`` returns the rows that fit in the remaining count. Exact use
-        of the count leaves ``0`` and is valid. A request that exceeds the count
-        stores ``-1``. The outer exit records that result privately before it
-        restores the prior context. The counter is true when extraction must
-        raise ``too_many_forms`` during cleaning. Rendering only uses rows that fit,
-        so rendering does not raise.
+        Django limits request keys, files, and bytes before a form sees them, and a
+        formset caps one level. A few nested ``TOTAL_FORMS`` keys can still multiply
+        empty rows across sequence levels. This small context-local counter is only
+        for that attacker-controlled recursive work. It is intentionally not a
+        mapping or form-wide policy.
         """
 
-        _current: ClassVar[ContextVar[int | None]] = ContextVar(
-            "nestingdolls_submission_countdown",
-            default=None,
+        _current: ClassVar[ContextVar[tuple[int, bool] | None]] = ContextVar(
+            "nestingdolls_submission_countdown", default=None
         )
 
-        cap: int
+        count: int
         _ran_out: bool = False
-        _token: Token[int | None] | None = dataclasses.field(
+        _token: Token[tuple[int, bool] | None] | None = dataclasses.field(
             default=None, init=False, repr=False
         )
 
         def __bool__(self) -> bool:
-            """Report whether any level exceeded the shared cap."""
+            """Report whether this outer scope exceeded its shared allowance."""
             return self._ran_out
 
         def take(self, count: int) -> int:
-            """Reserve up to ``count`` rows from the integer context state."""
-            left = self._current.get()
-            assert left is not None, "SubmissionCountdown must be active"
-            if left < 0:
-                return 0
-            allowed = min(count, left)
-            self._current.set(-1 if allowed < count else left - allowed)
+            """Reserve the rows that fit in the active shared allowance."""
+            state = self._current.get()
+            assert state is not None, "SubmissionCountdown must be active"
+            remaining, ran_out = state
+            allowed = min(count, remaining)
+            self._current.set((remaining - allowed, ran_out or allowed < count))
             return allowed
 
         def __enter__(self) -> Self:
-            """Set the initial count only when no outer scope is active."""
+            """Start the counter at the outer sequence and reuse it inside rows."""
             if self._current.get() is None:
-                self._token = self._current.set(self.cap)
+                self._token = self._current.set((self.count, False))
             return self
 
         def __exit__(
@@ -1000,11 +965,12 @@ class SequenceWidget(CompositeWidget):
             exc_value: BaseException | None,
             traceback: TracebackType | None,
         ) -> None:
-            """Record overflow and restore the context after the outer scope ends."""
+            """Remember outer overflow and restore the preceding context."""
             if self._token is not None:
-                self._ran_out = self._current.get() == -1
+                state = self._current.get()
+                assert state is not None, "SubmissionCountdown must be active"
+                self._ran_out = state[1]
                 self._current.reset(self._token)
-                self._token = None
 
     @dataclasses.dataclass(frozen=True, slots=True)
     class Bound(CompositeWidget.Bound):
@@ -1138,6 +1104,7 @@ class SequenceWidget(CompositeWidget):
                 return None
             if index_end > self.max_index_digits:
                 return None
+            # A leading-zero alias is an attack. It names the same row, so the later key wins.
             digits = token[:index_end].lstrip("0")
             index = int(digits) if digits else 0
             if index >= self.absolute_max:
@@ -1326,41 +1293,24 @@ class SequenceWidget(CompositeWidget):
         files: Mapping[str, object],
         name: str,
     ) -> list[object]:
-        """Extract row values from canonicalized data and files.
-
-        Four shapes leave early, in this order:
-
-        1. A whole list value under ``name``, in data before files.
-        2. A whole list value under ``name``, in files.
-        3. No management total in either source. No rows were
-           submitted.
-        4. A total that is negative or past ``absolute_max``. This
-           total is forged, and this method must not build rows for
-           it.
-
-        Everything else goes row by row through the child widget.
-        """
-        for source in (data, files):
-            if (
-                whole_value_rows := self.keys.whole_value_rows(source, name)
-            ) is not None:
-                return whole_value_rows
-
-        counts = [
-            count
-            for source in (data, files)
-            if (count := self.keys.total_forms(source, name)) is not None
-        ]
-        if not counts:
-            return []
-        form_count = max(counts)
-        if form_count < 0 or form_count > self.limits.absolute_max:
-            # This total is outside the per-level cap. Do not build rows or
-            # call a child widget for it.
-            return []
+        """Extract canonical rows without building past the shared allowance."""
         with self.SubmissionCountdown(self.limits.submission_max) as countdown:
-            # Reserve this level before recursive child work. Otherwise child
-            # levels can spend the cap and leave this level with no rows.
+            for source in (data, files):
+                if (
+                    whole_value_rows := self.keys.whole_value_rows(source, name)
+                ) is not None:
+                    return whole_value_rows
+
+            counts = [
+                count
+                for source in (data, files)
+                if (count := self.keys.total_forms(source, name)) is not None
+            ]
+            if not counts:
+                return []
+            form_count = max(counts)
+            if form_count < 0 or form_count > self.limits.absolute_max:
+                return []
             form_count = countdown.take(form_count)
             child_widget = self._child_widget(self.child_field)
             row_data = self.keys.rows(data, name, form_count)
@@ -1368,7 +1318,7 @@ class SequenceWidget(CompositeWidget):
             return [
                 child_widget.value_from_datadict(
                     row_data[index],
-                    cast(MultiValueDict[str, UploadedFile], row_files[index]),
+                    cast("MultiValueDict[str, UploadedFile[Any]]", row_files[index]),
                     f"{name}-{index}",
                 )
                 for index in range(form_count)
@@ -1380,7 +1330,12 @@ class SequenceWidget(CompositeWidget):
         value: Sequence[object] | None,
         attrs: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Build rows with the shared cap and use management input when present."""
+        """Render only rows admitted by the shared aggregate budget.
+
+        Django limits parser input and individual formsets, not aggregate nested
+        row work. The scope's lazy maximum reuses parent allowance without a
+        field-tree walk; rendering clips rather than raising on exhaustion.
+        """
         with self.SubmissionCountdown(self.limits.submission_max) as countdown:
             context = super().get_context(name, value, attrs)
             child_widget = self._child_widget(self.child_field)

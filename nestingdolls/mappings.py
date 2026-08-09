@@ -128,14 +128,16 @@ class MappingWidget(CompositeWidget):
             The values stay as the caller gave them.
             """
             if not data:
-                return {}
+                return MultiValueDict()
 
             if name in data and self.reads_whole_value(data, name):
                 # A whole mapping value and flat child keys can both be
                 # present. See reads_whole_value() for which one wins.
                 value = data.get(name)
                 if not isinstance(value, Mapping):
-                    return {name: value}
+                    normalized = MultiValueDict[str, object]()
+                    normalized.setlist(name, [value])
+                    return normalized
                 if isinstance(value, MultiValueDict):
                     # Keep every repeated value, because a child widget can
                     # read all values of one key.
@@ -148,11 +150,11 @@ class MappingWidget(CompositeWidget):
                     return normalized
                 # Copy the declared children only, so that forged keys do not
                 # stay in the value.
-                return {
-                    f"{name}-{child_name}": value[child_name]
-                    for child_name in self.names
-                    if child_name in value
-                }
+                normalized = MultiValueDict[str, object]()
+                for child_name in self.names:
+                    if child_name in value:
+                        normalized.setlist(f"{name}-{child_name}", [value[child_name]])
+                return normalized
 
             if isinstance(data, MultiValueDict):
                 # Keep repeated values in a MultiValueDict, as Django request
@@ -165,11 +167,12 @@ class MappingWidget(CompositeWidget):
                 return normalized
 
             # Plain mappings keep one value for each child key.
-            return {
-                key: value
-                for source_key, value in data.items()
-                if (key := self.canonical(source_key, name)) is not None
-            }
+            result: dict[str, object] = {}
+            for source_key, value in data.items():
+                key = self.canonical(source_key, name)
+                if key is not None:
+                    result[key] = value
+            return result
 
     keys: Keys
 
@@ -218,7 +221,7 @@ class MappingWidget(CompositeWidget):
         if not data and not files:
             return {}
 
-        files = cast(MultiValueDict[str, UploadedFile], files)
+        files = cast("MultiValueDict[str, UploadedFile[Any]]", files)
         value: dict[str, object] = {}
         # Only a child widget knows how to read its own input, and only it
         # knows when the browser sent nothing. A child that sent nothing stays
@@ -239,7 +242,9 @@ class MappingWidget(CompositeWidget):
         """Build the context of the widget, with a prefixed child Form.
 
         The bound field supplies the child Form when the outer form is bound.
-        An unbound render gets no Form, and it builds one from the value.
+        An unbound render gets no Form, and it builds one from the value that it
+        gets. The shared budget covers sequence descendants because Django
+        bounds each formset level, not aggregate nested rows.
         """
         context = super().get_context(name, value, attrs)
         subform = self.bound.subform
@@ -374,7 +379,9 @@ class MappingBoundField(CompositeBoundField):
         initial = self.initial
         subform = self.field.form_class(
             data=self._data_input if is_bound else None,
-            files=cast(Any, self._file_input) if is_bound else None,
+            files=cast("MultiValueDict[str, UploadedFile[Any]]", self._file_input)
+            if is_bound
+            else None,
             initial=initial if isinstance(initial, dict) else {},
             prefix=self.html_name,
             auto_id=self.form.auto_id,
@@ -404,7 +411,11 @@ class MappingBoundField(CompositeBoundField):
 
 
 class MappingField(CompositeField):
-    """Clean and validate the fixed set of children that one Form declares."""
+    """Clean and validate the fixed set of children that one Form declares.
+
+    A mapping has named child fields. It has no row count. A sequence child
+    starts and owns its row count.
+    """
 
     widget: MappingWidget
     default_error_messages = {  # noqa: RUF012
@@ -532,7 +543,8 @@ class MappingField(CompositeField):
         """Clean a mapping of values that a caller collected.
 
         The child Form gets ``_ValueBoundField``, because this input holds
-        Python values under child names and no prefixed input names.
+        Python values under child names and no prefixed input names. The shared
+        budget protects nested sequence rows that bypass Django request parsing.
         """
         value = self.to_python(value)
         if not value:
@@ -555,6 +567,9 @@ class MappingField(CompositeField):
           the "invalid" error.
         - An empty value with no bound subform. The base field turns
           this into "required", or into the empty default.
+
+        One scope makes sequence descendants share the aggregate-row budget:
+        Django formsets cap each level but not nested-row work.
         """
         assert isinstance(bound_field, MappingBoundField), "for mypy"
         if self.disabled:
@@ -590,7 +605,11 @@ class MappingField(CompositeField):
             return super().bound_data(data, initial)
 
     def prepare_value(self, value: object) -> object:
-        """Prepare each mapping member for widget rendering."""
+        """Prepare each mapping member for widget rendering.
+
+        The shared scope clips nested sequence descendants before recursive
+        preparation, which Django's per-formset limits cannot do.
+        """
         try:
             value = self.initial_value(value)
             return {

@@ -108,3 +108,11 @@ normal Django behavior and uses JavaScript only for progressive enhancement.
 
 Use ASD-STE100 Simplified Technical English in documentation, comments, and
 docstrings.
+
+
+## Recursive sequence limits
+
+- Django owns request key, file, and byte limits and formset-style per-level `absolute_max`. Do not duplicate those controls.
+- `SequenceWidget.SubmissionCountdown` owns only recursive sequence row multiplication. Keep it in `sequences.py`; mappings and shared composite classes must not import, start, inspect, or extend it.
+- Use its normal `__enter__`/`__exit__` lifecycle around sequence extraction and rendering. Its context holds only remaining rows and an overflow flag. Do not add marker values, field objects, lazy cap expansion, or a separate `scope()` API.
+- Never put the limit in overridable field `clean()` methods. Bound extraction records overflow; bound cleaning reports `too_many_forms`; rendering clips. Direct Python or decoded JSON callers own their input size and depth limits.
