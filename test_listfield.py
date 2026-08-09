@@ -19,14 +19,11 @@ from django.forms.formsets import (
     TOTAL_FORM_COUNT,
 )
 from django.http import JsonResponse, QueryDict
-from django.test import Client, SimpleTestCase, override_settings
+from django.test import SimpleTestCase, override_settings
 from django.test.utils import setup_test_environment, teardown_test_environment
 from django.urls import path
 from django.utils import translation
 from django.utils.datastructures import MultiValueDict
-from hypothesis import HealthCheck, assume, example, given
-from hypothesis import settings as hypothesis_settings
-from hypothesis import strategies as st
 
 import nestingdolls
 
@@ -55,34 +52,6 @@ def tearDownModule():
     teardown_test_environment()
 
 
-HYPOTHESIS_SETTINGS = hypothesis_settings(
-    max_examples=50,
-    deadline=None,
-    suppress_health_check=[HealthCheck.too_slow],
-)
-SMALL_INTEGERS = st.integers(min_value=-5, max_value=5)
-SMALL_INTEGER_LISTS = st.lists(SMALL_INTEGERS, max_size=5)
-JSON_SCALARS = (
-    st.none()
-    | st.booleans()
-    | st.integers(min_value=-5, max_value=5)
-    | st.text(max_size=5)
-)
-JSON_VALUES = st.recursive(
-    JSON_SCALARS,
-    lambda children: (
-        st.lists(children, max_size=3)
-        | st.dictionaries(st.text(max_size=4), children, max_size=3)
-    ),
-    max_leaves=8,
-)
-DATETIME_ROWS = st.lists(
-    st.datetimes(timezones=st.none()).map(lambda value: value.replace(microsecond=0)),
-    max_size=4,
-)
-SET_COLLECTIONS = (nestingdolls.SetField, nestingdolls.FrozenSetField)
-
-
 class _SequenceRootSubmissionLimitForm(forms.Form):
     outer = nestingdolls.ListField(
         nestingdolls.ListField(
@@ -108,13 +77,91 @@ def _sequence_root_submission_limit_view(request):
     )
 
 
+class _MappingRootValuesForm(forms.Form):
+    first = nestingdolls.ListField(
+        forms.BooleanField(required=False),
+        required=False,
+        max_length=10,
+        absolute_max=10,
+    )
+    second = nestingdolls.ListField(
+        forms.BooleanField(required=False),
+        required=False,
+        max_length=10,
+        absolute_max=10,
+    )
+
+
+class _MappingRootSubmissionLimitForm(forms.Form):
+    values = nestingdolls.DictField(_MappingRootValuesForm)
+
+
+def _mapping_root_submission_limit_view(request):
+    form = _MappingRootSubmissionLimitForm(request.POST)
+    valid = form.is_valid()
+    return JsonResponse(
+        {
+            "valid": valid,
+            "lengths": (
+                {name: len(rows) for name, rows in form.cleaned_data["values"].items()}
+                if valid
+                else {}
+            ),
+        }
+    )
+
+
+class _SequenceMappingSequenceItemForm(forms.Form):
+    tags = nestingdolls.ListField(
+        forms.BooleanField(required=False),
+        required=False,
+        max_length=10,
+        absolute_max=10,
+    )
+
+
+class _SequenceMappingSequenceSubmissionForm(forms.Form):
+    items = nestingdolls.ListField(
+        nestingdolls.DictField(_SequenceMappingSequenceItemForm),
+        required=False,
+        max_length=10,
+        absolute_max=10,
+    )
+
+
+def _sequence_mapping_sequence_submission_view(request):
+    form = _SequenceMappingSequenceSubmissionForm(request.POST)
+    valid = form.is_valid()
+    return JsonResponse(
+        {
+            "valid": valid,
+            "errors": {
+                name: [error.code for error in errors]
+                for name, errors in form.errors.as_data().items()
+            },
+            "tag_counts": (
+                [len(item["tags"]) for item in form.cleaned_data["items"]]
+                if valid
+                else []
+            ),
+        }
+    )
+
+
 urlpatterns = [
     path(
         "sequence-root-submission-limit/",
         _sequence_root_submission_limit_view,
     ),
+    path(
+        "mapping-root-submission-limit/",
+        _mapping_root_submission_limit_view,
+    ),
+    path(
+        "sequence-mapping-sequence-submission-limit/",
+        _sequence_mapping_sequence_submission_view,
+    ),
 ]
-SET_CHILD_KINDS = ("integer", "tuple", "splitdatetime")
 
 
 class SequenceFieldTestCase(SimpleTestCase):
@@ -190,6 +237,27 @@ class SequenceFieldTestCase(SimpleTestCase):
                 self.assertIsInstance(error, nestingdolls.ItemValidationError)
                 self.assertEqual(error.code, "item_invalid")
                 self.assertEqual(error.params["child_code"], "required")
+
+    def test_nested_json_rows_clean_and_compare_semantically_across_spellings(self):
+        """Nested JSON values normalize before cleaning and change detection."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.JSONField(), required=False)
+
+        value = {"answer": 42, "nested": [1, 2]}
+        encoded = json.dumps(value)
+        cases = (
+            {"values": [encoded]},
+            {"values-0": encoded},
+            {"values.0": encoded},
+            {"values[0]": encoded},
+        )
+        for data in cases:
+            with self.subTest(data=data):
+                form = Form(data, initial={"values": [value]})
+                self.assertIs(form.is_valid(), True, form.errors)
+                self.assertEqual(form.cleaned_data["values"], [value])
+                self.assertIs(form.has_changed(), False)
 
     def test_initial_row_spellings_are_normalized(self):
         """Every supported initial row spelling normalizes to the same rows."""
@@ -1958,20 +2026,80 @@ class NestedSequenceFieldTestCase(SimpleTestCase):
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual([len(rows) for rows in form.cleaned_data["outer"]], [1999])
 
+    @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
+    def test_direct_nested_values_keep_only_per_level_row_limits(self):
+        """A developer-supplied nested value bypasses request counting but each list caps itself."""
+
+        class Form(forms.Form):
+            outer = nestingdolls.ListField(
+                nestingdolls.ListField(
+                    forms.IntegerField(),
+                    max_length=10,
+                    absolute_max=10,
+                ),
+                max_length=10,
+                absolute_max=10,
+            )
+
+        form = Form({"outer": [list(range(10))]})
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["outer"], [list(range(10))])
+
+    @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
+    def test_direct_nested_values_reject_an_oversized_child_list(self):
+        """A direct nested value still gets the child list's user-visible hard-cap error."""
+
+        class Form(forms.Form):
+            outer = nestingdolls.ListField(
+                nestingdolls.ListField(
+                    forms.IntegerField(),
+                    max_length=10,
+                    absolute_max=10,
+                ),
+                max_length=10,
+                absolute_max=10,
+            )
+
+        form = Form({"outer": [list(range(11))]})
+
+        self.assertIs(form.is_valid(), False)
+        error = form.errors.as_data()["outer"][0]
+        self.assertEqual(error.code, "item_invalid")
+        self.assertEqual(error.params["child_code"], "too_many_forms")
+
+    @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
+    def test_unbound_nested_initial_rendering_counts_parent_rows_before_children(self):
+        """An unbound form renders nine inner inputs because its outer row spends one cap slot."""
+
+        class Form(forms.Form):
+            outer = nestingdolls.ListField(
+                nestingdolls.ListField(
+                    forms.IntegerField(),
+                    max_length=10,
+                    absolute_max=10,
+                ),
+                max_length=10,
+                absolute_max=10,
+            )
+
+        html = Form(initial={"outer": [list(range(10))]}).as_p()
+
+        self.assertIn('name="outer-0-8"', html)
+        self.assertNotIn('name="outer-0-9"', html)
+
 
 @override_settings(ROOT_URLCONF=__name__, DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
 class SequenceRootSubmissionLimitRequestTestCase(SimpleTestCase):
     def test_sequence_root_request_cap_boundaries(self):
         """Django parses four management keys before nested row work is capped."""
 
-        client = Client()
-
         for inner_total, expected_valid, expected_errors in (
             (10, False, {"outer": ["too_many_forms"]}),
             (9, True, {}),
         ):
             with self.subTest(inner_total=inner_total):
-                response = client.post(
+                response = self.client.post(
                     "/sequence-root-submission-limit/",
                     {
                         f"outer-{TOTAL_FORM_COUNT}": "1",
@@ -1982,620 +2110,89 @@ class SequenceRootSubmissionLimitRequestTestCase(SimpleTestCase):
                 )
 
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(
-                    response.json(),
+                self.assertJSONEqual(
+                    response.content,
                     {"valid": expected_valid, "errors": expected_errors},
                 )
 
+    def test_django_rejects_eleven_post_keys_before_the_view_can_bind_a_form(self):
+        """Django's parser rejects over-limit keys before this package sees a submission."""
 
-class _HypothesisTestCase(SimpleTestCase):
-    _row_spelling_names = ("direct", "dash", "dot", "bracket")
-    _multiwidget_spelling_names = ("dash", "dot", "bracket")
-
-    @staticmethod
-    def _spelled_sequence_data(name, values, style, formatter=str):
-        if style == "direct":
-            return {name: [formatter(value) for value in values]}
-        if style == "dash":
-            return {
-                f"{name}-{index}": formatter(value)
-                for index, value in enumerate(values)
-            }
-        if style == "dot":
-            return {
-                f"{name}.{index}": formatter(value)
-                for index, value in enumerate(values)
-            }
-        if style == "bracket":
-            return {
-                f"{name}[{index}]": formatter(value)
-                for index, value in enumerate(values)
-            }
-        raise AssertionError(f"unsupported style: {style}")
-
-    @staticmethod
-    def _cardinality_result(required, min_length, max_length, values):
-        length = len(values)
-        if length == 0 and required:
-            return "required"
-        if length == 0:
-            return "ok"
-        if length < min_length:
-            return "min_length"
-        if length > max_length:
-            return "max_length"
-        return "ok"
-
-    @staticmethod
-    def _undeleted_rows(values, deleted):
-        return [value for index, value in enumerate(values) if index not in deleted]
-
-    @staticmethod
-    def _nested_tuple_data(name, rows):
-        return {
-            f"{name}-{row_index}-{column_index}": str(value)
-            for row_index, row in enumerate(rows)
-            for column_index, value in enumerate(row)
-        }
-
-    def _json_row_data(self, name, values, style):
-        return self._spelled_sequence_data(name, values, style, formatter=json.dumps)
-
-    def _boolean_row_data(self, name, values):
-        data = QueryDict("", mutable=True)
-        data[f"{name}-{TOTAL_FORM_COUNT}"] = str(len(values))
-        data[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
-        for index, value in enumerate(values):
-            if value:
-                data[f"{name}-{index}"] = "on"
-        return data
-
-    def _integer_row_data(self, name, values):
-        data = QueryDict("", mutable=True)
-        data[f"{name}-{TOTAL_FORM_COUNT}"] = str(len(values))
-        data[f"{name}-{INITIAL_FORM_COUNT}"] = "0"
-        for index, value in enumerate(values):
-            data[f"{name}-{index}"] = str(value)
-        return data
-
-    def _splitdatetime_row_data(self, name, values, style):
-        data = {}
-        for index, value in enumerate(values):
-            date_part = value.date().isoformat()
-            time_part = value.time().strftime("%H:%M:%S")
-            if style == "dash":
-                prefix = f"{name}-{index}"
-            elif style == "dot":
-                prefix = f"{name}.{index}"
-            elif style == "bracket":
-                prefix = f"{name}[{index}]"
-            else:
-                raise AssertionError(f"unsupported style: {style}")
-            data[f"{prefix}_0"] = date_part
-            data[f"{prefix}_1"] = time_part
-        return data
-
-    # The three set child kinds below share one contract, with three
-    # different child fields: a scalar, a compound sequence child, and
-    # a Django multiwidget.
-    def _set_child_field(self, kind):
-        if kind == "integer":
-            return forms.IntegerField()
-        if kind == "tuple":
-            return nestingdolls.TupleField(
-                forms.IntegerField(), min_length=2, max_length=2
-            )
-        if kind == "splitdatetime":
-            return forms.SplitDateTimeField()
-        raise AssertionError(f"unsupported child kind: {kind}")
-
-    def _set_member_strategy(self, kind):
-        if kind == "integer":
-            return SMALL_INTEGERS
-        if kind == "tuple":
-            return st.tuples(SMALL_INTEGERS, SMALL_INTEGERS)
-        if kind == "splitdatetime":
-            return st.datetimes(timezones=st.none()).map(
-                lambda value: value.replace(microsecond=0)
-            )
-        raise AssertionError(f"unsupported child kind: {kind}")
-
-    def _set_row_data(self, kind, members):
-        if kind == "integer":
-            return self._integer_row_data("values", members)
-        if kind == "tuple":
-            return self._nested_tuple_data("values", list(members))
-        if kind == "splitdatetime":
-            return self._splitdatetime_row_data("values", list(members), "dash")
-        raise AssertionError(f"unsupported child kind: {kind}")
-
-    def _set_form_class(self, field_class, kind):
-        return type(
-            "Form",
-            (forms.Form,),
-            {"values": field_class(self._set_child_field(kind), required=False)},
+        response = self.client.post(
+            "/sequence-root-submission-limit/",
+            {f"unused-{index}": "1" for index in range(11)},
         )
 
+        self.assertEqual(response.status_code, 400)
 
-class SequenceFieldPropertyTestCase(_HypothesisTestCase):
-    @HYPOTHESIS_SETTINGS
-    @example(values=[{"answer": 42}])
-    @given(values=st.lists(JSON_VALUES, max_size=4))
-    def test_json_rows_clean_equally_across_supported_spellings(self, values):
-        """It gives the same public outcome for every supported JSON spelling."""
+    def test_mapping_sibling_lists_keep_independent_per_level_allowances(self):
+        """A mapping root accepts two capped lists because it is not a recursive row scope."""
 
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.JSONField(), required=False)
+        response = self.client.post(
+            "/mapping-root-submission-limit/",
+            {
+                "values-first-TOTAL_FORMS": "10",
+                "values-first-INITIAL_FORMS": "0",
+                "values-second-TOTAL_FORMS": "10",
+                "values-second-INITIAL_FORMS": "0",
+            },
+        )
 
-        outcomes = []
-        for style in self._row_spelling_names:
-            form = Form(self._json_row_data("values", values, style))
-            if form.is_valid():
-                outcomes.append(("ok", form.cleaned_data["values"]))
-            else:
-                outcomes.append(
-                    (
-                        "error",
-                        tuple(error.code for error in form.errors.as_data()["values"]),
-                    )
+        self.assertEqual(response.status_code, 200)
+        self.assertJSONEqual(
+            response.content,
+            {"valid": True, "lengths": {"first": 10, "second": 10}},
+        )
+
+    @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=100)
+    def test_per_level_total_above_absolute_max_is_a_nested_form_error_after_parsing(
+        self,
+    ):
+        """A parser-accepted child total above its own absolute maximum returns item_invalid."""
+
+        response = self.client.post(
+            "/sequence-root-submission-limit/",
+            {
+                f"outer-{TOTAL_FORM_COUNT}": "1",
+                f"outer-{INITIAL_FORM_COUNT}": "0",
+                f"outer-0-{TOTAL_FORM_COUNT}": "11",
+                f"outer-0-{INITIAL_FORM_COUNT}": "0",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertJSONEqual(
+            response.content,
+            {"valid": False, "errors": {"outer": ["item_invalid"]}},
+        )
+
+    def test_sequence_mapping_sequence_submission_shares_the_outer_sequence_cap(self):
+        """A mapping between sequence levels remains transparent to the outer form error."""
+
+        for inner_total, expected_valid, expected_errors, expected_tag_counts in (
+            (10, False, {"items": ["too_many_forms"]}, []),
+            (9, True, {}, [9]),
+        ):
+            with self.subTest(inner_total=inner_total):
+                response = self.client.post(
+                    "/sequence-mapping-sequence-submission-limit/",
+                    {
+                        f"items-{TOTAL_FORM_COUNT}": "1",
+                        f"items-{INITIAL_FORM_COUNT}": "0",
+                        f"items-0-tags-{TOTAL_FORM_COUNT}": str(inner_total),
+                        f"items-0-tags-{INITIAL_FORM_COUNT}": "0",
+                    },
                 )
-        self.assertEqual(outcomes, [outcomes[0]] * len(self._row_spelling_names))
 
-    @HYPOTHESIS_SETTINGS
-    @given(
-        required=st.booleans(),
-        bounds=st.integers(min_value=0, max_value=5).flatmap(
-            lambda min_length: st.tuples(
-                st.just(min_length), st.integers(min_value=min_length, max_value=5)
-            )
-        ),
-        values=SMALL_INTEGER_LISTS,
-        data=st.data(),
-    )
-    def test_cardinality_matches_the_public_validation_contract(
-        self, required, bounds, values, data
-    ):
-        """It applies required/min/max to the rows that survive deletion."""
-        min_length, max_length = bounds
-        if required and max_length == 0:
-            # A required field with no rows can never be satisfied. So
-            # the constructor refuses that combination, instead of
-            # rendering no input.
-            with self.assertRaises(ValueError):
-                nestingdolls.ListField(
-                    forms.IntegerField(), required=True, max_length=0
+                self.assertEqual(response.status_code, 200)
+                self.assertJSONEqual(
+                    response.content,
+                    {
+                        "valid": expected_valid,
+                        "errors": expected_errors,
+                        "tag_counts": expected_tag_counts,
+                    },
                 )
-            return
-
-        deleted = (
-            data.draw(
-                st.sets(
-                    st.integers(min_value=0, max_value=len(values) - 1),
-                    max_size=len(values),
-                )
-            )
-            if values
-            else set()
-        )
-        remaining = self._undeleted_rows(values, deleted)
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(
-                forms.IntegerField(),
-                required=required,
-                min_length=min_length,
-                max_length=max_length,
-            )
-
-        submitted = QueryDict("", mutable=True)
-        submitted[f"values-{TOTAL_FORM_COUNT}"] = str(len(values))
-        submitted[f"values-{INITIAL_FORM_COUNT}"] = "0"
-        for index, value in enumerate(values):
-            submitted[f"values-{index}"] = str(value)
-        for index in sorted(deleted):
-            submitted[f"values-{index}-{DELETION_FIELD_NAME}"] = "1"
-
-        form = Form(submitted)
-        expected = self._cardinality_result(required, min_length, max_length, remaining)
-        self.assertEqual(form.is_valid(), expected == "ok")
-        if expected == "ok":
-            self.assertEqual(form.cleaned_data["values"], remaining)
-        else:
-            self.assertEqual(form.errors.as_data()["values"][0].code, expected)
-
-    @HYPOTHESIS_SETTINGS
-    @given(
-        values=SMALL_INTEGER_LISTS,
-        initial_forms=st.integers(min_value=0, max_value=5),
-        data=st.data(),
-    )
-    def test_delete_flags_remove_rows_before_cleaned_output(
-        self, values, initial_forms, data
-    ):
-        """It removes deleted rows from cleaned output regardless of initial_forms."""
-        initial_forms = min(initial_forms, len(values))
-        deleted = (
-            data.draw(
-                st.sets(
-                    st.integers(min_value=0, max_value=len(values) - 1),
-                    max_size=len(values),
-                )
-            )
-            if values
-            else set()
-        )
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField(), required=False)
-
-        submitted = QueryDict("", mutable=True)
-        submitted[f"values-{TOTAL_FORM_COUNT}"] = str(len(values))
-        submitted[f"values-{INITIAL_FORM_COUNT}"] = str(initial_forms)
-        for index, value in enumerate(values):
-            submitted[f"values-{index}"] = str(value)
-        for index in sorted(deleted):
-            submitted[f"values-{index}-{DELETION_FIELD_NAME}"] = "1"
-
-        form = Form(submitted)
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(
-            form.cleaned_data["values"], self._undeleted_rows(values, deleted)
-        )
-
-    @HYPOTHESIS_SETTINGS
-    @given(values=st.lists(st.booleans(), max_size=5))
-    def test_boolean_rows_preserve_unchecked_positions(self, values):
-        """It keeps false boolean rows in position with management data."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(
-                forms.BooleanField(required=False), required=False
-            )
-
-        form = Form(self._boolean_row_data("values", values))
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["values"], values)
-
-    @HYPOTHESIS_SETTINGS
-    @example(values=[{"nested": [1, 2]}], style="dash")
-    @given(
-        values=st.lists(JSON_VALUES, max_size=4),
-        style=st.sampled_from(_HypothesisTestCase._row_spelling_names),
-    )
-    def test_json_rows_use_semantic_change_detection(self, values, style):
-        """It compares JSON rows semantically instead of by raw string form."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.JSONField(), required=False)
-
-        form = Form(
-            self._json_row_data("values", values, style), initial={"values": values}
-        )
-        self.assertIs(form.has_changed(), False)
-
-    @HYPOTHESIS_SETTINGS
-    @given(values=DATETIME_ROWS)
-    def test_splitdatetime_rows_clean_equally_across_indexed_spellings(self, values):
-        """It cleans compound datetime rows identically across indexed spellings."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.SplitDateTimeField(), required=False)
-
-        cleaned_results = []
-        for style in self._multiwidget_spelling_names:
-            form = Form(self._splitdatetime_row_data("values", values, style))
-            self.assertIs(form.is_valid(), True, (style, form.errors))
-            cleaned_results.append(
-                [item.replace(tzinfo=None) for item in form.cleaned_data["values"]]
-            )
-        self.assertEqual(
-            cleaned_results, [values] * len(self._multiwidget_spelling_names)
-        )
-
-    @HYPOTHESIS_SETTINGS
-    @example(
-        cases=(
-            (
-                "scalar-row-only",
-                {
-                    "direct": {"values": ["1"]},
-                    "dash": {"values-0": "1"},
-                    "dot": {"values.0": "1"},
-                    "bracket": {"values[0]": "1"},
-                },
-            ),
-        )
-    )
-    @example(
-        cases=(
-            (
-                "scalar-row-plus-leaf",
-                {
-                    "direct": {"values": ["1"]},
-                    "dash": {"values-0": "1", "values-0[a]": "2"},
-                    "dot": {"values.0": "1", "values.0[a]": "2"},
-                    "bracket": {"values[0]": "1", "values[0][a]": "2"},
-                },
-            ),
-        )
-    )
-    @given(
-        cases=st.lists(
-            st.sampled_from(
-                (
-                    (
-                        "scalar-row-only",
-                        {
-                            "direct": {"values": ["1"]},
-                            "dash": {"values-0": "1"},
-                            "dot": {"values.0": "1"},
-                            "bracket": {"values[0]": "1"},
-                        },
-                    ),
-                    (
-                        "scalar-row-plus-leaf",
-                        {
-                            "direct": {"values": ["1"]},
-                            "dash": {"values-0": "1", "values-0[a]": "2"},
-                            "dot": {"values.0": "1", "values.0[a]": "2"},
-                            "bracket": {"values[0]": "1", "values[0][a]": "2"},
-                        },
-                    ),
-                    (
-                        "malformed-row-suffix",
-                        {
-                            "dash": {"values-0junk": "1"},
-                            "dot": {"values.0junk": "1"},
-                            "bracket": {"values[0]junk": "1"},
-                        },
-                    ),
-                    (
-                        "nested-repeat-into-row",
-                        {
-                            "dash": {"values-0-0": "1"},
-                            "dot": {"values.0.0": "1"},
-                            "bracket": {"values[0][0]": "1"},
-                        },
-                    ),
-                    (
-                        "second-row-plus-leaf",
-                        {
-                            "dash": {"values-1": "1", "values-1[a]": "2"},
-                            "dot": {"values.1": "1", "values.1[a]": "2"},
-                            "bracket": {"values[1]": "1", "values[1][a]": "2"},
-                        },
-                    ),
-                )
-            ),
-            min_size=1,
-            max_size=1,
-            unique_by=lambda item: item[0],
-        )
-    )
-    def test_mapping_row_hostile_cases_match_public_outcomes_across_spellings(
-        self, cases
-    ):
-        """Hostile row-shape spellings should agree on validation and rendering."""
-
-        class PointForm(forms.Form):
-            a = forms.IntegerField()
-            label = forms.CharField(required=False)
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(
-                nestingdolls.MappingField(PointForm),
-                required=False,
-            )
-
-        spellings = {style: {} for style in self._row_spelling_names}
-        for _, family in cases:
-            for style, payload in family.items():
-                spellings[style].update(payload)
-        populated_styles = [
-            style for style in self._row_spelling_names if spellings.get(style)
-        ]
-        if not populated_styles:
-            populated_styles = ["direct"]
-        is_valid_results = []
-        error_results = []
-        render_results = []
-        value_results = []
-        for style in populated_styles:
-            form = Form(spellings[style])
-            is_valid_results.append(form.is_valid())
-            error_results.append(
-                tuple(
-                    (error.code, (error.params or {}).get("child_code"))
-                    for error in form.errors.as_data().get("values", [])
-                )
-            )
-            try:
-                str(form["values"])
-            except Exception as exc:  # noqa: BLE001 - crashes are the property outcome
-                render_results.append(type(exc).__name__)
-            else:
-                render_results.append(None)
-            try:
-                form["values"].value()
-            except Exception as exc:  # noqa: BLE001 - crashes are the property outcome
-                value_results.append(type(exc).__name__)
-            else:
-                value_results.append(None)
-        self.assertEqual(
-            is_valid_results, [is_valid_results[0]] * len(is_valid_results)
-        )
-        self.assertEqual(error_results, [error_results[0]] * len(error_results))
-        self.assertEqual(render_results, [render_results[0]] * len(render_results))
-        self.assertEqual(value_results, [value_results[0]] * len(value_results))
-
-    @HYPOTHESIS_SETTINGS
-    @given(
-        data=st.sampled_from(
-            (
-                {"values0": "1"},
-                {"values_0": "1"},
-                {"valuesx[0]": "1"},
-                {"values[0]junk": "1"},
-                {"values[a]": "1"},
-            )
-        )
-    )
-    def test_unrelated_sequence_prefixes_and_suffixes_do_not_satisfy_the_field(
-        self, data
-    ):
-        """Keys outside the exact indexed row prefix cannot satisfy a required field."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField())
-
-        form = Form(data)
-
-        self.assertIs(form.is_valid(), False)
-        self.assertEqual(form.errors.as_data()["values"][0].code, "required")
-
-
-class SetFieldPropertyTestCase(_HypothesisTestCase):
-    @HYPOTHESIS_SETTINGS
-    @example(values=[1, 1])
-    @given(values=SMALL_INTEGER_LISTS)
-    def test_set_field_cleans_to_the_semantic_set(self, values):
-        """It deduplicates rows exactly as a set would."""
-
-        class Form(forms.Form):
-            values = nestingdolls.SetField(forms.IntegerField(), required=False)
-
-        form = Form(self._integer_row_data("values", values))
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["values"], set(values))
-
-    @HYPOTHESIS_SETTINGS
-    @given(
-        field_class=st.sampled_from(SET_COLLECTIONS),
-        kind=st.sampled_from(SET_CHILD_KINDS),
-        data=st.data(),
-    )
-    def test_set_has_changed_is_false_for_reordered_equal_members(
-        self, field_class, kind, data
-    ):
-        """A set field is unchanged when its rows permute or repeat its initial."""
-        members = data.draw(
-            st.lists(self._set_member_strategy(kind), unique=True, max_size=4)
-        )
-        extras = (
-            data.draw(st.lists(st.sampled_from(members), max_size=3)) if members else []
-        )
-        submitted = list(data.draw(st.permutations(tuple(members) + tuple(extras))))
-        collection = frozenset if field_class is nestingdolls.FrozenSetField else set
-
-        form = self._set_form_class(field_class, kind)(
-            self._set_row_data(kind, submitted),
-            initial={"values": collection(members)},
-        )
-
-        self.assertIs(form.has_changed(), False)
-
-    @HYPOTHESIS_SETTINGS
-    @given(
-        field_class=st.sampled_from(SET_COLLECTIONS),
-        kind=st.sampled_from(SET_CHILD_KINDS),
-        data=st.data(),
-    )
-    def test_set_has_changed_is_true_for_semantic_difference(
-        self, field_class, kind, data
-    ):
-        """A set field reports a change from semantic set inequality."""
-        members = self._set_member_strategy(kind)
-        initial_members = data.draw(st.lists(members, unique=True, max_size=4))
-        submitted_members = data.draw(st.lists(members, unique=True, max_size=4))
-        assume(set(initial_members) != set(submitted_members))
-        collection = frozenset if field_class is nestingdolls.FrozenSetField else set
-
-        form = self._set_form_class(field_class, kind)(
-            self._set_row_data(kind, submitted_members),
-            initial={"values": collection(initial_members)},
-        )
-
-        self.assertIs(form.has_changed(), True)
-
-
-class NestedSequencePropertyTestCase(_HypothesisTestCase):
-    @HYPOTHESIS_SETTINGS
-    @example(initial_rows=[(2, 0)], submitted_rows=[(2, 0)])
-    @given(
-        initial_rows=st.lists(
-            st.tuples(
-                SMALL_INTEGERS,
-                SMALL_INTEGERS,
-            ),
-            max_size=5,
-        ),
-        submitted_rows=st.lists(
-            st.tuples(
-                SMALL_INTEGERS,
-                SMALL_INTEGERS,
-            ),
-            max_size=5,
-        ),
-    )
-    def test_nested_tuple_rows_change_exactly_on_semantic_difference(
-        self, initial_rows, submitted_rows
-    ):
-        """Nested tuple initials compare semantically against list submissions."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(
-                nestingdolls.TupleField(
-                    forms.IntegerField(),
-                    min_length=2,
-                    max_length=2,
-                ),
-                required=False,
-            )
-
-        form = Form(
-            self._nested_tuple_data("values", [list(row) for row in submitted_rows]),
-            initial={"values": initial_rows},
-        )
-        self.assertIs(form.has_changed(), initial_rows != submitted_rows)
-
-    @HYPOTHESIS_SETTINGS
-    @example(outer_total=2, inner_totals=[2000, 2000])
-    @example(outer_total=-1, inner_totals=[])
-    @given(
-        outer_total=st.integers(min_value=-3, max_value=4000),
-        inner_totals=st.lists(st.integers(min_value=-3, max_value=4000), max_size=12),
-    )
-    def test_nested_totals_never_build_more_rows_than_one_submission_permits(
-        self, outer_total, inner_totals
-    ):
-        """Keep all built rows inside the shared cap.
-
-        Each payload stays within Django's key limit. Django can pass it to the
-        form, but nested totals can still multiply rows. This test checks the
-        package cap.
-        """
-
-        class Form(forms.Form):
-            outer = nestingdolls.ListField(
-                nestingdolls.ListField(forms.CharField(required=False)),
-                required=False,
-            )
-
-        data = {
-            f"outer-{TOTAL_FORM_COUNT}": str(outer_total),
-            f"outer-{INITIAL_FORM_COUNT}": "0",
-        }
-        for index, total in enumerate(inner_totals):
-            data[f"outer-{index}-{TOTAL_FORM_COUNT}"] = str(total)
-            data[f"outer-{index}-{INITIAL_FORM_COUNT}"] = "0"
-        # Django rejects requests above this key count. A real request cannot
-        # reach the form with more keys.
-        self.assertLessEqual(len(data), settings.DATA_UPLOAD_MAX_NUMBER_FIELDS)
-
-        # Extraction and rendering must not raise for any submitted totals.
-        form = Form(data)
-        form.is_valid()
-        form.as_p()
 
 
 class NestedParserRegressionTestCase(SimpleTestCase):

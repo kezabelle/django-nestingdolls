@@ -37,7 +37,6 @@ Issues = "https://github.com/kezabelle/django-nesting-dolls/issues"
 dev = [
     "coverage",
     "django-debug-toolbar",
-    "hypothesis",
     "ruff",
     "mypy",
     "django-stubs",

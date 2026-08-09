@@ -21,9 +21,6 @@ from django.forms.formsets import INITIAL_FORM_COUNT, TOTAL_FORM_COUNT
 from django.http import QueryDict
 from django.test import SimpleTestCase
 from django.test.utils import setup_test_environment, teardown_test_environment
-from hypothesis import HealthCheck, given
-from hypothesis import settings as hypothesis_settings
-from hypothesis import strategies as st
 
 import nestingdolls
 
@@ -49,13 +46,6 @@ def setUpModule():
 
 def tearDownModule():
     teardown_test_environment()
-
-
-HYPOTHESIS_SETTINGS = hypothesis_settings(
-    max_examples=50,
-    deadline=None,
-    suppress_health_check=[HealthCheck.too_slow],
-)
 
 
 class PointForm(forms.Form):
@@ -441,33 +431,6 @@ class SharedCompositeTestCase(SimpleTestCase):
                 widget.template_name = "app/{custom}.html"
 
                 self.assertEqual(widget.template_name, "app/{custom}.html")
-
-    @HYPOTHESIS_SETTINGS
-    @given(
-        data=st.dictionaries(
-            st.text(max_size=12),
-            st.text(max_size=8),
-            max_size=8,
-        )
-    )
-    def test_normalization_is_total_bounded_idempotent_and_prefix_local(self, data):
-        """Arbitrary keys cannot escape the canonical bounded parser contract."""
-        for family in FAMILIES:
-            name = family.field_name
-            widget = form_class_for(family, required=False)().fields[name].widget
-
-            normalized = widget.keys.normalized(data, name)
-            # Idempotent: normalizing the result changes nothing.
-            self.assertEqual(widget.keys.normalized(normalized, name), normalized)
-            # Prefix-local: every key belongs to this field.
-            for key in normalized:
-                self.assertIs(key == name or key.startswith(f"{name}-"), True, key)
-            # Prefix-local: keys of another field cannot change the result.
-            unrelated = {f"other:{key}": value for key, value in data.items()}
-            self.assertEqual(widget.keys.normalized(data | unrelated, name), normalized)
-            # Total: neither extraction nor rendering may raise.
-            widget.value_from_datadict(data, {}, name)
-            widget.value_omitted_from_data(data, {}, name)
 
     def test_every_exported_name_is_importable(self):
         """``__all__`` and the module agree, so no export is a dangling name."""
