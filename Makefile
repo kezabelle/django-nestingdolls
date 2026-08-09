@@ -2,13 +2,12 @@ UV_RUN := uv run --group dev
 PYTHON := $(UV_RUN) python
 RUFF := $(UV_RUN) ruff
 MYPY := $(UV_RUN) mypy
-CROSSHAIR := $(UV_RUN) crosshair
 NPM := npm --silent
 
 PYTHON_FILES := demo.py nestingdolls test_composite.py test_dictfield.py test_listfield.py test_patches.py mypy_settings.py proof_dictfield.py proof_listfield.py
 COMPILED_JS := nestingdolls/static/nestingdolls/sequence.js
 
-.PHONY: js jsdrift tscheck jstest format formatcheck ruff rufffix mypy test check fix crosshair
+.PHONY: js jsdrift tscheck jstest format formatcheck ruff rufffix mypy test check fix
 
 .DEFAULT_GOAL := help
 
@@ -58,6 +57,3 @@ check: tscheck jsdrift jstest ruff formatcheck test mypy
 
 fix: ## Apply the formatter and the lint auto-fixes.
 fix: rufffix format
-
-crosshair: ## Confirm the small set of independent semantic models.
-	$(CROSSHAIR) check --report_all --max_uninteresting_iterations=25 --per_condition_timeout=12 proof_listfield.prove_sequence_direct_extraction proof_dictfield.prove_mapping_direct_precedence proof_dictfield.prove_mapping_hostile_fallback

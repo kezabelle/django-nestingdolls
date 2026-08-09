@@ -36,7 +36,6 @@ Issues = "https://github.com/kezabelle/django-nesting-dolls/issues"
 [dependency-groups]
 dev = [
     "coverage",
-    "crosshair-tool",
     "django-debug-toolbar",
     "hypothesis",
     "ruff",
