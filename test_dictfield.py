@@ -1,18 +1,20 @@
 from __future__ import annotations
 
-import itertools
 import unittest
+from urllib.parse import urlencode
 
 import django
 from django import forms
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.core.files.uploadedfile import SimpleUploadedFile
-from django.http import QueryDict
-from django.test import SimpleTestCase
+from django.core.files.uploadedfile import SimpleUploadedFile, UploadedFile
+from django.http import JsonResponse, QueryDict
+from django.test import SimpleTestCase, override_settings
 from django.test.html import Element, parse_html
 from django.test.utils import setup_test_environment, teardown_test_environment
+from django.urls import path
 from django.utils.datastructures import MultiValueDict
+from django.views import View
 
 import nestingdolls
 
@@ -41,56 +43,902 @@ def tearDownModule():
     teardown_test_environment()
 
 
-class PointForm(forms.Form):
-    a = forms.IntegerField()
-    label = forms.CharField(required=False)
+class MappingProbeView(View):
+    form_class = None
+    response_field = None
 
-
-class DictFieldTestCase(SimpleTestCase):
-    def test_every_spelling_names_the_same_child(self):
-        """Direct, dash, dot, and bracket input all name one child value."""
-
-        class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm)
-
-        cases = {
-            "direct": {"point": {"a": "2", "label": "east"}},
-            "dash": {"point-a": "2", "point-label": "east"},
-            "dot": {"point.a": "2", "point.label": "east"},
-            "bracket": {"point[a]": "2", "point[label]": "east"},
-            # A QueryDict keeps Django's request semantics under the same parser.
-            "querydict": QueryDict("point[a]=2&point[label]=east"),
+    def error_codes(self, form):
+        return {
+            name: [error.code for error in errors]
+            for name, errors in form.errors.as_data().items()
         }
-        for style, data in cases.items():
-            with self.subTest(style=style):
-                form = Form(data)
-                self.assertIs(form.is_valid(), True, form.errors)
-                self.assertEqual(form.cleaned_data["point"], {"a": 2, "label": "east"})
 
-        # Extraction exposes a plain mapping, not an internal transport.
-        value = Form({"point-a": "2", "point-label": "east"})["point"].value()
-        self.assertIsInstance(value, dict)
-        self.assertEqual(value, {"a": "2", "label": "east"})
+    def child_error_codes(self, form):
+        return {
+            name: [error.params.get("child_code") for error in errors if error.params]
+            for name, errors in form.errors.as_data().items()
+        }
 
-        # The spellings share one canonical key, so the last one submitted wins.
-        last_wins = Form({"point-a": "1", "point.a": "2", "point[a]": "3"})
-        self.assertIs(last_wins.is_valid(), True, last_wins.errors)
-        self.assertEqual(last_wins.cleaned_data["point"]["a"], 3)
+    def get_form_kwargs(self):
+        return {}
 
-        # A numeric child name is a child key, never a sequence row index.
-        NumericChildForm = type(
-            "NumericChildForm", (forms.Form,), {"0": forms.IntegerField()}
+    def response_data(self, form, valid):
+        response = {"valid": valid}
+        if self.response_field is not None:
+            response[self.response_field] = (
+                form.cleaned_data.get(self.response_field) if valid else None
+            )
+        response["errors"] = self.error_codes(form)
+        return response
+
+    def post(self, request, *args, **kwargs):
+        form = self.form_class(request.POST, request.FILES, **self.get_form_kwargs())
+        valid = form.is_valid()
+        return JsonResponse(self.response_data(form, valid))
+
+
+class FormBindingUnitTestCase(SimpleTestCase):
+    """Provides a focused home for direct form and field assertions."""
+
+
+class MappingProbeFixtures(SimpleTestCase):
+    class PointForm(forms.Form):
+        a = forms.IntegerField()
+        label = forms.CharField(required=False)
+
+
+class MappingSubmissionProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
+
+
+class MappingAssetProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class ChildForm(forms.Form):
+            title = forms.CharField()
+            upload = forms.FileField(required=False)
+
+        asset = nestingdolls.MappingField(ChildForm)
+
+
+class MappingAssetProbeView(MappingProbeView):
+    form_class = MappingAssetProbeFixtures.ProbeForm
+
+    def response_data(self, form, valid):
+        asset = form.cleaned_data["asset"] if valid else None
+        serialized_asset = None
+        if asset is not None:
+            upload = asset["upload"]
+            if upload is None or upload is False:
+                serialized_upload = upload
+            elif isinstance(upload, UploadedFile):
+                serialized_upload = upload.name
+            else:
+                serialized_upload = upload
+            serialized_asset = {"title": asset["title"], "upload": serialized_upload}
+        return {
+            "valid": valid,
+            "asset": serialized_asset,
+            "errors": self.error_codes(form),
+        }
+
+
+class NestedMappingProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class ChildForm(forms.Form):
+            point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
+
+        rows = nestingdolls.ListField(nestingdolls.MappingField(ChildForm))
+
+
+class MappingOptionalProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        required_point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
+        optional_point = nestingdolls.MappingField(
+            MappingProbeFixtures.PointForm, required=False
         )
-        NumericForm = type(
-            "NumericForm",
-            (forms.Form,),
-            {"point": nestingdolls.MappingField(NumericChildForm, required=False)},
+
+
+class MappingOptionalProbeView(MappingProbeView):
+    form_class = MappingOptionalProbeFixtures.ProbeForm
+
+    def response_data(self, form, valid):
+        return {
+            "valid": valid,
+            "value": form.cleaned_data if valid else None,
+            "errors": self.error_codes(form),
+        }
+
+
+class MappingValidatedProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        @staticmethod
+        def reject_two(value):
+            if value["a"] == 2:
+                raise ValidationError("No two.", code="no_two")
+
+        point = nestingdolls.MappingField(
+            MappingProbeFixtures.PointForm, required=False, validators=[reject_two]
         )
-        for style, data in (("dot", {"point.0": "1"}), ("bracket", {"point[0]": "1"})):
-            with self.subTest(style=style, child="numeric"):
-                form = NumericForm(data)
-                self.assertIs(form.is_valid(), True, form.errors)
-                self.assertEqual(form.cleaned_data["point"], {"0": 1})
+
+
+class MappingPrefixedProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
+
+
+class MappingPrefixedProbeView(MappingProbeView):
+    form_class = MappingPrefixedProbeFixtures.ProbeForm
+    response_field = "point"
+
+    def get_form_kwargs(self):
+        return {"prefix": "outer"}
+
+
+class MappingDisabledProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        point = nestingdolls.MappingField(
+            MappingProbeFixtures.PointForm,
+            disabled=True,
+            initial={"a": 8, "label": "initial"},
+        )
+
+
+class MappingInitialProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        point = nestingdolls.MappingField(
+            MappingProbeFixtures.PointForm, required=False
+        )
+
+
+class MappingInitialProbeView(MappingProbeView):
+    form_class = MappingInitialProbeFixtures.ProbeForm
+    response_field = "point"
+
+    def get_form_kwargs(self):
+        return {"initial": {"point": {"a": 8, "label": "saved"}}}
+
+
+class MappingFileChangeProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class ChildForm(forms.Form):
+            document = forms.FileField(required=False)
+
+        asset = nestingdolls.MappingField(
+            ChildForm,
+            required=False,
+            initial={"document": "saved.txt"},
+            show_hidden_initial=True,
+        )
+
+
+class MappingFileChangeProbeView(MappingProbeView):
+    form_class = MappingFileChangeProbeFixtures.ProbeForm
+
+    def response_data(self, form, valid):
+        asset = form.cleaned_data["asset"] if valid else None
+        document = asset.get("document") if asset else None
+        if document is None or document is False:
+            serialized_document = document
+        elif isinstance(document, UploadedFile):
+            serialized_document = document.name
+        else:
+            serialized_document = document
+        return {
+            "valid": valid,
+            "document": serialized_document,
+            "errors": self.error_codes(form),
+            "changed": form.has_changed(),
+        }
+
+
+class MappingAssetInitialProbeView(MappingProbeView):
+    form_class = MappingAssetProbeFixtures.ProbeForm
+
+    def get_form_kwargs(self):
+        return {
+            "initial": {
+                "asset": {
+                    "title": "old",
+                    "upload": SimpleUploadedFile("old.txt", b"old"),
+                }
+            }
+        }
+
+    def response_data(self, form, valid):
+        asset = form.cleaned_data["asset"] if valid else None
+        serialized_asset = None
+        if asset is not None:
+            upload = asset["upload"]
+            if upload is None or upload is False:
+                serialized_upload = upload
+            elif isinstance(upload, UploadedFile):
+                serialized_upload = upload.name
+            else:
+                serialized_upload = upload
+            serialized_asset = {"title": asset["title"], "upload": serialized_upload}
+        return {
+            "valid": valid,
+            "asset": serialized_asset,
+            "errors": self.error_codes(form),
+            "child_errors": self.child_error_codes(form),
+        }
+
+
+class NestedAssetProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class ChildForm(forms.Form):
+            title = forms.CharField()
+            upload = forms.FileField(required=False)
+            happened_at = forms.SplitDateTimeField()
+
+        assets = nestingdolls.ListField(nestingdolls.MappingField(ChildForm))
+
+
+class NestedAssetProbeView(MappingProbeView):
+    form_class = NestedAssetProbeFixtures.ProbeForm
+
+    def get_form_kwargs(self):
+        return {
+            "initial": {"assets": [{"upload": SimpleUploadedFile("old.txt", b"old")}]}
+        }
+
+    def response_data(self, form, valid):
+        assets = form.cleaned_data["assets"] if valid else None
+        serialized_assets = None
+        if assets is not None:
+            serialized_assets = []
+            for asset in assets:
+                upload = asset["upload"]
+                if upload is None or upload is False:
+                    serialized_upload = upload
+                elif isinstance(upload, UploadedFile):
+                    serialized_upload = upload.name
+                else:
+                    serialized_upload = upload
+                serialized_assets.append(
+                    {
+                        "title": asset["title"],
+                        "upload": serialized_upload,
+                        "happened_at": asset["happened_at"]
+                        .replace(tzinfo=None)
+                        .isoformat(),
+                    }
+                )
+        return {
+            "valid": valid,
+            "assets": serialized_assets,
+            "errors": self.error_codes(form),
+            "child_errors": self.child_error_codes(form),
+        }
+
+
+class MultipleFileInput(forms.ClearableFileInput):
+    """Read every file that the browser sent under one child name.
+
+    ``FileInput`` reads the files with ``getlist`` for this widget, and it
+    falls back to ``get`` for a mapping that has no ``getlist``. A child of a
+    mapping therefore sees every repeated file only when the normalized file
+    input keeps the shape of ``request.FILES``.
+    """
+
+    allow_multiple_selected = True
+
+
+class MultipleFileField(forms.FileField):
+    """Clean each file of a child that accepts more than one file."""
+
+    widget = MultipleFileInput
+
+    def clean(self, data, initial=None):
+        single_file_clean = super().clean
+        if isinstance(data, (list, tuple)):
+            return [single_file_clean(item, initial) for item in data]
+        return [single_file_clean(data, initial)]
+
+
+class MappingRepeatedFileProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class ChildForm(forms.Form):
+            upload = MultipleFileField(required=False)
+
+        asset = nestingdolls.MappingField(ChildForm, required=False)
+
+
+class MappingRepeatedFileProbeView(MappingProbeView):
+    form_class = MappingRepeatedFileProbeFixtures.ProbeForm
+
+    def response_data(self, form, valid):
+        asset = form.cleaned_data["asset"] if valid else None
+        uploads = asset.get("upload") if asset else []
+        return {
+            "valid": valid,
+            "uploads": [upload.name for upload in uploads],
+            "errors": self.error_codes(form),
+        }
+
+
+class TripleMMMProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class OuterChildForm(forms.Form):
+            class InnerForm(forms.Form):
+                class LeafForm(forms.Form):
+                    child = forms.IntegerField()
+
+                child = nestingdolls.MappingField(LeafForm)
+
+            child = nestingdolls.MappingField(InnerForm)
+
+        value = nestingdolls.MappingField(OuterChildForm)
+
+
+class TripleMMLProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class OuterChildForm(forms.Form):
+            class InnerForm(forms.Form):
+                child = nestingdolls.ListField(forms.IntegerField())
+
+            child = nestingdolls.MappingField(InnerForm)
+
+        value = nestingdolls.MappingField(OuterChildForm)
+
+
+class TripleMLMProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class InnerForm(forms.Form):
+            class LeafForm(forms.Form):
+                child = forms.IntegerField()
+
+            child = nestingdolls.ListField(nestingdolls.MappingField(LeafForm))
+
+        value = nestingdolls.MappingField(InnerForm)
+
+
+class TripleMLLProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class InnerForm(forms.Form):
+            child = nestingdolls.ListField(nestingdolls.ListField(forms.IntegerField()))
+
+        value = nestingdolls.MappingField(InnerForm)
+
+
+class TripleLMMProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class InnerForm(forms.Form):
+            class LeafForm(forms.Form):
+                child = forms.IntegerField()
+
+            child = nestingdolls.MappingField(LeafForm)
+
+        value = nestingdolls.ListField(nestingdolls.MappingField(InnerForm))
+
+
+class TripleLMLProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class InnerForm(forms.Form):
+            child = nestingdolls.ListField(forms.IntegerField())
+
+        value = nestingdolls.ListField(nestingdolls.MappingField(InnerForm))
+
+
+class TripleLLMProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class LeafForm(forms.Form):
+            child = forms.IntegerField()
+
+        value = nestingdolls.ListField(
+            nestingdolls.ListField(nestingdolls.MappingField(LeafForm))
+        )
+
+
+class TripleLLLProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        value = nestingdolls.ListField(
+            nestingdolls.ListField(nestingdolls.ListField(forms.IntegerField()))
+        )
+
+
+class DeepPayloadProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class ChildForm(forms.Form):
+            class SectionForm(forms.Form):
+                class EntryForm(forms.Form):
+                    point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
+                    title = forms.CharField()
+
+                heading = forms.CharField()
+                entries = nestingdolls.ListField(nestingdolls.MappingField(EntryForm))
+
+            rows = nestingdolls.ListField(nestingdolls.MappingField(SectionForm))
+
+        payload = nestingdolls.MappingField(ChildForm)
+
+
+class NestedRowErrorProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        values = nestingdolls.ListField(
+            nestingdolls.MappingField(MappingProbeFixtures.PointForm)
+        )
+
+
+class NumericMappingProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class ChildForm(forms.Form):
+            locals()["0"] = forms.IntegerField()
+
+        point = nestingdolls.MappingField(ChildForm, required=False)
+
+
+class MappingHookProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class ChildForm(forms.Form):
+            a = forms.IntegerField()
+
+            def clean_a(self):
+                return self.cleaned_data["a"] + 1
+
+            def clean(self):
+                cleaned_data = super().clean()
+                cleaned_data["double"] = cleaned_data["a"] * 2
+                return cleaned_data
+
+        value = nestingdolls.MappingField(ChildForm)
+
+
+class MappingNonFieldProbeFixtures(SimpleTestCase):
+    class ProbeForm(forms.Form):
+        class ChildForm(forms.Form):
+            a = forms.IntegerField()
+
+            def clean(self):
+                cleaned_data = super().clean()
+                if cleaned_data.get("a") == 2:
+                    raise ValidationError("Two is unavailable.", code="unavailable")
+                return cleaned_data
+
+        value = nestingdolls.MappingField(ChildForm)
+
+
+class MappingNonFieldProbeView(MappingProbeView):
+    form_class = MappingNonFieldProbeFixtures.ProbeForm
+
+    def response_data(self, form, valid):
+        return {
+            "valid": valid,
+            "errors": self.error_codes(form),
+            "child_errors": self.child_error_codes(form),
+        }
+
+
+urlpatterns = [
+    path(
+        "mapping-submission-probe/",
+        MappingProbeView.as_view(
+            form_class=MappingSubmissionProbeFixtures.ProbeForm, response_field="point"
+        ),
+    ),
+    path(
+        "numeric-mapping-probe/",
+        MappingProbeView.as_view(
+            form_class=NumericMappingProbeFixtures.ProbeForm, response_field="point"
+        ),
+    ),
+    path(
+        "mapping-hook-probe/",
+        MappingProbeView.as_view(
+            form_class=MappingHookProbeFixtures.ProbeForm, response_field="value"
+        ),
+    ),
+    path("mapping-nonfield-probe/", MappingNonFieldProbeView.as_view()),
+    path("mapping-asset-probe/", MappingAssetProbeView.as_view()),
+    path("mapping-asset-initial-probe/", MappingAssetInitialProbeView.as_view()),
+    path("mapping-optional-probe/", MappingOptionalProbeView.as_view()),
+    path(
+        "mapping-validated-probe/",
+        MappingProbeView.as_view(
+            form_class=MappingValidatedProbeFixtures.ProbeForm, response_field="point"
+        ),
+    ),
+    path("mapping-prefixed-probe/", MappingPrefixedProbeView.as_view()),
+    path(
+        "mapping-disabled-probe/",
+        MappingProbeView.as_view(
+            form_class=MappingDisabledProbeFixtures.ProbeForm, response_field="point"
+        ),
+    ),
+    path("mapping-initial-probe/", MappingInitialProbeView.as_view()),
+    path("mapping-file-change-probe/", MappingFileChangeProbeView.as_view()),
+    path(
+        "nested-mapping-probe/",
+        MappingProbeView.as_view(
+            form_class=NestedMappingProbeFixtures.ProbeForm, response_field="rows"
+        ),
+    ),
+    path("nested-asset-probe/", NestedAssetProbeView.as_view()),
+    path(
+        "nested-row-error-probe/",
+        MappingProbeView.as_view(form_class=NestedRowErrorProbeFixtures.ProbeForm),
+    ),
+    path(
+        "triple-mmm-probe/",
+        MappingProbeView.as_view(
+            form_class=TripleMMMProbeFixtures.ProbeForm, response_field="value"
+        ),
+    ),
+    path(
+        "triple-mml-probe/",
+        MappingProbeView.as_view(
+            form_class=TripleMMLProbeFixtures.ProbeForm, response_field="value"
+        ),
+    ),
+    path(
+        "triple-mlm-probe/",
+        MappingProbeView.as_view(
+            form_class=TripleMLMProbeFixtures.ProbeForm, response_field="value"
+        ),
+    ),
+    path(
+        "triple-mll-probe/",
+        MappingProbeView.as_view(
+            form_class=TripleMLLProbeFixtures.ProbeForm, response_field="value"
+        ),
+    ),
+    path(
+        "triple-lmm-probe/",
+        MappingProbeView.as_view(
+            form_class=TripleLMMProbeFixtures.ProbeForm, response_field="value"
+        ),
+    ),
+    path(
+        "triple-lml-probe/",
+        MappingProbeView.as_view(
+            form_class=TripleLMLProbeFixtures.ProbeForm, response_field="value"
+        ),
+    ),
+    path(
+        "triple-llm-probe/",
+        MappingProbeView.as_view(
+            form_class=TripleLLMProbeFixtures.ProbeForm, response_field="value"
+        ),
+    ),
+    path(
+        "triple-lll-probe/",
+        MappingProbeView.as_view(
+            form_class=TripleLLLProbeFixtures.ProbeForm, response_field="value"
+        ),
+    ),
+    path(
+        "deep-payload-probe/",
+        MappingProbeView.as_view(
+            form_class=DeepPayloadProbeFixtures.ProbeForm, response_field="payload"
+        ),
+    ),
+    path("mapping-repeated-file-probe/", MappingRepeatedFileProbeView.as_view()),
+]
+
+
+@override_settings(ROOT_URLCONF=__name__)
+class MappingSubmissionFunctionalTestCase(SimpleTestCase):
+    def test_client_accepts_each_mapping_child_spelling_and_drops_undeclared_children(
+        self,
+    ):
+        """Client accepts declared mapping controls and ignores undeclared controls."""
+        for data in (
+            {"point-a": "2", "point-label": "east", "point-untrusted": "ignored"},
+            {"point.a": "2", "point.label": "east"},
+            {"point[a]": "2", "point[label]": "east"},
+        ):
+            with self.subTest(data=data):
+                response = self.client.post("/mapping-submission-probe/", data)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.json(),
+                    {"valid": True, "point": {"a": 2, "label": "east"}, "errors": {}},
+                )
+
+    def test_client_applies_ordered_mapping_aliases_and_ignores_whole_key_forgery(self):
+        """Client resolves ordered aliases while a forged whole mapping key has no effect."""
+        response = self.client.generic(
+            "POST",
+            "/mapping-submission-probe/",
+            urlencode(
+                (
+                    ("point-a", "1"),
+                    ("point.a", "2"),
+                    ("point[a]", "3"),
+                    ("point", "forged"),
+                    ("point-label", "east"),
+                )
+            ),
+            content_type="application/x-www-form-urlencoded",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"valid": True, "point": {"a": 3, "label": "east"}, "errors": {}},
+        )
+
+    def test_client_accepts_numeric_mapping_child_dot_and_bracket_spellings(self):
+        """Client accepts numeric mapping child names in each supported spelling."""
+        for data in ({"point.0": "1"}, {"point[0]": "1"}):
+            with self.subTest(data=data):
+                response = self.client.post("/numeric-mapping-probe/", data)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.json(), {"valid": True, "point": {"0": 1}, "errors": {}}
+                )
+
+    def test_client_reports_mapping_omissions_and_partial_child_errors(self):
+        """Client reports required mapping omissions and partial child failures."""
+        response = self.client.post("/mapping-optional-probe/", {})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"valid": False, "value": None, "errors": {"required_point": ["required"]}},
+        )
+        response = self.client.post(
+            "/mapping-optional-probe/",
+            {"required_point-a": "1", "optional_point-label": "missing a"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "valid": False,
+                "value": None,
+                "errors": {"optional_point": ["item_invalid"]},
+            },
+        )
+
+    def test_client_returns_child_cleaning_and_validator_error_codes(self):
+        """Client exposes cleaned child values and outer validator codes."""
+        response = self.client.post("/mapping-hook-probe/", {"value-a": "2"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"valid": True, "value": {"a": 3, "double": 6}, "errors": {}},
+        )
+        response = self.client.post("/mapping-validated-probe/", {"point-a": "2"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"valid": False, "point": None, "errors": {"point": ["no_two"]}},
+        )
+
+    def test_client_preserves_non_field_child_error_codes(self):
+        """Client keeps a child non-field error code at the mapping boundary."""
+        response = self.client.post("/mapping-nonfield-probe/", {"value-a": "2"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "valid": False,
+                "errors": {"value": ["item_invalid"]},
+                "child_errors": {"value": ["unavailable"]},
+            },
+        )
+
+    def test_client_applies_prefix_disabled_and_initial_omission_behavior(self):
+        """Client binds prefixed controls, ignores disabled values, and clears omitted optional mappings."""
+        response = self.client.post("/mapping-prefixed-probe/", {"outer-point-a": "5"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"valid": True, "point": {"a": 5, "label": ""}, "errors": {}},
+        )
+        response = self.client.post("/mapping-disabled-probe/", {"point-a": "99"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"valid": True, "point": {"a": 8, "label": "initial"}, "errors": {}},
+        )
+        response = self.client.post("/mapping-initial-probe/", {})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"valid": True, "point": {}, "errors": {}})
+
+    def test_client_transports_mapping_upload_clear_and_file_changes(self):
+        """Client transports mapping uploads, clear conflicts, retained initials, and file changes."""
+        response = self.client.post(
+            "/mapping-asset-probe/",
+            {
+                "asset-title": "report",
+                "asset-upload": SimpleUploadedFile("report.txt", b"data"),
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "valid": True,
+                "asset": {"title": "report", "upload": "report.txt"},
+                "errors": {},
+            },
+        )
+        response = self.client.post(
+            "/mapping-asset-initial-probe/", {"asset-title": "old"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["asset"], {"title": "old", "upload": "old.txt"}
+        )
+        response = self.client.post(
+            "/mapping-asset-initial-probe/",
+            {"asset-title": "old", "asset-upload-clear": "1"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["asset"], {"title": "old", "upload": False})
+        response = self.client.post(
+            "/mapping-asset-initial-probe/",
+            {
+                "asset-title": "old",
+                "asset-upload-clear": "1",
+                "asset-upload": SimpleUploadedFile("new.txt", b"new"),
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["errors"], {"asset": ["item_invalid"]})
+        self.assertEqual(response.json()["child_errors"], {"asset": ["contradiction"]})
+        response = self.client.post(
+            "/mapping-file-change-probe/", {"initial-asset-document": "saved.txt"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["changed"], False)
+        response = self.client.post(
+            "/mapping-file-change-probe/",
+            {
+                "initial-asset-document": "saved.txt",
+                "asset-document": SimpleUploadedFile("replacement.txt", b"new"),
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["changed"], True)
+
+    def test_client_gives_a_mapping_child_widget_every_repeated_file(self):
+        """Client keeps repeated files for a child widget of a mapping.
+
+        The normalized file input crosses the mapping boundary as the file data
+        of the child Form. It must behave the way ``request.FILES`` behaves, so
+        a child widget that reads every value of one key still finds them all.
+        """
+        response = self.client.post(
+            "/mapping-repeated-file-probe/",
+            {
+                "asset-upload": [
+                    SimpleUploadedFile("first.txt", b"first"),
+                    SimpleUploadedFile("second.txt", b"second"),
+                ]
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"valid": True, "uploads": ["first.txt", "second.txt"], "errors": {}},
+        )
+
+
+@override_settings(ROOT_URLCONF=__name__)
+class NestedMappingSubmissionFunctionalTestCase(SimpleTestCase):
+    def test_client_cleans_every_three_level_mapping_list_order(self):
+        """Client cleans one leaf through every three-level mapping and list order."""
+        cases = (
+            (
+                "/triple-mmm-probe/",
+                "value[child][child][child]",
+                {"child": {"child": {"child": 1}}},
+            ),
+            ("/triple-mml-probe/", "value[child][child][0]", {"child": {"child": [1]}}),
+            ("/triple-mlm-probe/", "value[child][0][child]", {"child": [{"child": 1}]}),
+            ("/triple-mll-probe/", "value[child][0][0]", {"child": [[1]]}),
+            ("/triple-lmm-probe/", "value[0][child][child]", [{"child": {"child": 1}}]),
+            ("/triple-lml-probe/", "value[0][child][0]", [{"child": [1]}]),
+            ("/triple-llm-probe/", "value[0][0][child]", [[{"child": 1}]]),
+            ("/triple-lll-probe/", "value[0][0][0]", [[[1]]]),
+        )
+        for url, name, value in cases:
+            with self.subTest(url=url):
+                response = self.client.post(url, {name: "1"})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.json(), {"valid": True, "value": value, "errors": {}}
+                )
+
+    def test_client_cleans_deep_alternating_mapping_and_list_controls(self):
+        """Client cleans deep alternating mapping and list controls."""
+        response = self.client.post(
+            "/deep-payload-probe/",
+            {
+                "payload[rows][0][heading]": "alpha",
+                "payload[rows][0][entries][0][point][a]": "4",
+                "payload[rows][0][entries][0][point][label]": "east",
+                "payload[rows][0][entries][0][title]": "first",
+                "payload[rows][0][entries][1][point][a]": "5",
+                "payload[rows][0][entries][1][title]": "second",
+                "payload[rows][1][heading]": "beta",
+                "payload[rows][1][entries][0][point][a]": "6",
+                "payload[rows][1][entries][0][title]": "third",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "valid": True,
+                "payload": {
+                    "rows": [
+                        {
+                            "heading": "alpha",
+                            "entries": [
+                                {"point": {"a": 4, "label": "east"}, "title": "first"},
+                                {"point": {"a": 5, "label": ""}, "title": "second"},
+                            ],
+                        },
+                        {
+                            "heading": "beta",
+                            "entries": [
+                                {"point": {"a": 6, "label": ""}, "title": "third"}
+                            ],
+                        },
+                    ]
+                },
+                "errors": {},
+            },
+        )
+
+    def test_client_reports_mapping_errors_in_list_rows(self):
+        """Client reports a mapping child failure from its list row."""
+        response = self.client.post(
+            "/nested-row-error-probe/", {"values[0][label]": "missing a"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(), {"valid": False, "errors": {"values": ["item_invalid"]}}
+        )
+
+    def test_client_transports_nested_upload_clear_and_contradiction_controls(self):
+        """Client transports nested upload, clear, and contradictory file controls."""
+        data = {
+            "assets.0.title": "asset",
+            "assets[0][happened_at]_0": "2026-08-01",
+            "assets[0][happened_at]_1": "10:30:00",
+        }
+        response = self.client.post(
+            "/nested-asset-probe/",
+            {**data, "assets.0.upload": SimpleUploadedFile("nested.txt", b"nested")},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["assets"],
+            [
+                {
+                    "title": "asset",
+                    "upload": "nested.txt",
+                    "happened_at": "2026-08-01T10:30:00",
+                }
+            ],
+        )
+        clear_data = {
+            "assets-0-title": "asset",
+            "assets-0-upload-clear": "1",
+            "assets-0-happened_at_0": "2026-08-01",
+            "assets-0-happened_at_1": "10:30:00",
+        }
+        response = self.client.post("/nested-asset-probe/", clear_data)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["assets"],
+            [{"title": "asset", "upload": False, "happened_at": "2026-08-01T10:30:00"}],
+        )
+        response = self.client.post(
+            "/nested-asset-probe/",
+            {**clear_data, "assets-0-upload": SimpleUploadedFile("new.txt", b"new")},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["errors"], {"assets": ["item_invalid"]})
+
+
+class MappingFieldUnitTestCase(FormBindingUnitTestCase):
+    """Exercises mapping APIs, construction, and rendering that HTTP cannot expose."""
 
     def test_direct_mapping_wins_and_binds_only_declared_children(self):
         """A direct mapping outranks flat aliases and drops undeclared keys."""
@@ -127,7 +975,7 @@ class DictFieldTestCase(SimpleTestCase):
         """
 
         class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm)
+            point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
 
         form = Form(
             data=QueryDict("point-a=1&point-label=kept"),
@@ -143,7 +991,9 @@ class DictFieldTestCase(SimpleTestCase):
         """It reconstructs raw widget values from flat child names."""
 
         class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm, required=False)
+            point = nestingdolls.MappingField(
+                MappingProbeFixtures.PointForm, required=False
+            )
 
         self.assertEqual(Form(initial={"point-a": "2"})["point"].initial, {"a": "2"})
 
@@ -152,7 +1002,7 @@ class DictFieldTestCase(SimpleTestCase):
 
         class Form(forms.Form):
             point = nestingdolls.MappingField(
-                PointForm, required=False, initial={"a": 3}
+                MappingProbeFixtures.PointForm, required=False, initial={"a": 3}
             )
 
         self.assertEqual(
@@ -161,8 +1011,12 @@ class DictFieldTestCase(SimpleTestCase):
 
     def test_invalid_mapping_shapes_stay_in_djangos_bound_data_channel(self):
         """It redisplays hostile submitted data and disabled hostile initials."""
-        enabled = nestingdolls.MappingField(PointForm, required=False)
-        disabled = nestingdolls.MappingField(PointForm, required=False, disabled=True)
+        enabled = nestingdolls.MappingField(
+            MappingProbeFixtures.PointForm, required=False
+        )
+        disabled = nestingdolls.MappingField(
+            MappingProbeFixtures.PointForm, required=False, disabled=True
+        )
 
         submitted = ["hostile"]
         initial = ["initial"]
@@ -196,7 +1050,9 @@ class DictFieldTestCase(SimpleTestCase):
                 super().__init__(*args, **kwargs)
                 self.fields["number"] = forms.IntegerField()
                 self.fields["upload"] = forms.FileField(required=False)
-                self.fields["nested"] = nestingdolls.MappingField(PointForm)
+                self.fields["nested"] = nestingdolls.MappingField(
+                    MappingProbeFixtures.PointForm
+                )
 
         class Form(forms.Form):
             point = nestingdolls.MappingField(DynamicForm)
@@ -240,7 +1096,7 @@ class DictFieldTestCase(SimpleTestCase):
         """It rejects an exact scalar value."""
 
         class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm)
+            point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
 
         form = Form({"point": "not a mapping"})
 
@@ -251,112 +1107,11 @@ class DictFieldTestCase(SimpleTestCase):
         )
         self.assertEqual(form.errors.as_data()["point"][0].code, "invalid")
 
-    def test_required_and_optional_empty_mappings_use_the_container_boundary(self):
-        """Required applies to the mapping, and optional empty input returns a dict."""
-
-        class Form(forms.Form):
-            required_point = nestingdolls.MappingField(PointForm)
-            optional_point = nestingdolls.MappingField(PointForm, required=False)
-
-        form = Form({"required_point": {}, "optional_point": {}})
-
-        self.assertIs(form.is_valid(), False)
-        self.assertFormError(form, "required_point", "This field is required.")
-        self.assertEqual(form.cleaned_data["optional_point"], {})
-
-    def test_optional_partial_mapping_keeps_child_requirements(self):
-        """Submitted optional mappings still use the child Form rules."""
-
-        class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm, required=False)
-
-        form = Form({"point-label": "missing a"})
-
-        self.assertIs(form.is_valid(), False)
-        error = form.errors.as_data()["point"][0]
-        self.assertEqual(error.code, "item_invalid")
-        self.assertEqual(error.params["child_code"], "required")
-
-    def test_child_clean_hooks_and_form_clean_are_preserved(self):
-        """It returns the final cleaned_data produced by the child Form."""
-
-        class ChildForm(forms.Form):
-            a = forms.IntegerField()
-
-            def clean_a(self):
-                return self.cleaned_data["a"] + 1
-
-            def clean(self):
-                cleaned_data = super().clean()
-                cleaned_data["double"] = cleaned_data["a"] * 2
-                return cleaned_data
-
-        class Form(forms.Form):
-            value = nestingdolls.MappingField(ChildForm)
-
-        form = Form({"value-a": "2"})
-
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["value"], {"a": 3, "double": 6})
-
-    def test_non_field_errors_keep_the_leaf_code(self):
-        """Child Form errors remain structured without a path summary."""
-
-        class ChildForm(forms.Form):
-            a = forms.IntegerField()
-
-            def clean(self):
-                cleaned_data = super().clean()
-                if cleaned_data.get("a") == 2:
-                    raise ValidationError("Two is unavailable.", code="unavailable")
-                return cleaned_data
-
-        class Form(forms.Form):
-            value = nestingdolls.MappingField(ChildForm)
-
-        form = Form({"value-a": "2"})
-
-        self.assertIs(form.is_valid(), False)
-        error = form.errors.as_data()["value"][0]
-        self.assertIsInstance(error, nestingdolls.ItemValidationError)
-        self.assertEqual(error.code, "item_invalid")
-        self.assertEqual(error.params["child_code"], "unavailable")
-        self.assertEqual(error.params["item"], "__all__")
-        self.assertNotIn("path", error.params)
-
-    def test_outer_validators_receive_cleaned_mapping(self):
-        """DictField validators receive child-cleaned values."""
-
-        def reject_two(value):
-            if value["a"] == 2:
-                raise ValidationError("No two.", code="no_two")
-
-        class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm, validators=[reject_two])
-
-        form = Form({"point-a": "2"})
-
-        self.assertIs(form.is_valid(), False)
-        self.assertEqual(form.errors.as_data()["point"][0].code, "no_two")
-        self.assertFormError(form, "point", "No two.")
-
-    def test_form_prefix_is_preserved(self):
-        """Nested child names include the normal parent Form prefix."""
-
-        class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm)
-
-        form = Form({"outer-point-a": "5"}, prefix="outer")
-
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["point"]["a"], 5)
-        self.assertIn('name="outer-point-a"', str(form["point"]))
-
     def test_direct_and_flat_initial_values_render(self):
         """It accepts direct and flattened Form initial mappings."""
 
         class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm)
+            point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
 
         direct = Form(initial={"point": {"a": 6, "label": "direct"}})
         flat = Form(initial={"point.a": 7, "point[label]": "flat"})
@@ -366,42 +1121,11 @@ class DictFieldTestCase(SimpleTestCase):
         self.assertIn('value="7"', str(flat["point"]))
         self.assertIn('value="flat"', str(flat["point"]))
 
-    def test_callable_initial_and_disabled_field_use_initial(self):
-        """It uses Django's resolved callable initial for disabled fields."""
-
-        class Form(forms.Form):
-            point = nestingdolls.MappingField(
-                PointForm,
-                initial=lambda: {"a": 8, "label": "initial"},
-                disabled=True,
-            )
-
-        form = Form({"point-a": "99"})
-
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["point"], {"a": 8, "label": "initial"})
-        self.assertInHTML(
-            '<input type="number" name="point-a" value="8" required disabled id="id_point-a">',
-            form.as_div(),
-        )
-
-    def test_optional_omission_does_not_bind_child_fields_from_initial(self):
-        """A bound optional mapping can replace an initial mapping with empty data."""
-
-        class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm, required=False)
-
-        form = Form({}, initial={"point": {"a": 8, "label": "saved"}})
-
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["point"], {})
-        self.assertIs(form.has_changed(), True)
-
     def test_as_hidden_uses_child_hidden_widgets(self):
         """A hidden mapping renders every child through its hidden widget."""
 
         class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm)
+            point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
 
         form = Form(initial={"point": {"a": 8, "label": "saved"}})
 
@@ -416,7 +1140,9 @@ class DictFieldTestCase(SimpleTestCase):
         """Django can compare hidden mapping initial values by child name."""
 
         class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm, show_hidden_initial=True)
+            point = nestingdolls.MappingField(
+                MappingProbeFixtures.PointForm, show_hidden_initial=True
+            )
 
         initial = {"point": {"a": 8, "label": "saved"}}
         unbound = Form(initial=initial)
@@ -459,9 +1185,13 @@ class DictFieldTestCase(SimpleTestCase):
         with self.assertRaises(ImproperlyConfigured):
             nestingdolls.MappingField(NeedsArgForm)
         with self.assertRaises(TypeError):
-            nestingdolls.MappingField(PointForm, widget=forms.TextInput)
+            nestingdolls.MappingField(
+                MappingProbeFixtures.PointForm, widget=forms.TextInput
+            )
         with self.assertRaises(TypeError):
-            nestingdolls.MappingField(PointForm, bound_field_class=forms.BoundField)
+            nestingdolls.MappingField(
+                MappingProbeFixtures.PointForm, bound_field_class=forms.BoundField
+            )
 
     def test_widget_extensions_are_copied_and_rebound_to_the_child_form(self):
         """Django copies widget instances and the field supplies its Form class."""
@@ -473,14 +1203,18 @@ class DictFieldTestCase(SimpleTestCase):
             pass
 
         widget = CustomWidget(OtherForm)
-        instance_field = nestingdolls.MappingField(PointForm, widget=widget)
-        class_field = nestingdolls.MappingField(PointForm, widget=CustomWidget)
+        instance_field = nestingdolls.MappingField(
+            MappingProbeFixtures.PointForm, widget=widget
+        )
+        class_field = nestingdolls.MappingField(
+            MappingProbeFixtures.PointForm, widget=CustomWidget
+        )
 
         self.assertIsNot(instance_field.widget, widget)
-        self.assertIs(instance_field.widget.form_class, PointForm)
+        self.assertIs(instance_field.widget.form_class, MappingProbeFixtures.PointForm)
         self.assertIs(widget.form_class, OtherForm)
         self.assertIsInstance(class_field.widget, CustomWidget)
-        self.assertIs(class_field.widget.form_class, PointForm)
+        self.assertIs(class_field.widget.form_class, MappingProbeFixtures.PointForm)
 
 
 class DictFieldRenderingTestCase(SimpleTestCase):
@@ -488,7 +1222,7 @@ class DictFieldRenderingTestCase(SimpleTestCase):
         """A child error renders beside its own input, with resolvable ids."""
 
         class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm)
+            point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
             values = nestingdolls.ListField(forms.IntegerField())
 
         form = Form(
@@ -543,7 +1277,9 @@ class DictFieldRenderingTestCase(SimpleTestCase):
         """Each helper renders the child inputs, the wrapper, and one hidden initial."""
 
         class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm, show_hidden_initial=True)
+            point = nestingdolls.MappingField(
+                MappingProbeFixtures.PointForm, show_hidden_initial=True
+            )
 
         form = Form(initial={"point": {"a": 9, "label": "layout"}})
 
@@ -579,21 +1315,8 @@ class DictFieldRenderingTestCase(SimpleTestCase):
         self.assertIn("child.js", str(field.widget.media))
 
 
-class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
-    def test_flat_input_ignores_undeclared_child_fields(self):
-        """It does not retain matching keys that no child field can consume."""
-
-        class ChildForm(forms.Form):
-            title = forms.CharField(required=False)
-
-        widget = nestingdolls.MappingWidget(ChildForm)
-
-        self.assertEqual(
-            widget.keys.normalized(
-                {"value-title": "kept", "value-untrusted": "ignored"}, "value"
-            ),
-            {"value-title": "kept"},
-        )
+class MappingDeveloperInputUnitTestCase(FormBindingUnitTestCase):
+    """Exercises Python-only nested values and direct field APIs."""
 
     def test_direct_child_values_reach_the_child_field_unchanged(self):
         """Direct mapping input keeps repeated, JSON, compound, and file values."""
@@ -639,210 +1362,17 @@ class DictFieldWidgetIntegrationTestCase(SimpleTestCase):
         )
         self.assertIs(cleaned["upload"], upload)
 
-    def test_file_children_upload_clear_and_contradict_like_django(self):
-        """File children keep Django's upload, initial, clear, and contradiction rules."""
 
-        class ChildForm(forms.Form):
-            title = forms.CharField()
-            upload = forms.FileField(required=False)
-
-        class Form(forms.Form):
-            asset = nestingdolls.MappingField(ChildForm)
-
-        upload = SimpleUploadedFile("new.txt", b"new")
-        uploaded = Form(
-            {"asset": {"title": "report"}},
-            files={"asset": {"upload": upload}},
-        )
-        self.assertIs(uploaded.is_valid(), True, uploaded.errors)
-        self.assertEqual(uploaded.cleaned_data["asset"]["title"], "report")
-        self.assertIs(uploaded.cleaned_data["asset"]["upload"], upload)
-
-        initial_upload = SimpleUploadedFile("old.txt", b"old")
-        initial = {"asset": {"title": "old", "upload": initial_upload}}
-
-        kept = Form({"asset-title": "old"}, initial=initial)
-        self.assertIs(kept.is_valid(), True, kept.errors)
-        self.assertIs(kept.cleaned_data["asset"]["upload"], initial_upload)
-
-        cleared = Form(
-            {"asset-title": "old", "asset-upload-clear": "1"}, initial=initial
-        )
-        self.assertIs(cleared.is_valid(), True, cleared.errors)
-        self.assertIs(cleared.cleaned_data["asset"]["upload"], False)
-
-        contradictory = Form(
-            {"asset-title": "old", "asset-upload-clear": "1"},
-            files={"asset-upload": SimpleUploadedFile("new.txt", b"new")},
-            initial=initial,
-        )
-        self.assertIs(contradictory.is_valid(), False)
-        self.assertEqual(
-            contradictory.errors.as_data()["asset"][0].params["child_code"],
-            "contradiction",
-        )
-
-    def test_untouched_mappings_keep_initial_uploads(self):
-        """An unsubmitted mapping preserves its child FileField initials."""
-
-        class FileOnlyForm(forms.Form):
-            upload = forms.FileField()
-
-        class MixedForm(forms.Form):
-            title = forms.CharField(required=False)
-            upload = forms.FileField()
-
-        class NestedForm(forms.Form):
-            asset = nestingdolls.MappingField(FileOnlyForm)
-
-        initial_upload = SimpleUploadedFile("old.txt", b"old")
-        shapes = {
-            "file-only": (FileOnlyForm, {"upload": initial_upload}),
-            "mixed": (MixedForm, {"title": "", "upload": initial_upload}),
-            "nested": (NestedForm, {"asset": {"upload": initial_upload}}),
-        }
-        for shape, (child_form, expected) in shapes.items():
-            for required in (False, True):
-                with self.subTest(shape=shape, required=required):
-                    Form = type(
-                        "Form",
-                        (forms.Form,),
-                        {
-                            "asset": nestingdolls.MappingField(
-                                child_form, required=required
-                            )
-                        },
-                    )
-
-                    form = Form({}, initial={"asset": expected})
-
-                    self.assertIs(form.is_valid(), True, form.errors)
-                    self.assertEqual(form.cleaned_data["asset"], expected)
-
-    def test_file_children_drive_change_detection(self):
-        """Change detection asks the child FileField, hidden initial or not."""
-
-        class FileForm(forms.Form):
-            document = forms.FileField(required=False)
-
-        class HiddenInitialForm(forms.Form):
-            asset = nestingdolls.MappingField(
-                FileForm,
-                initial={"document": "saved.txt"},
-                required=False,
-                show_hidden_initial=True,
-            )
-
-        # A hidden filename does not replace FileField change detection.
-        data = QueryDict("initial-asset-document=saved.txt")
-        self.assertIs(HiddenInitialForm(data).has_changed(), False)
-        replaced = HiddenInitialForm(
-            data,
-            files=MultiValueDict(
-                {"asset-document": [SimpleUploadedFile("replacement.txt", b"new")]}
-            ),
-        )
-        self.assertIs(replaced.has_changed(), True)
-
-        # A submitted upload is a change even when it is also the initial object.
-        class Form(forms.Form):
-            asset = nestingdolls.MappingField(FileForm, required=False)
-
-        upload = SimpleUploadedFile("same.txt", b"same")
-        resubmitted = Form(
-            data={},
-            files={"asset[document]": upload},
-            initial={"asset": {"document": upload}},
-        )
-        self.assertIs(resubmitted.has_changed(), True)
-
-
-class NestedDictFieldTestCase(SimpleTestCase):
-    def test_every_three_level_mapping_sequence_order_cleans_flat_input(self):
-        """Every three-level mapping and sequence order cleans one leaf value."""
-
-        for order in itertools.product(("mapping", "sequence"), repeat=3):
-            field = forms.IntegerField()
-            expected = 1
-            for depth, kind in enumerate(reversed(order)):
-                if kind == "mapping":
-                    child_form = type(
-                        f"MappingChild{depth}", (forms.Form,), {"child": field}
-                    )
-                    field = nestingdolls.MappingField(child_form)
-                    expected = {"child": expected}
-                else:
-                    field = nestingdolls.ListField(field)
-                    expected = [expected]
-
-            form_class = type("Form", (forms.Form,), {"value": field})
-            name = "value"
-            for kind in order:
-                name += "[child]" if kind == "mapping" else "[0]"
-            form = form_class({name: "1"})
-
-            with self.subTest(order=order):
-                self.assertIs(form.is_valid(), True, form.errors)
-                self.assertEqual(form.cleaned_data["value"], expected)
-
-    def test_deep_alternating_fields_clean_flat_input(self):
-        """It cleans mapping, sequence, and mapping layers together."""
-
-        class EntryForm(forms.Form):
-            point = nestingdolls.MappingField(PointForm)
-            title = forms.CharField()
-
-        class SectionForm(forms.Form):
-            heading = forms.CharField()
-            entries = nestingdolls.ListField(nestingdolls.MappingField(EntryForm))
-
-        class ChildForm(forms.Form):
-            rows = nestingdolls.ListField(nestingdolls.MappingField(SectionForm))
-
-        class Form(forms.Form):
-            payload = nestingdolls.MappingField(ChildForm)
-
-        form = Form(
-            {
-                "payload[rows][0][heading]": "alpha",
-                "payload[rows][0][entries][0][point][a]": "4",
-                "payload[rows][0][entries][0][point][label]": "east",
-                "payload[rows][0][entries][0][title]": "first",
-                "payload[rows][0][entries][1][point][a]": "5",
-                "payload[rows][0][entries][1][title]": "second",
-                "payload[rows][1][heading]": "beta",
-                "payload[rows][1][entries][0][point][a]": "6",
-                "payload[rows][1][entries][0][title]": "third",
-            }
-        )
-
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(
-            form.cleaned_data["payload"],
-            {
-                "rows": [
-                    {
-                        "heading": "alpha",
-                        "entries": [
-                            {"point": {"a": 4, "label": "east"}, "title": "first"},
-                            {"point": {"a": 5, "label": ""}, "title": "second"},
-                        ],
-                    },
-                    {
-                        "heading": "beta",
-                        "entries": [
-                            {"point": {"a": 6, "label": ""}, "title": "third"},
-                        ],
-                    },
-                ]
-            },
-        )
+class NestedMappingRenderingUnitTestCase(FormBindingUnitTestCase):
+    """Exercises nested mapping row markup that an HTTP response cannot expose."""
 
     def test_mapping_error_inside_sequence_renders_once_at_the_row(self):
         """A sequence row owns errors from its mapping child."""
 
         class Form(forms.Form):
-            values = nestingdolls.ListField(nestingdolls.MappingField(PointForm))
+            values = nestingdolls.ListField(
+                nestingdolls.MappingField(MappingProbeFixtures.PointForm)
+            )
 
         form = Form({"values[0][label]": "missing a"})
 
@@ -851,74 +1381,25 @@ class NestedDictFieldTestCase(SimpleTestCase):
         self.assertEqual(rendered.count("This field is required."), 1)
         self.assertEqual(list(form["values"].errors), [])
 
-    def test_nested_file_and_compound_children_follow_django(self):
-        """Files and compound widgets survive the sequence-to-mapping boundary."""
-
-        class AssetForm(forms.Form):
-            title = forms.CharField()
-            upload = forms.FileField(required=False, widget=forms.ClearableFileInput)
-            happened_at = forms.SplitDateTimeField()
-
-        class Form(forms.Form):
-            assets = nestingdolls.ListField(nestingdolls.MappingField(AssetForm))
-
-        upload = SimpleUploadedFile("nested.txt", b"nested")
-        uploaded = Form(
-            {
-                "assets.0.title": "asset",
-                "assets[0][happened_at]_0": "2026-08-01",
-                "assets[0][happened_at]_1": "10:30:00",
-            },
-            files={"assets.0.upload": upload},
-        )
-        self.assertIs(uploaded.is_valid(), True, uploaded.errors)
-        row = uploaded.cleaned_data["assets"][0]
-        self.assertEqual(row["title"], "asset")
-        self.assertIs(row["upload"], upload)
-        self.assertEqual(
-            row["happened_at"].replace(tzinfo=None).isoformat(), "2026-08-01T10:30:00"
-        )
-
-        data = {
-            "assets-0-title": "asset",
-            "assets-0-upload-clear": "1",
-            "assets-0-happened_at_0": "2026-08-01",
-            "assets-0-happened_at_1": "10:30:00",
-        }
-        initial = {"assets": [{"upload": SimpleUploadedFile("old.txt", b"old")}]}
-        cleared = Form(data, initial=initial)
-
-        self.assertIs(cleared.is_valid(), True, cleared.errors)
-        self.assertIs(cleared.cleaned_data["assets"][0]["upload"], False)
-        self.assertEqual(
-            cleared.cleaned_data["assets"][0]["happened_at"]
-            .replace(tzinfo=None)
-            .isoformat(),
-            "2026-08-01T10:30:00",
-        )
-
-        contradictory = Form(
-            data,
-            files={"assets-0-upload": SimpleUploadedFile("new.txt", b"new")},
-            initial=initial,
-        )
-        self.assertIs(contradictory.is_valid(), False)
-
 
 class DictFieldRegressionTestCase(SimpleTestCase):
     def test_hostile_initials_and_payloads_stay_renderable_errors(self):
         """Malformed initials and payloads stay in Django's error channel."""
 
         class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm, required=False)
+            point = nestingdolls.MappingField(
+                MappingProbeFixtures.PointForm, required=False
+            )
 
         class CallableInitialForm(forms.Form):
             point = nestingdolls.MappingField(
-                PointForm, required=False, initial=lambda: ["bad"]
+                MappingProbeFixtures.PointForm, required=False, initial=lambda: ["bad"]
             )
 
         class DisabledForm(forms.Form):
-            point = nestingdolls.MappingField(PointForm, required=False, disabled=True)
+            point = nestingdolls.MappingField(
+                MappingProbeFixtures.PointForm, required=False, disabled=True
+            )
 
         for form in (Form(initial={"point": ["bad"]}), CallableInitialForm()):
             with self.subTest(form=form.__class__.__name__):
@@ -939,7 +1420,8 @@ class DictFieldRegressionTestCase(SimpleTestCase):
 
         class NestedForm(forms.Form):
             rows = nestingdolls.ListField(
-                nestingdolls.MappingField(PointForm), required=False
+                nestingdolls.MappingField(MappingProbeFixtures.PointForm),
+                required=False,
             )
 
         class HiddenInitialForm(forms.Form):
