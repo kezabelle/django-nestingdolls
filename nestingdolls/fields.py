@@ -4,6 +4,7 @@ import copy
 import dataclasses
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from itertools import chain, islice
+from types import MappingProxyType
 from typing import Self, cast
 
 from django.conf import settings
@@ -584,6 +585,7 @@ class SequenceField(CompositeField):
         initial_values: list[object],
         deleted_indexes: frozenset[int] = frozenset(),
         omitted_indexes: frozenset[int] = frozenset(),
+        nested_deleted: Mapping[int, frozenset[int]] = MappingProxyType({}),
     ) -> Collection[object]:
         """Clean each row, then validate the result, as ``MultiValueField`` does."""
         if self.limits.over_hard_cap(len(values)):
@@ -595,6 +597,16 @@ class SequenceField(CompositeField):
         for index, value in enumerate(values):
             if index in deleted_indexes or index in omitted_indexes:
                 continue
+            if index in nested_deleted and isinstance(value, list):
+                # A nested sequence has no bound field of its own. It has
+                # no way to remove its own deleted rows before cleaning.
+                # Remove them here, just before the nested field cleans.
+                dropped = nested_deleted[index]
+                value = [
+                    row
+                    for row_index, row in enumerate(value)
+                    if row_index not in dropped
+                ]
             initial = initial_values[index] if index < len(initial_values) else None
             try:
                 if self.child_field.disabled:
@@ -638,6 +650,7 @@ class SequenceField(CompositeField):
             management_form is None
             and not submission.deleted
             and not submission.omitted
+            and not submission.nested_deleted
             and not isinstance(self.child_field, FileField)
         ):
             return cast(
@@ -669,7 +682,13 @@ class SequenceField(CompositeField):
             and initial
         ):
             data = [None] * len(initial)
-        return self._clean_values(data, initial, submission.deleted, submission.omitted)
+        return self._clean_values(
+            data,
+            initial,
+            submission.deleted,
+            submission.omitted,
+            submission.nested_deleted,
+        )
 
     def validate(self, value: Collection[object]) -> None:
         """Apply required, minimum, and maximum length checks."""

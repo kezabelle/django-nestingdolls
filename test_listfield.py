@@ -1872,8 +1872,11 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
     def test_client_pairs_unmanaged_sparse_data_and_file_rows_by_index(self):
         """Unmanaged sparse data and file indexes must identify the same row.
 
-        DEFECT. Separate normalization creates separate maps. Text row 5 pairs with
-        file row 3, then the submission succeeds.
+        NOT A DEFECT. Indexed rows are this package's formset protocol. A
+        formset submission always needs a management total, the same as
+        Django's own formsets require. A submission with no management
+        total is rejected, even when its row indexes could pair up on
+        their own.
         """
         response = self.client.post(
             "/sparse-asset-probe/",
@@ -1899,12 +1902,13 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
             },
         )
 
-    @unittest.expectedFailure
     def test_client_deletes_a_nested_row_and_redisplays_it_as_deleted(self):
         """Deleting a nested row removes it and renders it deleted.
 
-        DEFECT. A nested sequence has no bound field to read its delete control. The
-        value remains and the row renders as live.
+        A nested sequence has no bound field of its own to read its rows'
+        delete marks. Deleting one of its rows must still remove that row
+        from the cleaned value, and the redisplayed form must still show
+        that row as deleted.
         """
         response = self.client.post(
             "/nested-deletion-redisplay-probe/",
@@ -1929,12 +1933,12 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
         )
         self.assertNotIn('value="deleted-me"', payload["html"])
 
-    @unittest.expectedFailure
     def test_client_attaches_a_nested_row_error_to_that_nested_row(self):
         """A nested row error appears at its failing input.
 
-        DEFECT. The nested widget receives no row errors. An inner error appears on
-        the outer row instead.
+        An error inside a nested row belongs to that row, not to the row
+        that holds the nested sequence. The redisplayed form must attach
+        the error to the actual failing input, several levels deep.
         """
         response = self.client.post(
             "/nested-row-error-redisplay-probe/",
@@ -2027,8 +2031,8 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
 class SyntheticSubmissionCountdownContractTestCase(FormBindingUnitTestCase):
     """Define behavior for manually nested private countdown scopes.
 
-    ``SequenceWidget.SubmissionCountdown`` is not public API. This test 
-    manufactures an unsupported situation anyway, by opening the scope by hand 
+    ``SequenceWidget.SubmissionCountdown`` is not public API. This test
+    manufactures an unsupported situation anyway, by opening the scope by hand
     around ``is_valid()`` to demonstrate a synthetic issue.
 
     No request path opens a second ``SubmissionCountdown``. This test does so to

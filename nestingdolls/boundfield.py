@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, time
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import UploadedFile
 from django.forms import BaseForm, Field
 from django.forms.boundfield import BoundField
-from django.forms.fields import BooleanField
-from django.forms.formsets import DELETION_FIELD_NAME, ManagementForm
+from django.forms.formsets import ManagementForm
 from django.forms.utils import ErrorList
 from django.forms.widgets import Widget
 from django.utils.datastructures import MultiValueDict
@@ -273,7 +272,6 @@ class SequenceBoundField(CompositeBoundField):
         """Hold the one parsed request cohort and derived sequence state."""
 
         bound_field: SequenceBoundField
-        deletion_field: ClassVar[BooleanField] = BooleanField(required=False)
         rows: list[object] = dataclasses.field(init=False)
         over_submission_max: bool = dataclasses.field(init=False)
 
@@ -302,12 +300,8 @@ class SequenceBoundField(CompositeBoundField):
         def deleted(self) -> frozenset[int]:
             """Return rows marked for deletion."""
             bf = self.bound_field
-            return frozenset(
-                index
-                for index in range(len(self.rows))
-                if self.deletion_field.to_python(
-                    self.input.data.get(f"{bf.html_name}-{index}-{DELETION_FIELD_NAME}")
-                )
+            return bf.field.widget.deleted_row_indexes(
+                self.input.data, bf.html_name, len(self.rows)
             )
 
         @cached_property
@@ -344,15 +338,52 @@ class SequenceBoundField(CompositeBoundField):
             return frozenset(omitted)
 
         @cached_property
+        def nested_deleted(self) -> Mapping[int, frozenset[int]]:
+            """Return the deleted nested rows of each row that is a sequence.
+
+            A nested sequence has no bound field of its own. It has no way
+            to read its own rows' delete marks. This method reads them
+            here, from the rows and the input already read for the outer
+            field.
+
+            ``SequenceField._clean_values`` uses this result. It removes
+            the marked rows before it cleans the nested value.
+            ``self.rows`` still holds the raw rows, with no rows removed.
+            The render step needs the deleted row to show it as deleted.
+            """
+            bf = self.bound_field
+            child_widget = bf.field.widget._child_widget(bf.field.child_field)
+            if not isinstance(child_widget, SequenceWidget):
+                return {}
+            result: dict[int, frozenset[int]] = {}
+            for index, row in enumerate(self.rows):
+                if not isinstance(row, list):
+                    continue
+                name = f"{bf.html_name}-{index}"
+                deleted = child_widget.deleted_row_indexes(
+                    self.input.data, name, len(row)
+                )
+                if deleted:
+                    result[index] = deleted
+            return result
+
+        @cached_property
+        def item_errors(self) -> Sequence[ItemValidationError]:
+            """Return every item error of this field, at any nesting depth."""
+            return [
+                error
+                for error in self.bound_field._all_errors.as_data()
+                if isinstance(error, ItemValidationError)
+            ]
+
+        @cached_property
         def errors(self) -> Mapping[int, list[object]]:
-            """Return child error messages by row index."""
-            row_errors: dict[int, list[object]] = {}
-            for error in self.bound_field._all_errors.as_data():
-                if isinstance(error, ItemValidationError) and isinstance(
-                    error.item, int
-                ):
-                    row_errors.setdefault(error.item, []).append(error.child_message)
-            return row_errors
+            """Return the error messages of each row. Do not count nested rows."""
+            result: dict[int, list[object]] = {}
+            for error in self.item_errors:
+                if len(error.item_path) == 1 and isinstance(error.item, int):
+                    result.setdefault(error.item, []).append(error.child_message)
+            return result
 
     @cached_property
     def submission(self) -> Submission:
@@ -388,7 +419,7 @@ class SequenceBoundField(CompositeBoundField):
             widget.bound = widget.Bound(
                 management_input=submission.input.data,
                 management_form=submission.management_form,
-                row_errors=submission.errors,
+                item_errors=submission.item_errors,
                 deleted_indexes=submission.deleted,
                 submission_overflow=submission.over_submission_max,
             )

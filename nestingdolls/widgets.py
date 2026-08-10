@@ -4,11 +4,12 @@ import dataclasses
 from collections.abc import Collection, Mapping, Sequence
 from contextvars import ContextVar, Token
 from itertools import islice
-from types import MappingProxyType, TracebackType
+from types import TracebackType
 from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 from django.core.files.uploadedfile import UploadedFile
 from django.forms import BaseForm, Field
+from django.forms.fields import BooleanField
 from django.forms.formsets import (
     DEFAULT_MAX_NUM,
     DEFAULT_MIN_NUM,
@@ -24,6 +25,7 @@ from django.forms.widgets import MultiWidget, Widget
 from django.utils.datastructures import MultiValueDict
 from django.utils.functional import cached_property
 
+from nestingdolls.errors import ItemValidationError
 from nestingdolls.patches import FormLayout
 
 if TYPE_CHECKING:
@@ -453,13 +455,17 @@ class SequenceWidget(CompositeWidget):
         ``management_data`` holds the submitted management inputs. These
         inputs limit how many rows to render. ``management_form`` is the
         form the bound field already built from that input, so one
-        render parses it only once. ``row_errors`` holds the errors of
-        each row. ``deleted_indexes`` holds the rows the user deleted.
+        render parses it only once. ``item_errors`` holds every item
+        error of this field, at any nesting depth. ``item_depth`` is how
+        many item-path steps a render already used, so a nested sequence
+        reads its own step next. ``deleted_indexes`` holds the rows the
+        user deleted.
         """
 
         management_input: MultiValueDict[str, object] | None = None
         management_form: ManagementForm | None = None
-        row_errors: Mapping[int, list[object]] = MappingProxyType({})
+        item_errors: Sequence[ItemValidationError] = ()
+        item_depth: int = 0
         deleted_indexes: Collection[int] = frozenset()
         submission_overflow: bool = False
 
@@ -469,6 +475,20 @@ class SequenceWidget(CompositeWidget):
         """Load the script that adds and removes rows in the browser."""
 
         js = ("nestingdolls/sequence.js",)
+
+    deletion_field: ClassVar[BooleanField] = BooleanField(required=False)
+
+    def deleted_row_indexes(
+        self, data: Mapping[str, object], name: str, row_count: int
+    ) -> frozenset[int]:
+        """Return the index of each row in this widget marked for deletion."""
+        return frozenset(
+            index
+            for index in range(row_count)
+            if self.deletion_field.to_python(
+                data.get(f"{name}-{index}-{DELETION_FIELD_NAME}")
+            )
+        )
 
     @dataclasses.dataclass(frozen=True, slots=True)
     class Input(CompositeWidget.Input):
@@ -795,11 +815,36 @@ class SequenceWidget(CompositeWidget):
                     # These widgets have no scalar browser representation. Keep the
                     # validation error, but never feed a forged scalar to decompress().
                     item = None
+                depth = self.bound.item_depth
+                own_messages: list[object] = []
+                nested_item_errors: list[ItemValidationError] = []
+                if isinstance(index, int):
+                    for error in self.bound.item_errors:
+                        path = error.item_path
+                        if len(path) <= depth or path[depth] != index:
+                            continue
+                        if len(path) == depth + 1:
+                            own_messages.append(error.child_message)
+                        elif isinstance(path[depth + 1], int):
+                            nested_item_errors.append(error)
                 if isinstance(child_widget, SequenceWidget):
-                    # Give a nested sequence the same management input, as
-                    # MultiWidget gives its own input to each child widget.
+                    # Give the nested sequence the same management input.
+                    # MultiWidget gives its own input to each child widget
+                    # in the same way.
+                    # Also give the nested sequence its own errors and its
+                    # own deleted rows.
+                    nested_deleted = (
+                        child_widget.deleted_row_indexes(
+                            bound_management_input, row_name, len(item)
+                        )
+                        if bound_management_input is not None and isinstance(item, list)
+                        else frozenset()
+                    )
                     child_widget.bound = child_widget.Bound(
-                        management_input=bound_management_input
+                        management_input=bound_management_input,
+                        item_errors=nested_item_errors,
+                        item_depth=depth + 1,
+                        deleted_indexes=nested_deleted,
                     )
                     item = cast(Sequence[object] | None, item)
                 subwidget = child_widget.get_context(row_name, item, child_attrs)[
@@ -809,9 +854,7 @@ class SequenceWidget(CompositeWidget):
                     "index": index,
                     "delete_name": f"{row_name}-{DELETION_FIELD_NAME}",
                     "subwidget": subwidget,
-                    "errors": self.bound.row_errors.get(index, [])
-                    if isinstance(index, int)
-                    else [],
+                    "errors": own_messages,
                 }
                 if row["errors"]:
                     child_id = subwidget["attrs"].get("id")
