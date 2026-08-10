@@ -340,8 +340,11 @@ class SequenceField(CompositeField):
         ``min_length`` and ``max_length`` are user validation limits.
         ``absolute_max`` is the maximum rows that one sequence level can build.
         It stops a forged ``TOTAL_FORMS`` value before child work starts.
-        ``submission_max`` is the shared cap for all nested levels in one
-        extraction or render.
+        ``submission_max`` is the shared cap for all nested levels reached
+        from this one field's own extraction or render. It does not reach a
+        sibling field. Django gives each formset on a page its own
+        ``absolute_max`` too, with no cap shared across formsets; this field
+        follows the same precedent for its own sibling fields.
 
         Django formsets use ``DEFAULT_MAX_NUM`` as the default ``max_num``.
         They use ``max_num + DEFAULT_MAX_NUM`` as the default ``absolute_max``.
@@ -384,7 +387,7 @@ class SequenceField(CompositeField):
 
         @property
         def submission_max(self) -> int:
-            """Return the shared cap for all rows in one submission.
+            """Return the shared cap for all rows in one field's own submission.
 
             Django rejects a request with more than
             ``DATA_UPLOAD_MAX_NUMBER_FIELDS`` keys. A populated row needs a
@@ -395,6 +398,15 @@ class SequenceField(CompositeField):
             The cap is the larger of ``absolute_max`` and the Django key limit.
             It covers both cases. Read the setting for each submission. If the
             setting is off, use ``DEFAULT_MAX_NUM`` as its fallback.
+
+            This cap belongs to one field's own nested levels only. A form
+            with several sequence fields, whether siblings on the form or
+            siblings inside one mapping's child form, gives each one its own
+            budget. Django does the same: each formset on a page carries its
+            own ``absolute_max``, and nothing coordinates a cap across
+            formsets. The number of sequence fields on a form is fixed by
+            the form's author, not by a submitted request, so this matches
+            Django's own accepted cost model rather than adding a new one.
             """
             # Zero and None are not supported here. Both use Django's default row cap.
             keys = settings.DATA_UPLOAD_MAX_NUMBER_FIELDS or DEFAULT_MAX_NUM

@@ -59,10 +59,32 @@ to this package.
 
 `SequenceWidget.SubmissionCountdown` is the one limit that belongs to this package. It protects attacker-controlled multiplication from recursive sequence nesting, not every collection configured by an application.
 
-- Enter `with SubmissionCountdown(limits.submission_max)` only in sequence extraction or rendering. It starts one context-local counter at the outer sequence; nested sequences reuse it. Do not open it in a mapping, `clean()`, a shared composite base class, or a field-tree walk.
-- Call `take(count)` before a sequence builds rows. It returns only rows that fit. Cleaning reports `too_many_forms` for the complete bound submission when extraction ran out; rendering shows only the prefix that fits. Exact use succeeds.
+- Enter `with SubmissionCountdown(limits.submission_max)` only in sequence
+  parsing, extraction, or rendering. It starts one context-local counter at
+  the outer sequence; nested sequences reuse it. Do not open it in a
+  mapping, `clean()`, a shared composite base class, or a field-tree walk.
+- Call `take(count)` at the earliest point a submitted row count turns into
+  a built list of rows. That point is `SequenceWidget.read_input`, where a
+  `TOTAL_FORMS` value becomes `data_rows`/`file_rows`, not the extraction
+  step that reads that list afterward. A widget that waits until extraction
+  to call `take()` has already paid to build every row a forged
+  `TOTAL_FORMS` asked for, once for every sibling row that reaches it.
+  `take(count)` returns only rows that fit. Cleaning reports
+  `too_many_forms` for the complete bound submission when extraction ran
+  out; rendering shows only the prefix that fits. Exact use succeeds.
+- A step that reads an already-built row list, such as `_value_from_input`
+  reading `read_input`'s `data_rows`, must not call `take()` on that count
+  again. It inherits the reservation. A double `take()` on the same rows
+  halves the effective budget and can reject a submission that should pass.
 - `Limits.submission_max` is `max(absolute_max, DATA_UPLOAD_MAX_NUMBER_FIELDS)`. The key limit covers populated rows and `absolute_max` covers empty rows. Read the setting for each submission.
 - Keep the class inside `SequenceWidget`. Its `ContextVar` is a `ClassVar` containing only the remaining row count and overflow state. Do not store field objects, add sentinels, or make mappings depend on it.
+- The budget belongs to one field's own nested tree only. It does not
+  reach a sibling field, on the same form or inside a mapping's child
+  form. Django gives each formset on a page its own `absolute_max` with
+  no cap shared across formsets (`BaseFormSet.total_form_count`); the
+  number of sequence fields on a form is fixed by the form's author, not
+  by a request, so this follows the same accepted precedent. Do not add
+  cross-field, cross-form, or request-wide sharing to work around this.
 
 A request can hold a few nested `TOTAL_FORMS` keys that ask for 2,000 empty rows at each sequence level. Django limits parser keys, files, bytes, and one formset level; it cannot count that recursive row product. Two outer rows with three inner rows spend `2 + 6 = 8` rows. Three outer rows with 900 inner rows spend `3 + 2700 = 2703`, so the default 2,000-row cap rejects the complete submission.
 

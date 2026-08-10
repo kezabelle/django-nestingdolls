@@ -1,9 +1,7 @@
-"""Contracts that both composite families share.
+"""Tests shared by sequence and mapping fields.
 
-Every test here exercises shared ``CompositeWidget``/``CompositeBoundField``
-behavior rather than either field, so each one runs against both
-``ListField`` and ``DictField``. A behaviour that only one family has belongs in
-``test_listfield.py`` or ``test_dictfield.py``.
+Each test runs with ``ListField`` and ``DictField``. Tests for one field
+family belong in its own test module.
 """
 
 from __future__ import annotations
@@ -178,8 +176,8 @@ class SharedCompositeTestCase(SimpleTestCase):
             with self.subTest(family=family.name):
                 form_class = form_class_for(family, required=False)
 
-                # The child field converts "1" to 1, so a raw `==` on the
-                # submitted strings would call this changed.
+                # The child field converts "1" to 1.
+                # Comparing the raw strings would report a change.
                 unchanged = form_class(
                     family.dash_data,
                     initial={family.field_name: family.unchanged_initial},
@@ -213,12 +211,11 @@ class SharedCompositeTestCase(SimpleTestCase):
                 self.assertEqual(form.as_p().count("Outer error."), 1)
 
     def test_field_errors_hide_child_item_errors(self):
-        """The outer field shows its own errors only.
+        """The outer field hides child errors.
 
-        The subform or the row renders an item error beside the input that
-        produced it, so repeating it on the outer field would show the user the
-        same problem twice. ``_all_errors`` keeps the unfiltered list for the
-        row and subform machinery.
+        The row or subform renders each error beside its input. Showing it again at
+        the outer field would duplicate it. ``_all_errors`` retains the unfiltered
+        errors for row and subform rendering.
         """
         for family in COMPOSITE_CASES:
             with self.subTest(family=family.name):
@@ -379,11 +376,10 @@ class SharedCompositeTestCase(SimpleTestCase):
                 self.assertIn(f'<div\n  data-widget="{family.name}"', str(form))
 
     def test_child_widgets_are_not_shared_between_form_instances(self):
-        """A deep-copied composite widget never shares a cached child widget.
+        """One form does not share cached child widgets with another form.
 
-        ``Widget.__deepcopy__`` is a shallow copy, so a warmed child cache would
-        be shared by every form. ``ClearableFileInput`` mutates its widget while
-        reading data, which makes that sharing a cross-request bug.
+        ``Widget.__deepcopy__`` is shallow. A shared cached widget can retain
+        request state.
         """
 
         class ItemForm(forms.Form):
@@ -403,10 +399,10 @@ class SharedCompositeTestCase(SimpleTestCase):
         )
 
     def test_widget_media_merges_every_declaration_in_the_mro(self):
-        """A widget subclass adds to the family's media instead of replacing it.
+        """A widget subclass adds media without removing inherited media.
 
-        Both composite widgets define ``media``, so ``MediaDefiningClass`` never
-        installs its own property for them and the merge has to happen here.
+        Both composite widgets define ``media``. They must merge subclass media
+        themselves.
         """
 
         class ExtraSequenceWidget(nestingdolls.SequenceWidget):

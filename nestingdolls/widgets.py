@@ -569,7 +569,12 @@ class SequenceWidget(CompositeWidget):
         files: Mapping[str, object],
         name: str,
     ) -> Input:
-        """Parse canonical channels, management state, and paired row buckets once."""
+        """Parse canonical channels, management state, and row buckets once.
+
+        Reserve this call's rows against the shared recursive-nesting budget
+        before building them. This is the earliest point one call can turn a
+        submitted row count into unbounded work.
+        """
         input_data = MultiValueDict[str, object]()
         input_files = MultiValueDict[str, object]()
 
@@ -628,14 +633,18 @@ class SequenceWidget(CompositeWidget):
         total = management_form.cleaned_data[TOTAL_FORM_COUNT]
         if not isinstance(total, int) or total < 0 or total > self.limits.absolute_max:
             return self.Input(input_data, input_files, management_form, None, [], [])
-        data_rows = [MultiValueDict[str, object]() for _ in range(total)]
-        file_rows = [MultiValueDict[str, object]() for _ in range(total)]
+        # Entering the countdown reserves these rows: it starts one here if
+        # none is active yet, or spends the one this call already inherited.
+        with self.SubmissionCountdown(self.limits.submission_max) as countdown:
+            allowed = countdown.take(total)
+        data_rows = [MultiValueDict[str, object]() for _ in range(allowed)]
+        file_rows = [MultiValueDict[str, object]() for _ in range(allowed)]
         for source, collected, rows in (
             (data, data_keys, data_rows),
             (files, file_keys, file_rows),
         ):
             for canonical_key, index, source_key in collected:
-                if index < total:
+                if index < allowed:
                     self.keys._copy_key(rows[index], source, source_key, canonical_key)
         return self.Input(
             input_data, input_files, management_form, None, data_rows, file_rows
@@ -655,10 +664,12 @@ class SequenceWidget(CompositeWidget):
         assert isinstance(input, self.Input), (
             "SequenceWidget requires SequenceWidget.Input"
         )
-        if self.SubmissionCountdown._current.get() is None:
-            with self.SubmissionCountdown(self.limits.submission_max):
-                return self._value_from_input(input, name)
-        return self._value_from_input(input, name)
+        # This call takes nothing itself. It only makes sure one countdown
+        # is active, so read_input() and _value_from_input() below can
+        # take() from it. A standalone call starts the root scope here; a
+        # nested call joins the scope its caller already opened.
+        with self.SubmissionCountdown(self.limits.submission_max):
+            return self._value_from_input(input, name)
 
     def _value_from_input(self, input: Input, name: str) -> list[object]:
         """Extract rows from a parsed sequence cohort under the active budget."""
@@ -671,9 +682,10 @@ class SequenceWidget(CompositeWidget):
         if input.management_form is None or not input.management_form.is_valid():
             return []
         child_widget = self._child_widget(self.child_field)
-        allowed = self.SubmissionCountdown(self.limits.submission_max).take(
-            len(input.data_rows)
-        )
+        # read_input() already reserved these rows against the shared
+        # countdown when it built data_rows/file_rows. Inherit that count
+        # instead of spending the budget a second time.
+        allowed = len(input.data_rows)
         rows: list[object] = []
         for index in range(allowed):
             row_name = f"{name}-{index}"

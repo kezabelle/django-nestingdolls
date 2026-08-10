@@ -32,6 +32,7 @@ if not settings.configured:
 
 @contextmanager
 def without_form_rendering_patch() -> Iterator[None]:
+    """Run code with Django's original ``BaseForm`` renderer."""
     original_render = BaseForm.render
     original_str = BaseForm.__str__
     original_html = BaseForm.__html__
@@ -60,11 +61,11 @@ def squashed(html: str) -> str:
 
 class FormRenderingPatchTestCase(SimpleTestCase):
     def test_installation_is_idempotent(self):
-        """Installing again, by either entry point, never wraps the wrapper.
+        """Repeated installation keeps one wrapper around the original renderer.
 
-        ``AppConfig.ready()`` can run more than once in one process, and it
-        only calls ``install_form_rendering_patch()``, so both entry points are
-        the same assertion.
+        ``AppConfig.ready()`` can run more than once in one process. It calls
+        ``install_form_rendering_patch()``, so both entry points must preserve
+        the same wrapper.
         """
         app_config = apps.get_app_config("nestingdolls")
         installed_render = BaseForm.render
@@ -81,6 +82,7 @@ class FormRenderingPatchTestCase(SimpleTestCase):
         self.assertIs(getattr(BaseForm.render, "__wrapped__", None), original_render)
 
     def test_patch_wraps_an_existing_render_customization(self):
+        """The patch preserves an existing render wrapper and its layout."""
         wrapper_layouts = []
         widget_layouts = []
         render_results = []
@@ -109,6 +111,7 @@ class FormRenderingPatchTestCase(SimpleTestCase):
             render_results.append(result)
             return result
 
+        # Install the patch after another library replaces ``BaseForm.render``.
         with without_form_rendering_patch():
             BaseForm.render = customized_render
             install_form_rendering_patch()
@@ -122,6 +125,8 @@ class FormRenderingPatchTestCase(SimpleTestCase):
         self.assertIs(BaseForm.nestingdolls_original_render, original_render)
 
     def test_patch_resets_layout_after_render_error(self):
+        """A render error restores the default layout for the next render."""
+
         class ExplodingWidget(forms.TextInput):
             def render(self, *args: object, **kwargs: object) -> str:
                 raise RuntimeError("boom")
@@ -135,6 +140,7 @@ class FormRenderingPatchTestCase(SimpleTestCase):
 
     @override_settings(INSTALLED_APPS=("django.forms", "nestingdolls"))
     def test_patch_supports_django_template_renderers(self):
+        """Both Django template renderers pass the selected layout to child widgets."""
         widget_layouts = []
 
         class LayoutWidget(forms.TextInput):
@@ -162,6 +168,8 @@ class FormRenderingPatchTestCase(SimpleTestCase):
                 self.assertIn('name="child-value"', html)
 
     def test_mapping_widget_renders_without_patch(self):
+        """A mapping widget renders its wrapper and child inputs without the patch."""
+
         class PointForm(forms.Form):
             a = forms.IntegerField()
             label = forms.CharField(required=False)
@@ -180,6 +188,8 @@ class FormRenderingPatchTestCase(SimpleTestCase):
         self.assertIn('name="point-label"', html)
 
     def test_sequence_widget_renders_without_patch(self):
+        """A sequence widget renders its wrapper and row inputs without the patch."""
+
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), min_length=2)
 

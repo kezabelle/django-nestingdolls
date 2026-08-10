@@ -316,26 +316,31 @@ class SequenceBoundField(CompositeBoundField):
             if self.input.direct_rows is not None:
                 return frozenset()
             bf = self.bound_field
-            child_widget = bf.field.widget._child_widget(bf.field.widget.child_field)
+            widget = bf.field.widget
+            child_widget = widget._child_widget(widget.child_field)
             initial_count = len(bf.field.initial_values(bf.initial))
             omitted: set[int] = set()
-            for index, (data, files) in enumerate(
-                zip(self.input.data_rows, self.input.file_rows, strict=True)
-            ):
-                if index < initial_count:
-                    continue
-                name = f"{bf.html_name}-{index}"
-                if isinstance(child_widget, CompositeWidget):
-                    child_input = child_widget.read_input(data, files, name)
-                    is_omitted = not child_input.data and not child_input.files
-                else:
-                    is_omitted = child_widget.value_omitted_from_data(
-                        data,
-                        cast("MultiValueDict[str, UploadedFile[Any]]", files),
-                        name,
-                    )
-                if is_omitted:
-                    omitted.add(index)
+            # A composite child's read_input() below can build its own nested
+            # rows, so share one countdown across every row instead of
+            # letting each one spend a fresh budget.
+            with widget.SubmissionCountdown(bf.field.limits.submission_max):
+                for index, (data, files) in enumerate(
+                    zip(self.input.data_rows, self.input.file_rows, strict=True)
+                ):
+                    if index < initial_count:
+                        continue
+                    name = f"{bf.html_name}-{index}"
+                    if isinstance(child_widget, CompositeWidget):
+                        child_input = child_widget.read_input(data, files, name)
+                        is_omitted = not child_input.data and not child_input.files
+                    else:
+                        is_omitted = child_widget.value_omitted_from_data(
+                            data,
+                            cast("MultiValueDict[str, UploadedFile[Any]]", files),
+                            name,
+                        )
+                    if is_omitted:
+                        omitted.add(index)
             return frozenset(omitted)
 
         @cached_property

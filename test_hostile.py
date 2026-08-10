@@ -1,18 +1,16 @@
 """Hostile request tests for mapping and sequence fields.
 
-Every test in this module sends a request through Django with
-``self.client``. A request is the only channel a user has. So a request is
-the only channel these tests use.
+Each test sends a request with ``self.client``. A request is the user-facing
+input channel.
 
-The contract is short. A user must not crash a view. A user must not get an
-error message that names the wrong cause. A user must not make the server
-build more rows than the row limits allow, and a user must not destroy the
-values of a good submission with one extra key.
+A request must not crash a view, report a false cause, create too many rows,
+or erase valid values.
 
-A test that proves a defect carries ``@unittest.expectedFailure`` and a
-docstring that states the defect. Remove the marker when the defect is fixed.
+Expected failures describe known defects. Remove the marker and defect text
+when the defect is fixed.
 """
 
+import time
 import unittest
 from urllib.parse import urlencode
 
@@ -50,8 +48,8 @@ if not settings.configured:
 
 
 def setUpModule():
-    # The client tests below render bound forms, so use the same instrumented
-    # environment that the other test modules use.
+    # The client tests render bound forms.
+    # Use Django's instrumented template environment.
     setup_test_environment()
 
 
@@ -117,6 +115,49 @@ class SequenceHostileFixtures(SimpleTestCase):
 
     class NestedTextListForm(forms.Form):
         values = nestingdolls.ListField(
+            nestingdolls.ListField(forms.CharField(required=False), required=False),
+            required=False,
+        )
+
+    class TriplyNestedListForm(forms.Form):
+        values = nestingdolls.ListField(
+            nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(required=False), required=False),
+                required=False,
+            ),
+            required=False,
+        )
+
+    class ManySiblingListFieldsForm(forms.Form):
+        a = nestingdolls.ListField(
+            nestingdolls.ListField(forms.CharField(required=False), required=False),
+            required=False,
+        )
+        b = nestingdolls.ListField(
+            nestingdolls.ListField(forms.CharField(required=False), required=False),
+            required=False,
+        )
+        c = nestingdolls.ListField(
+            nestingdolls.ListField(forms.CharField(required=False), required=False),
+            required=False,
+        )
+        d = nestingdolls.ListField(
+            nestingdolls.ListField(forms.CharField(required=False), required=False),
+            required=False,
+        )
+        e = nestingdolls.ListField(
+            nestingdolls.ListField(forms.CharField(required=False), required=False),
+            required=False,
+        )
+        f = nestingdolls.ListField(
+            nestingdolls.ListField(forms.CharField(required=False), required=False),
+            required=False,
+        )
+        g = nestingdolls.ListField(
+            nestingdolls.ListField(forms.CharField(required=False), required=False),
+            required=False,
+        )
+        h = nestingdolls.ListField(
             nestingdolls.ListField(forms.CharField(required=False), required=False),
             required=False,
         )
@@ -201,6 +242,43 @@ class MappingHostileFixtures(SimpleTestCase):
 
         value = nestingdolls.DictField(PointForm, required=False)
 
+    class ManySiblingSequencesForm(forms.Form):
+        class InnerForm(forms.Form):
+            a = nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(required=False), required=False),
+                required=False,
+            )
+            b = nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(required=False), required=False),
+                required=False,
+            )
+            c = nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(required=False), required=False),
+                required=False,
+            )
+            d = nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(required=False), required=False),
+                required=False,
+            )
+            e = nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(required=False), required=False),
+                required=False,
+            )
+            f = nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(required=False), required=False),
+                required=False,
+            )
+            g = nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(required=False), required=False),
+                required=False,
+            )
+            h = nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(required=False), required=False),
+                required=False,
+            )
+
+        value = nestingdolls.DictField(InnerForm, required=False)
+
 
 urlpatterns = [
     path(
@@ -223,6 +301,18 @@ urlpatterns = [
         HostileProbeView.as_view(
             form_class=SequenceHostileFixtures.NestedTextListForm,
             show_html=True,
+        ),
+    ),
+    path(
+        "hostile-triply-nested-list/",
+        HostileProbeView.as_view(
+            form_class=SequenceHostileFixtures.TriplyNestedListForm,
+        ),
+    ),
+    path(
+        "hostile-many-sibling-list-fields/",
+        HostileProbeView.as_view(
+            form_class=SequenceHostileFixtures.ManySiblingListFieldsForm,
         ),
     ),
     path(
@@ -289,6 +379,13 @@ urlpatterns = [
             form_class=MappingHostileFixtures.PlainMappingForm, field_name="value"
         ),
     ),
+    path(
+        "hostile-many-sibling-sequences-mapping/",
+        HostileProbeView.as_view(
+            form_class=MappingHostileFixtures.ManySiblingSequencesForm,
+            field_name="value",
+        ),
+    ),
 ]
 
 
@@ -310,14 +407,10 @@ class HostileSequenceCrashTestCase(HostileClientTestCase):
     """Prove that no submitted key makes a sequence view raise."""
 
     def test_client_survives_a_forged_whole_value_for_compound_child_rows(self):
-        """A forged scalar under the field name crashes the redisplay of a
-        SplitDateTimeField row.
+        """A scalar in a compound row must not cause an HTTP 500.
 
-        DEFECT. ``SequenceWidget.Keys.whole_value_rows`` returns the raw
-        submitted string as a row, and ``SequenceWidget.get_context`` gives
-        that string to ``MultiWidget.decompress``. The widget expects a
-        datetime, so the render raises ``AttributeError`` and the user gets
-        HTTP 500 from one POST key.
+        DEFECT. ``whole_value_rows`` passes a string to ``MultiWidget.decompress``.
+        It expects a datetime and raises ``AttributeError``.
         """
         managed = self.client.post(
             "/hostile-split-datetime-list/",
@@ -381,11 +474,9 @@ class HostileSequenceCrashTestCase(HostileClientTestCase):
         self.assertEqual(response.json()["value"], [1])
 
     def test_client_reports_an_unhashable_json_row_as_a_validation_error(self):
-        """A JSON array in a set row gives a validation error, not a crash.
+        """A JSON array in a set row returns a validation error.
 
-        ``SetField.compress`` raises when a cleaned row cannot go into a
-        Python ``set``. A request reaches that path with an ordinary JSON
-        array, which ``JSONField`` accepts but ``set()`` cannot hash.
+        ``JSONField`` accepts an array, but a Python ``set`` cannot hash it.
         """
         response = self.client.post(
             "/hostile-json-set/",
@@ -494,14 +585,10 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
     """Send management controls that a browser never sends."""
 
     def test_client_keeps_rows_when_a_total_ends_in_a_decimal_zero(self):
-        """A total of ``2.0`` destroys both submitted rows without a word.
+        """A decimal total must retain its submitted rows.
 
-        DEFECT. ``SequenceWidget.Keys.total_forms`` calls ``int()``, which
-        refuses ``"2.0"``. Django's ``ManagementForm`` uses ``IntegerField``,
-        which accepts it as 2. The two readers disagree, so extraction returns
-        no rows while the management form reports two. The optional field then
-        cleans to an empty list and the response reports success, so the two
-        submitted values disappear with no error at all.
+        DEFECT. Django accepts ``"2.0"`` as 2. ``Keys.total_forms`` rejects it. The
+        optional field then accepts an empty list and loses the rows.
         """
         control = self.client.post(
             "/hostile-integer-list/",
@@ -527,14 +614,11 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
         self.assertEqual(response.json()["value"], [1, 2])
 
     def test_client_accepts_a_row_beside_a_junk_unused_management_control(self):
-        """A junk ``MIN_NUM_FORMS`` value rejects a correct submission.
+        """An unused management control must not reject valid rows.
 
-        DEFECT. ``SequenceWidget.Keys.management_names`` counts
-        ``MIN_NUM_FORMS`` and ``MAX_NUM_FORMS`` as management input, and
-        ``SequenceField._clean_bound_field`` refuses the field when the
-        management form is invalid. Neither value is read for validation
-        anywhere in the package, so one extra key rejects a good submission
-        and disables the add and remove controls on the page.
+        DEFECT. ``management_names`` treats ``MIN_NUM_FORMS`` and ``MAX_NUM_FORMS``
+        as required. A bad unused value rejects the field and disables its row
+        controls.
         """
         for name in (MIN_NUM_FORM_COUNT, MAX_NUM_FORM_COUNT):
             with self.subTest(name=name):
@@ -551,12 +635,10 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
                 self.assertEqual(response.json()["value"], [5])
 
     def test_management_error_does_not_call_a_submitted_control_missing(self):
-        """The management error names a control that the request did send.
+        """A bad management value must not be reported as missing.
 
-        DEFECT. ``MissingManagementFormValidationError`` lists every control
-        that failed ``ManagementForm`` validation under the words "Missing
-        fields". A control with a bad value is present, not missing, so the
-        message states the wrong cause.
+        DEFECT. The error reports every invalid management control as missing. This
+        control is present but has a bad value.
         """
         response = self.client.post(
             "/hostile-integer-list/",
@@ -634,12 +716,10 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
         self.assertEqual(response.json()["value"], [["kept"]])
 
     def test_client_does_not_blame_the_user_data_for_a_forged_row_name_key(self):
-        """A forged row-name key destroys typed rows and blames their values.
+        """A forged row-name key must not replace valid typed rows.
 
-        DEFECT. Same inverted rule as the test above, with a typed child. The
-        forged text replaces both submitted rows, the child field cannot read
-        it, and the user reads "Enter a whole number." about two rows that
-        were whole numbers. The reported cause is the opposite of the truth.
+        DEFECT. The forged text replaces both rows. It then reports an integer error
+        for rows that were valid.
         """
         control = self.client.post(
             "/hostile-nested-typed-list/",
@@ -685,12 +765,10 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
         self.assertEqual(response.json()["value"], {"child": {"leaf": 1}})
 
     def test_client_keeps_an_optional_nested_leaf_beside_an_empty_forged_key(self):
-        """An empty forged key silently drops a nested leaf and reports success.
+        """An empty forged key must not discard an optional nested leaf.
 
-        DEFECT. ``value-child=`` becomes the whole value of the optional
-        nested mapping. ``MappingField.to_python`` turns the empty string into
-        an empty mapping, the field is optional, and cleaning succeeds. The
-        submitted leaf is gone with no error at all.
+        DEFECT. ``MappingField.to_python`` changes the empty exact value to an empty
+        mapping. Cleaning succeeds and loses the leaf.
         """
         response = self.post_raw(
             "/hostile-optional-triple-mapping/",
@@ -784,13 +862,10 @@ class HostileRenderCostTestCase(HostileClientTestCase):
     """Measure the page that a hostile submission makes the server build."""
 
     def test_client_does_not_split_a_forged_text_row_into_one_row_per_letter(self):
-        """A three-letter forged value renders three inner rows.
+        """A forged text row must not render one row per character.
 
-        DEFECT. ``SequenceField.initial_values`` refuses a string, because a
-        string is not a collection of rows. ``SequenceWidget.get_context``
-        applies ``islice`` to the same value with no such guard, and
-        ``prepare_value`` hands the raw string back after the refusal. So the
-        render walks the string one character at a time.
+        DEFECT. ``initial_values`` rejects text but ``get_context`` iterates it.
+        Rendering creates a row for each character.
         """
         response = self.client.post("/hostile-nested-text-list/", {"values": "abc"})
         self.assertEqual(response.status_code, 200)
@@ -800,11 +875,10 @@ class HostileRenderCostTestCase(HostileClientTestCase):
                 self.assertNotIn(f'value="{letter}"', html)
 
     def test_client_cannot_expand_one_text_key_into_thousands_of_rendered_rows(self):
-        """One 3 KB key builds about 2000 nested rows and a very large page.
+        """A single text key must not create thousands of rows.
 
-        DEFECT. The same missing string guard turns one submitted key into one
-        rendered row for each character, up to ``absolute_max``. The request
-        is small, the response is not.
+        DEFECT. Text creates one row per character until ``absolute_max``. A small
+        request creates a large response.
         """
         response = self.client.post(
             "/hostile-nested-text-list/", {"values": "a" * 3000}
@@ -819,14 +893,10 @@ class HostileRenderCostTestCase(HostileClientTestCase):
         )
 
     def test_aggregate_row_rejection_does_not_quote_a_respected_per_level_limit(self):
-        """The aggregate refusal quotes a per-level limit that every level met.
+        """A shared-budget error must name the shared budget.
 
-        DEFECT. ``SequenceField._clean_bound_field`` raises
-        ``TooManyFormsValidationError`` with ``num=self.limits.max_length``
-        when the shared row budget runs out. No level exceeded ``max_length``
-        here, so the message "Please submit at most 50 forms." names a limit
-        the user respected instead of the aggregate budget that stopped the
-        request.
+        DEFECT. ``_clean_bound_field`` reports ``max_length`` when the shared budget
+        runs out. No level exceeds ``max_length``.
         """
         payload = {
             f"values-{TOTAL_FORM_COUNT}": "50",
@@ -844,12 +914,10 @@ class HostileRenderCostTestCase(HostileClientTestCase):
         self.assertNotIn("at most 50 forms", " ".join(body["messages"]["values"]))
 
     def test_a_rejected_oversized_submission_does_not_redisplay_its_rows(self):
-        """The page that reports "too many forms" still renders those rows.
+        """A rejected submission must not render rejected rows.
 
-        DEFECT. Cleaning and rendering each open their own
-        ``SubmissionCountdown``. Cleaning refuses the submission, and the
-        render then spends a whole fresh budget on the rows it just refused.
-        The user gets a large page that contradicts its own error.
+        DEFECT. Cleaning and rendering open separate countdowns. Rendering uses a
+        new budget and displays the rejected rows.
         """
         payload = {
             f"values-{TOTAL_FORM_COUNT}": "50",
@@ -872,12 +940,10 @@ class HostileRenderCostTestCase(HostileClientTestCase):
         )
 
     def test_client_cannot_multiply_default_row_caps_with_a_handful_of_keys(self):
-        """A few nested totals cannot claim more rows than the default cap allows.
+        """Nested totals cannot exceed the default shared cap.
 
-        Three outer rows each claiming 900 inner rows ask for 3 + 2700 = 2703
-        rows, past the default 2000-row ``submission_max``, from 8 management
-        keys. No per-level ``max_length``/``absolute_max`` override is set, so
-        this is the cap every undecorated ``ListField`` ships with.
+        Three outer rows with 900 inner rows claim 2703 rows. The default
+        ``submission_max`` is 2000 rows.
         """
         payload = {
             f"values-{TOTAL_FORM_COUNT}": "3",
@@ -893,6 +959,203 @@ class HostileRenderCostTestCase(HostileClientTestCase):
         body = response.json()
         self.assertIs(body["valid"], False)
         self.assertEqual(body["errors"], {"values": ["too_many_forms"]})
+
+
+@override_settings(ROOT_URLCONF=__name__)
+class HostileCleanCostTestCase(HostileClientTestCase):
+    """Measure the cost to reject hostile nested submissions.
+
+    ``SubmissionCountdown`` stops nested totals from multiplying rows. Other
+    tests check the rejection result. These tests check the server work required
+    to reject it.
+    """
+
+    @staticmethod
+    def _amplified_sequence_payload(
+        prefix: str, *, outer_total: int, inner_total: int
+    ) -> dict[str, str]:
+        """Build a nested sequence claim under ``prefix``.
+
+        The same claim also reaches a sequence inside a mapping.
+        """
+        payload = {
+            f"{prefix}-{TOTAL_FORM_COUNT}": str(outer_total),
+            f"{prefix}-{INITIAL_FORM_COUNT}": "0",
+        }
+        for index in range(outer_total):
+            payload[f"{prefix}-{index}-{TOTAL_FORM_COUNT}"] = str(inner_total)
+            payload[f"{prefix}-{index}-{INITIAL_FORM_COUNT}"] = "0"
+        return payload
+
+    def test_client_pays_similar_cost_for_a_concentrated_or_spread_out_claim(
+        self,
+    ):
+        """A spread claim costs about the same as a concentrated claim.
+
+        Each ``read_input`` call reserves rows from one shared budget. Both request
+        shapes must reject with similar work.
+        """
+        # A single row asking for more than the shared budget allows is
+        # rejected up front, without building a single child row.
+        cheap_payload = {
+            f"values-{TOTAL_FORM_COUNT}": "1",
+            f"values-{INITIAL_FORM_COUNT}": "0",
+            f"values-0-{TOTAL_FORM_COUNT}": "2000",
+            f"values-0-{INITIAL_FORM_COUNT}": "0",
+        }
+        cheap_start = time.perf_counter()
+        cheap_response = self.client.post("/hostile-nested-text-list/", cheap_payload)
+        cheap_elapsed = time.perf_counter() - cheap_start
+        self.assertEqual(cheap_response.status_code, 200)
+        self.assertEqual(
+            cheap_response.json()["errors"], {"values": ["too_many_forms"]}
+        )
+
+        # The same 2000-row claim, spread across 499 sibling rows instead of
+        # one, stays under Django's default DATA_UPLOAD_MAX_NUMBER_FIELDS
+        # (1000 POST keys) and under every per-level absolute_max.
+        expensive_payload = {
+            f"values-{TOTAL_FORM_COUNT}": "499",
+            f"values-{INITIAL_FORM_COUNT}": "0",
+        }
+        for index in range(499):
+            expensive_payload[f"values-{index}-{TOTAL_FORM_COUNT}"] = "2000"
+            expensive_payload[f"values-{index}-{INITIAL_FORM_COUNT}"] = "0"
+        self.assertLessEqual(len(expensive_payload), 1000)
+
+        expensive_start = time.perf_counter()
+        expensive_response = self.client.post(
+            "/hostile-nested-text-list/", expensive_payload
+        )
+        expensive_elapsed = time.perf_counter() - expensive_start
+        self.assertEqual(expensive_response.status_code, 200)
+        self.assertEqual(
+            expensive_response.json()["errors"], {"values": ["too_many_forms"]}
+        )
+
+        # Both requests reach the same correct verdict from a similar number
+        # of POST keys. A shared budget that gates child work keeps the
+        # expensive shape within a small constant factor of the cheap
+        # shape's time, instead of roughly two orders of magnitude past it.
+        budget_seconds = max(0.5, cheap_elapsed * 20)
+        self.assertLess(
+            expensive_elapsed,
+            budget_seconds,
+            f"a {len(expensive_payload)}-key submission spread across rows "
+            f"took {expensive_elapsed:.3f}s to correctly reject, versus "
+            f"{cheap_elapsed:.3f}s for a single row claiming the same "
+            "total -- the shared row budget did not bound the cost of "
+            "reaching that rejection",
+        )
+
+    def _fastest_of(self, url: str, payload: dict[str, str], repeats: int = 5) -> float:
+        """Return the quickest of several posts to ``url``, damping scheduling noise.
+
+        Each post must still be rejected, so a broken payload cannot pass by
+        cutting the work short.
+        """
+        best = float("inf")
+        for _ in range(repeats):
+            start = time.perf_counter()
+            response = self.client.post(url, payload)
+            best = min(best, time.perf_counter() - start)
+            self.assertEqual(response.status_code, 200)
+            self.assertIs(response.json()["valid"], False)
+        return best
+
+    def test_client_cost_scales_with_sibling_mapping_children_not_worse(self):
+        """Sibling sequences in a mapping have independent shared budgets.
+
+        This matches Django formsets. The form author fixes the sibling count. This
+        test rejects superlinear sibling cost.
+        """
+        amplify = self._amplified_sequence_payload
+        one_child_payload = amplify("value-a", outer_total=1, inner_total=2000)
+        all_children_payload: dict[str, str] = {}
+        for child_name in "abcdefgh":
+            all_children_payload.update(
+                amplify(f"value-{child_name}", outer_total=1, inner_total=2000)
+            )
+        self.assertLessEqual(len(all_children_payload), 1000)
+
+        url = "/hostile-many-sibling-sequences-mapping/"
+        one_elapsed = self._fastest_of(url, one_child_payload)
+        all_elapsed = self._fastest_of(url, all_children_payload)
+
+        # Eight independent, individually-bounded siblings should cost on
+        # the order of eight times one of them, not orders of magnitude
+        # more, which is what a superlinear regression would look like.
+        budget_seconds = max(0.3, one_elapsed * 8 * 5)
+        self.assertLess(
+            all_elapsed,
+            budget_seconds,
+            f"amplifying all eight sibling sequences took {all_elapsed:.3f}s, "
+            f"versus {one_elapsed:.3f}s for one of them alone -- that is "
+            "worse than the linear-in-sibling-count cost Django's own "
+            "formsets accept",
+        )
+
+    def test_client_cost_scales_with_sibling_list_fields_not_worse(self):
+        """Sibling ``ListField`` instances have independent shared budgets.
+
+        This is the mapping test without ``DictField``. The form author fixes the
+        sibling count. This test rejects superlinear sibling cost.
+        """
+        amplify = self._amplified_sequence_payload
+        one_field_payload = amplify("a", outer_total=1, inner_total=2000)
+        all_fields_payload: dict[str, str] = {}
+        for field_name in "abcdefgh":
+            all_fields_payload.update(
+                amplify(field_name, outer_total=1, inner_total=2000)
+            )
+        self.assertLessEqual(len(all_fields_payload), 1000)
+
+        url = "/hostile-many-sibling-list-fields/"
+        one_elapsed = self._fastest_of(url, one_field_payload)
+        all_elapsed = self._fastest_of(url, all_fields_payload)
+
+        budget_seconds = max(0.3, one_elapsed * 8 * 5)
+        self.assertLess(
+            all_elapsed,
+            budget_seconds,
+            f"amplifying all eight sibling fields took {all_elapsed:.3f}s, "
+            f"versus {one_elapsed:.3f}s for one of them alone -- that is "
+            "worse than the linear-in-sibling-count cost Django's own "
+            "formsets accept",
+        )
+
+    def test_client_stays_bounded_three_sequence_levels_deep(self):
+        """The shared budget limits work at a third nesting level.
+
+        Two outer rows, two middle rows, and 2000 inner rows claim up to 8000 rows.
+        The same reservation rule must work at every depth.
+        """
+        payload = {
+            f"values-{TOTAL_FORM_COUNT}": "2",
+            f"values-{INITIAL_FORM_COUNT}": "0",
+        }
+        for outer in range(2):
+            payload[f"values-{outer}-{TOTAL_FORM_COUNT}"] = "2"
+            payload[f"values-{outer}-{INITIAL_FORM_COUNT}"] = "0"
+            for middle in range(2):
+                payload[f"values-{outer}-{middle}-{TOTAL_FORM_COUNT}"] = "2000"
+                payload[f"values-{outer}-{middle}-{INITIAL_FORM_COUNT}"] = "0"
+        self.assertEqual(len(payload), 14)
+
+        start = time.perf_counter()
+        response = self.client.post("/hostile-triply-nested-list/", payload)
+        elapsed = time.perf_counter() - start
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIs(body["valid"], False)
+        self.assertEqual(body["errors"], {"values": ["too_many_forms"]})
+        self.assertLess(
+            elapsed,
+            0.5,
+            f"a 14-key, three-level submission asking for 8000 rows took "
+            f"{elapsed:.3f}s to correctly reject",
+        )
 
 
 @override_settings(ROOT_URLCONF=__name__)

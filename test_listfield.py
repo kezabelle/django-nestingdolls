@@ -1310,13 +1310,10 @@ class SetFieldTestCase(SimpleTestCase):
         self.assertLessEqual(field.child_field.comparisons, size * 3)
 
     def test_has_changed_bounds_comparisons_for_non_matching_rows(self):
-        """A hostile submission cannot drive a quadratic set comparison.
+        """A hostile submission cannot make set comparison quadratic.
 
-        Rows are attacker-controlled up to ``absolute_max`` while the members
-        come from the server, so an unbudgeted scan is quadratic in a number
-        the attacker picks. Exhausting the budget reports "changed", which is
-        the safe direction: a missed change loses data, an extra one costs one
-        save.
+        Submitted rows can reach ``absolute_max``. Budget exhaustion reports a
+        change, which is safer than a missed change.
         """
 
         class CountingCharField(forms.CharField):
@@ -1345,11 +1342,10 @@ class SetFieldTestCase(SimpleTestCase):
         self.assertLess(field.child_field.comparisons, 5 * (members + rows))
 
     def test_member_order_does_not_build_one_index_per_member_per_row(self):
-        """A row that hits its hash candidate must not look at other members.
+        """A matched row checks only its matching member.
 
-        A comparison looks at one member at a time, and a hit looks at one.
-        Building the whole order up front costs ``len(members)`` writes for
-        each row even then. That is the quadratic that ``members_left`` stops.
+        Building an order for every candidate creates quadratic writes.
+        ``members_left`` prevents this work.
         """
         size = 100_000
         members = [f"m{index}" for index in range(size)]
@@ -1743,12 +1739,10 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
                 self.assertEqual(limits.submission_max, expected)
 
     def test_submission_max_reads_a_zero_django_key_limit_as_no_limit(self):
-        """A key limit of zero is not supported, so the shared cap uses the fallback.
+        """A zero key limit uses the default shared cap.
 
-        Django reads ``DATA_UPLOAD_MAX_NUMBER_FIELDS = 0`` as "no field is
-        allowed", and it rejects such a request before a form sees it. Neither
-        zero nor ``None`` is a supported row budget here, so both use Django's
-        default row count.
+        Django rejects a zero key limit before form binding. Zero and ``None`` are
+        not supported row budgets.
         """
         limits = nestingdolls.ListField(
             forms.CharField(), max_length=10, absolute_max=10
@@ -1843,10 +1837,10 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertNotIn('name="outer-0-9"', html)
 
     def test_client_pairs_managed_sparse_data_and_file_rows_by_index(self):
-        """Client keeps the file of one row with the text of that same row.
+        """Managed sparse data and file indexes identify the same row.
 
-        A management total owns the row numbers, so a gap between the submitted
-        indexes of the text keys and of the file keys changes nothing.
+        The management total owns each row index. A gap does not change the
+        data-file pair.
         """
         response = self.client.post(
             "/sparse-asset-probe/",
@@ -1876,13 +1870,10 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
 
     @unittest.expectedFailure
     def test_client_pairs_unmanaged_sparse_data_and_file_rows_by_index(self):
-        """Client must keep the file of one row with the text of that same row.
+        """Unmanaged sparse data and file indexes must identify the same row.
 
-        The data and the files are normalized one after the other, and each
-        call builds its own dense index map from the indexes that it sees. The
-        two maps disagree, so the text of row 5 and the file of row 3 arrive in
-        one row. The submission is accepted, and the value of one row now holds
-        the value of another row.
+        DEFECT. Separate normalization creates separate maps. Text row 5 pairs with
+        file row 3, then the submission succeeds.
         """
         response = self.client.post(
             "/sparse-asset-probe/",
@@ -1910,14 +1901,10 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
 
     @unittest.expectedFailure
     def test_client_deletes_a_nested_row_and_redisplays_it_as_deleted(self):
-        """A deleted row of a nested sequence must go, and must come back deleted.
+        """Deleting a nested row removes it and renders it deleted.
 
-        Only a bound field reads the deletion inputs of its rows, and only the
-        outer field is bound. A nested sequence has no bound field, so nothing
-        reads the deletion inputs of the inner rows. The value that the user
-        deleted stays in the cleaned value, and ``make_row`` hands the nested
-        widget the management input only, so the render shows that row as a
-        live row again.
+        DEFECT. A nested sequence has no bound field to read its delete control. The
+        value remains and the row renders as live.
         """
         response = self.client.post(
             "/nested-deletion-redisplay-probe/",
@@ -1944,11 +1931,10 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
 
     @unittest.expectedFailure
     def test_client_attaches_a_nested_row_error_to_that_nested_row(self):
-        """The error of a nested row must render at the input that caused it.
+        """A nested row error appears at its failing input.
 
-        A nested sequence widget gets no row errors, so the message of the
-        inner row lands on the outer row. One row of the outer sequence can
-        hold many inner rows, and the user cannot see which one failed.
+        DEFECT. The nested widget receives no row errors. An inner error appears on
+        the outer row instead.
         """
         response = self.client.post(
             "/nested-row-error-redisplay-probe/",
@@ -1999,13 +1985,10 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
     def test_direct_clean_of_nested_values_pays_each_level_cap(self):
-        """A value from a developer costs the product of the per-level caps.
+        """Direct nested cleaning uses each level's own cap.
 
-        The shared countdown protects recursive work on request keys. A direct
-        ``clean()`` call carries no request keys, so it enters no countdown and
-        every level applies its own ``absolute_max`` only. The cost of the
-        nested rows is therefore above the shared cap, and each level still
-        refuses a collection that is too large.
+        Direct ``clean()`` has no request keys. It does not open the shared
+        countdown, but each level still applies ``absolute_max``.
         """
 
         class CountingField(forms.CharField):
@@ -2039,6 +2022,67 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
         error = context.exception.error_list[0]
         self.assertEqual(error.code, "item_invalid")
         self.assertEqual(error.params["child_code"], "too_many_forms")
+
+
+class SyntheticSubmissionCountdownContractTestCase(FormBindingUnitTestCase):
+    """Define behavior for manually nested private countdown scopes.
+
+    ``SequenceWidget.SubmissionCountdown`` is not public API. This test 
+    manufactures an unsupported situation anyway, by opening the scope by hand 
+    around ``is_valid()`` to demonstrate a synthetic issue.
+
+    No request path opens a second ``SubmissionCountdown``. This test does so to
+    record that a joined scope does not receive overflow state. This unsupported
+    call can truncate and accept data.
+
+    Do not change this behavior, do not try and fix this because it is beyond the
+    scope of a Field and moves towards either an owning form, or an owning view.
+    """
+
+    @unittest.expectedFailure
+    def test_a_hand_opened_shared_scope_silently_truncates_instead_of_rejecting(
+        self,
+    ):
+        """Demonstrate the synthetic misuse. See the class docstring first."""
+
+        class Form(forms.Form):
+            a = nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(required=False), required=False),
+                required=False,
+            )
+            b = nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(required=False), required=False),
+                required=False,
+            )
+
+        pairs = [
+            (f"a-{TOTAL_FORM_COUNT}", "1"),
+            (f"a-{INITIAL_FORM_COUNT}", "0"),
+            (f"a-0-{TOTAL_FORM_COUNT}", "20"),
+            (f"a-0-{INITIAL_FORM_COUNT}", "0"),
+            (f"b-{TOTAL_FORM_COUNT}", "1"),
+            (f"b-{INITIAL_FORM_COUNT}", "0"),
+            (f"b-0-{TOTAL_FORM_COUNT}", "1"),
+            (f"b-0-{INITIAL_FORM_COUNT}", "0"),
+            ("b-0-0", "hello"),
+        ]
+        form = self.post_urlencoded_form(Form, pairs)
+
+        # Synthetic only: no shipped code path opens this scope by hand.
+        with nestingdolls.SequenceWidget.SubmissionCountdown(10):
+            valid = form.is_valid()
+
+        # A real (fixed) implementation would reject the whole submission
+        # once the hand-opened shared allowance of 10 ran out, instead of
+        # reporting success with field "a" truncated and field "b" dropped.
+        self.assertIs(valid, False)
+        errors = form.errors.as_data()
+        for field_name in ("a", "b"):
+            with self.subTest(field=field_name):
+                self.assertEqual(len(errors[field_name]), 1)
+                error = errors[field_name][0]
+                self.assertEqual(error.code, "too_many_forms")
+                self.assertIn("across nested sequences", error.messages[0])
 
 
 @override_settings(ROOT_URLCONF=__name__, DATA_UPLOAD_MAX_NUMBER_FIELDS=10)

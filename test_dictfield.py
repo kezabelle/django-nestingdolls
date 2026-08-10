@@ -313,12 +313,10 @@ class NestedAssetProbeView(MappingProbeView):
 
 
 class MultipleFileInput(forms.ClearableFileInput):
-    """Read every file that the browser sent under one child name.
+    """Read all files for one child input.
 
-    ``FileInput`` reads the files with ``getlist`` for this widget, and it
-    falls back to ``get`` for a mapping that has no ``getlist``. A child of a
-    mapping therefore sees every repeated file only when the normalized file
-    input keeps the shape of ``request.FILES``.
+    ``FileInput`` uses ``getlist`` when available. Normalized mapping files must
+    keep the ``request.FILES`` shape so a child receives every file.
     """
 
     allow_multiple_selected = True
@@ -744,11 +742,10 @@ class MappingSubmissionFunctionalTestCase(SimpleTestCase):
         self.assertEqual(response.json()["changed"], True)
 
     def test_client_gives_a_mapping_child_widget_every_repeated_file(self):
-        """Client keeps repeated files for a child widget of a mapping.
+        """A mapping child widget receives every file for its input.
 
-        The normalized file input crosses the mapping boundary as the file data
-        of the child Form. It must behave the way ``request.FILES`` behaves, so
-        a child widget that reads every value of one key still finds them all.
+        Normalized files must keep the ``request.FILES`` shape. A child widget can
+        then read every value with ``getlist``.
         """
         response = self.client.post(
             "/mapping-repeated-file-probe/",
