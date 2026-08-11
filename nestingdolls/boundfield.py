@@ -198,9 +198,16 @@ class MappingBoundField(CompositeBoundField):
             return False
         if self.field.disabled:
             return False
-        if not isinstance(self.data, Mapping):
+        input = self.input
+        if (
+            self.html_name in input.data
+            and not isinstance(input.data.get(self.html_name), Mapping)
+        ) or (
+            self.html_name in input.files
+            and not isinstance(input.files.get(self.html_name), Mapping)
+        ):
             return False
-        if self.input.data or self.input.files:
+        if input.data or input.files:
             return True
         return (
             isinstance(self.initial, dict)
@@ -233,6 +240,14 @@ class MappingBoundField(CompositeBoundField):
                 field.disabled = True
         return subform
 
+    def _has_changed(self) -> bool:
+        """Delegate change detection to the mapping's own bound child Form."""
+        if self.field.disabled:
+            return False
+        if self.field.show_hidden_initial:
+            return super()._has_changed()
+        return self.subform.has_changed()
+
     def _prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
         """Give the mapping widget the child Form that holds the bound data."""
         if not isinstance(widget, MappingWidget):
@@ -243,6 +258,13 @@ class MappingBoundField(CompositeBoundField):
         widget.bound = widget.Bound(
             hidden_initial_value=value,
             subform=None if only_initial else self.subform,
+            initial_error=(
+                str(self.field.error_messages["invalid"])
+                if not only_initial
+                and self.initial is not None
+                and not isinstance(self.initial, Mapping)
+                else None
+            ),
         )
 
 
@@ -272,7 +294,7 @@ class SequenceBoundField(CompositeBoundField):
         )
 
     @cached_property
-    def formset(self) -> SequenceField.RowFormSet:
+    def formset(self) -> SequenceWidget.RowFormSet:
         """Return the cached, prefix-aware row formset for cleaning and rendering."""
         input = self.input
         assert isinstance(input, SequenceWidget.Input)
@@ -285,7 +307,7 @@ class SequenceBoundField(CompositeBoundField):
             and not self.is_bound_formset
         ):
             initial = [self.field.widget._empty_formset_row()]
-        formset = self.field.row_formset_class(
+        formset = self.field.widget._new_formset(
             data=input.data if self.is_bound_formset else None,
             files=cast("MultiValueDict[str, UploadedFile[Any]]", input.files)
             if self.is_bound_formset
@@ -295,14 +317,6 @@ class SequenceBoundField(CompositeBoundField):
             auto_id=cast(str, self.form.auto_id),
             form_kwargs={"use_required_attribute": False},
         )
-        from nestingdolls.fields import MappingField
-
-        if isinstance(self.field.child_field, MappingField):
-            formset.invalid_mapping_rows = frozenset(
-                index
-                for index, row in enumerate(initial_values)
-                if not isinstance(row, Mapping)
-            )
         return formset
 
     @cached_property
@@ -316,12 +330,7 @@ class SequenceBoundField(CompositeBoundField):
             return []
         values: list[object] = []
         for form in self.formset.forms:
-            if "value" in form.fields:
-                values.append(form["value"].data)
-            else:
-                values.append(
-                    {name: form[name].data for name in form.fields if name != "DELETE"}
-                )
+            values.append(form["value"].data)
         return values
 
     def _prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
@@ -371,8 +380,14 @@ class SequenceBoundField(CompositeBoundField):
         return value
 
     def _has_changed(self) -> bool:
-        """Report a change when the user deleted an initial row."""
-        changed = super()._has_changed()
+        """Report direct edits and deletions through the row formset."""
+        input = self.input
+        assert isinstance(input, SequenceWidget.Input)
+        changed = (
+            self.field.has_changed(self.initial, input.direct_rows)
+            if input.direct_rows is not None
+            else super()._has_changed()
+        )
         if changed or self.field.disabled:
             return changed
         deleted_forms = set(self.formset.deleted_forms)

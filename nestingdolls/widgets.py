@@ -7,12 +7,13 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 from django.core.files.uploadedfile import UploadedFile
-from django.forms import BaseForm, BaseFormSet, Field
+from django.forms import BaseForm, BaseFormSet, Field, Form
 from django.forms.formsets import (
     DEFAULT_MAX_NUM,
     DEFAULT_MIN_NUM,
     DELETION_FIELD_NAME,
     TOTAL_FORM_COUNT,
+    formset_factory,
 )
 from django.forms.widgets import Media as WidgetMedia
 from django.forms.widgets import MultiWidget, Widget
@@ -110,14 +111,18 @@ class CompositeWidget(Widget):
     def template_name(self, value: str) -> None:
         self._template_name = value
 
-    @property
-    def media(self) -> WidgetMedia:
-        """Merge every ``class Media`` in the MRO and the children's media."""
-        media = WidgetMedia()
-        for klass in reversed(type(self).__mro__):
-            if (definition := klass.__dict__.get("Media")) is not None:
-                media += WidgetMedia(definition)
-        return media + self._child_media()
+    def _get_media(self) -> WidgetMedia:
+        """Add this widget's own class ``Media`` to its children's media.
+
+        Django's ``MediaDefiningClass`` metaclass already installs a ``media``
+        property on every subclass that merges each ``class Media`` up the
+        MRO (``django.forms.widgets.media_property``); ``super().media``
+        reaches that chain. This only adds what Django's own mechanism does
+        not know about: the media of the child widgets this widget renders.
+        """
+        return super().media + self._child_media()
+
+    media = property(_get_media)
 
     def _child_media(self) -> WidgetMedia:
         """Return the media of the children this widget renders."""
@@ -167,6 +172,7 @@ class MappingWidget(CompositeWidget):
         """
 
         subform: BaseForm | None = None
+        initial_error: str | None = None
 
     bound: Bound = Bound()
 
@@ -336,7 +342,10 @@ class MappingWidget(CompositeWidget):
                     if self.is_hidden
                     else subform.hidden_fields()
                 ),
-                "non_field_errors": subform.non_field_errors(),
+                "non_field_errors": (
+                    ([self.bound.initial_error] if self.bound.initial_error else [])
+                    + list(subform.non_field_errors())
+                ),
             }
         )
         return context
@@ -384,7 +393,53 @@ class SequenceWidget(CompositeWidget):
     use_fieldset = True
     child_field: Field
     limits: SequenceField.Limits
-    formset_class: type[BaseFormSet[Any]]
+
+    class RowForm(Form):
+        """Wrap one child field without changing its visible key."""
+
+        def add_prefix(self, field_name: str) -> str:
+            if field_name == "value" and self.prefix:
+                return self.prefix
+            return super().add_prefix(field_name)
+
+    class RowFormSet(BaseFormSet):  # type: ignore[type-arg]
+        """Build rows with the owning sequence widget's shared budget."""
+
+        sequence_widget: SequenceWidget
+        _submission_total_form_count: int
+
+        def _construct_form(self, index: int, **kwargs: object) -> BaseForm:
+            form = cast(BaseForm, super()._construct_form(index, **kwargs))  # type: ignore[misc]
+            if form.empty_permitted and (
+                any(
+                    isinstance(key, str)
+                    and (key == form.prefix or key.startswith(f"{form.prefix}-"))
+                    and key != f"{form.prefix}-{DELETION_FIELD_NAME}"
+                    for source in (self.data, self.files)
+                    for key in source
+                )
+                or (
+                    not form.is_multipart()
+                    and any(
+                        not field.required
+                        for name, field in form.fields.items()
+                        if name != DELETION_FIELD_NAME
+                    )
+                )
+            ):
+                form.empty_permitted = False
+            return form
+
+        def total_form_count(self) -> int:
+            if hasattr(self, "_submission_total_form_count"):
+                return self._submission_total_form_count
+            total = super().total_form_count()
+            with self.sequence_widget.SubmissionCountdown(
+                self.sequence_widget.limits.submission_max
+            ) as countdown:
+                allowed = countdown.take(total)
+            self._submission_total_form_count = allowed
+            return allowed
 
     @dataclasses.dataclass(slots=True)
     class SubmissionCountdown:
@@ -476,16 +531,51 @@ class SequenceWidget(CompositeWidget):
             self.child_field = child_field
         super().__init__(dict(attrs) if attrs is not None else None)
 
-    def configure(
-        self,
-        child_field: Field,
-        limits: SequenceField.Limits,
-        formset_class: type[BaseFormSet[Any]],
-    ) -> None:
+    def configure(self, child_field: Field, limits: SequenceField.Limits) -> None:
         """Store the configuration of this field's private widget copy."""
         self.child_field = child_field
         self.limits = limits
-        self.formset_class = formset_class
+        self.__dict__.pop("formset_class", None)
+
+    @cached_property
+    def formset_class(self) -> type[RowFormSet]:
+        """Build the row formset class from this widget's child and limits."""
+        row_form = type("Row", (self.RowForm,), {"value": self.child_field})
+        return cast(
+            "type[SequenceWidget.RowFormSet]",
+            formset_factory(
+                row_form,
+                formset=self.RowFormSet,
+                extra=0,
+                can_delete=True,
+                min_num=self.limits.min_length,
+                max_num=self.limits.max_length,
+                absolute_max=self.limits.absolute_max,
+                validate_min=False,
+                validate_max=False,
+            ),
+        )
+
+    def _new_formset(
+        self,
+        *,
+        data: Mapping[str, object] | None = None,
+        files: MultiValueDict[str, UploadedFile[Any]] | None = None,
+        initial: Sequence[Mapping[str, object]] | None = None,
+        prefix: str | None = None,
+        auto_id: str = "id_%s",
+        form_kwargs: dict[str, object] | None = None,
+    ) -> RowFormSet:
+        formset = self.formset_class(
+            data=data,
+            files=files,
+            initial=initial,
+            prefix=prefix,
+            auto_id=auto_id,
+            form_kwargs=form_kwargs,
+        )
+        formset.sequence_widget = self
+        return formset
 
     def read_input(
         self,
@@ -574,36 +664,21 @@ class SequenceWidget(CompositeWidget):
                 return input.direct_rows[: countdown.take(len(input.direct_rows))]
         if not input.data and not input.files:
             return []
-        formset = self.formset_class(
+        formset = self._new_formset(
             data=input.data,
             files=cast("MultiValueDict[str, UploadedFile[Any]]", input.files),
             prefix=name,
         )
-        values: list[object] = []
-        for form in formset.forms:
-            if "value" in form.fields:
-                values.append(form["value"].data)
-            else:
-                values.append(
-                    {field_name: form[field_name].data for field_name in form.fields}
-                )
-        return values
+        return [form["value"].data for form in formset.forms]
 
     def _initial_formset_rows(
         self, value: Sequence[object] | None
     ) -> list[dict[str, object]]:
         """Adapt public sequence values to the concrete row form's initial data."""
-        values = [] if value is None else list(value)
-        from nestingdolls.fields import MappingField
-
-        if isinstance(self.child_field, MappingField):
-            return [dict(row) if isinstance(row, Mapping) else {} for row in values]
-        return [{"value": row} for row in values]
+        return [{"value": row} for row in value or ()]
 
     def _empty_formset_row(self) -> dict[str, object]:
-        from nestingdolls.fields import MappingField
-
-        return {} if isinstance(self.child_field, MappingField) else {"value": None}
+        return {"value": None}
 
     def _get_context(
         self,
@@ -624,10 +699,10 @@ class SequenceWidget(CompositeWidget):
             initial = self._initial_formset_rows(value)
             if not initial and self.is_required and self.limits.min_length == 0:
                 initial = [self._empty_formset_row()]
-            formset = self.formset_class(initial=initial, prefix=name)
+            formset = self._new_formset(initial=initial, prefix=name)
 
         if self.bound.submission_overflow:
-            formset = self.formset_class(initial=[], prefix=name)
+            formset = self._new_formset(initial=[], prefix=name)
 
         management_form = formset.management_form
         if not self.is_hidden:
@@ -653,50 +728,31 @@ class SequenceWidget(CompositeWidget):
                 child_attrs["disabled"] = True
             from nestingdolls.boundfield import CompositeBoundField
 
-            if "value" in form.fields:
-                child = form["value"]
-                child_widget = (
-                    child.field.hidden_widget()
-                    if self.input_type == "hidden"
-                    else child.field.widget
-                )
-                if isinstance(child, CompositeBoundField):
-                    child._prepare_widget(cast(CompositeWidget, child_widget), False)
-                child_value = (
-                    None
-                    if index == "__prefix__"
-                    else child.initial
-                    if isinstance(child, CompositeBoundField)
-                    else child.value()
-                )
-                if isinstance(child_widget, MultiWidget) and isinstance(
-                    child_value, str
-                ):
-                    child_value = None
-                subwidget = child_widget.get_context(
-                    child.html_name, child_value, child_attrs
-                )["widget"]
-                errors = (
-                    [str(self.child_field.error_messages["invalid"])]
-                    if index in getattr(formset, "invalid_mapping_rows", frozenset())
-                    else [
-                        message
-                        for error in form.errors.as_data().get("value", [])
-                        for message in error.messages
-                    ]
-                )
-            else:
-                child_widget = self._child_widget(self.child_field)
-                assert isinstance(child_widget, MappingWidget)
-                child_widget.bound = child_widget.Bound(subform=form)
-                subwidget = child_widget.get_context(
-                    cast(str, form.prefix), form.initial, child_attrs
-                )["widget"]
-                errors = (
-                    [str(self.child_field.error_messages["invalid"])]
-                    if index in getattr(formset, "invalid_mapping_rows", frozenset())
-                    else [str(error) for error in form.non_field_errors()]
-                )
+            child = form["value"]
+            child_widget = (
+                child.field.hidden_widget()
+                if self.input_type == "hidden"
+                else child.field.widget
+            )
+            if isinstance(child, CompositeBoundField):
+                child._prepare_widget(cast(CompositeWidget, child_widget), False)
+            child_value = (
+                None
+                if index == "__prefix__"
+                else child.initial
+                if isinstance(child, CompositeBoundField)
+                else child.value()
+            )
+            if isinstance(child_widget, MultiWidget) and isinstance(child_value, str):
+                child_value = None
+            subwidget = child_widget.get_context(
+                child.html_name, child_value, child_attrs
+            )["widget"]
+            errors = [
+                message
+                for error in form.errors.as_data().get("value", [])
+                for message in error.messages
+            ]
             row: dict[str, object] = {
                 "index": index,
                 "delete_name": f"{form.prefix}-{DELETION_FIELD_NAME}",
@@ -720,7 +776,7 @@ class SequenceWidget(CompositeWidget):
             empty_row = make_row(formset.empty_form, "__prefix__")
         finally:
             child_widget = self._child_widget(self.child_field)
-            if isinstance(child_widget, MappingWidget):
+            if isinstance(child_widget, CompositeWidget):
                 child_widget.bound = child_widget.Bound()
 
         context["widget"].update(

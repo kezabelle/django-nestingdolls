@@ -4,19 +4,14 @@ import copy
 import dataclasses
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from itertools import chain, islice
-from typing import ClassVar, Self, cast
+from typing import Self, cast
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.forms import BaseForm, BaseFormSet, Field, Form
+from django.forms import BaseForm, BaseFormSet, Field
 from django.forms.boundfield import BoundField
 from django.forms.fields import FileField
-from django.forms.formsets import (
-    DEFAULT_MAX_NUM,
-    DEFAULT_MIN_NUM,
-    DELETION_FIELD_NAME,
-    formset_factory,
-)
+from django.forms.formsets import DEFAULT_MAX_NUM, DEFAULT_MIN_NUM
 from django.utils.functional import Promise
 from django.utils.translation import gettext_lazy as _
 from django.utils.translation import ngettext_lazy
@@ -225,17 +220,9 @@ class MappingField(CompositeField):
     def _clean_bound_field(self, bound_field: BoundField) -> dict[str, object]:
         """Clean the prefixed child Form of a bound outer form.
 
-        The child Form cleans the input when the browser sent data. It
-        also cleans the input when the initial data holds files only.
-        Two other cases go back to the normal Django path:
-
-        - A value that is not a mapping. The base field turns this into
-          the "invalid" error.
-        - An empty value with no bound subform. The base field turns
-          this into "required", or into the empty default.
-
-        A nested sequence, not this mapping, owns the aggregate-row budget.
-        Django formsets cap each level but not nested-row work.
+        The child Form owns both the narrowed input and its cleaned state. A
+        missing or scalar submission has no bound subform, so the base field
+        reports the ordinary "invalid" or "required" error.
         """
         assert isinstance(bound_field, MappingBoundField), "for mypy"
         if self.disabled:
@@ -243,10 +230,7 @@ class MappingField(CompositeField):
                 dict[str, object],
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
-        value = bound_field.data
-        if not isinstance(value, Mapping) or (
-            not value and not bound_field.is_bound_subform
-        ):
+        if not bound_field.is_bound_subform:
             return cast(
                 dict[str, object],
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
@@ -316,9 +300,6 @@ class SequenceField(CompositeField):
 
     default_error_messages = {  # noqa: RUF012
         "invalid": _("Enter a list of values."),
-        "missing_management_form": BaseFormSet.default_error_messages[
-            "missing_management_form"
-        ],
         "too_many_forms": BaseFormSet.default_error_messages["too_many_forms"],
         "submission_too_many_forms": _(
             "Please submit at most %(num)d rows across nested sequences."
@@ -334,63 +315,6 @@ class SequenceField(CompositeField):
             "limit_value",
         ),
     }
-
-    class RowForm(Form):
-        """Wrap one bare child field without changing its visible key."""
-
-        def add_prefix(self, field_name: str) -> str:
-            if field_name == "value" and self.prefix:
-                return self.prefix
-            return super().add_prefix(field_name)
-
-    class RowFormSet(BaseFormSet):  # type: ignore[type-arg]
-        """Limit this formset's rows across recursively nested sequences."""
-
-        submission_max: ClassVar[int]
-        invalid_mapping_rows: frozenset[int]
-        _submission_total_form_count: int
-
-        def _construct_form(self, index: int, **kwargs: object) -> BaseForm:
-            form = cast(BaseForm, super()._construct_form(index, **kwargs))  # type: ignore[misc]
-            fields = [
-                field
-                for name, field in form.fields.items()
-                if name != DELETION_FIELD_NAME
-            ]
-            if form.empty_permitted and (
-                any(
-                    not field.widget.value_omitted_from_data(
-                        self.data, self.files, form[name].html_name
-                    )
-                    for name, field in form.fields.items()
-                    if name != DELETION_FIELD_NAME
-                )
-                or (
-                    len(fields) == 1
-                    and not fields[0].required
-                    and not isinstance(fields[0], FileField)
-                )
-            ):
-                # Django's formset only calls full_clean() when has_changed() is
-                # true. Composite widgets can submit a nested management form
-                # while still reporting no scalar change, so the row formset
-                # must mark the row non-empty before Django skips validation.
-                form.empty_permitted = False
-            return form
-
-        def total_form_count(self) -> int:
-            # Django consults this method both while constructing forms and while
-            # validating the formset. Reserve once, as required by SIMPLIFY.md's
-            # shared-countdown contract, rather than charging that same level twice.
-            if hasattr(self, "_submission_total_form_count"):
-                return self._submission_total_form_count
-            total = super().total_form_count()
-            with SequenceWidget.SubmissionCountdown(self.submission_max) as countdown:
-                allowed = countdown.take(total)
-            self._submission_total_form_count = allowed
-            return allowed
-
-    row_formset_class: type[RowFormSet]
 
     bound_field_class: type[SequenceBoundField] = SequenceBoundField
     widget: SequenceWidget
@@ -555,8 +479,6 @@ class SequenceField(CompositeField):
         # because a field holds its widget and its own configuration.
         self.child_field = copy.deepcopy(child_field)
         self.child_field.localize = localize
-        self.row_formset_class = self._row_formset_class()
-
         bound_field_class = bound_field_class or self.bound_field_class
         if not issubclass(bound_field_class, SequenceBoundField):
             raise TypeError("bound_field_class must inherit from SequenceBoundField")
@@ -581,31 +503,7 @@ class SequenceField(CompositeField):
             raise TypeError("widget must be a SequenceWidget instance or subclass")
         # Configure the copy that Django made, not the widget that the caller
         # gave.
-        self.widget.configure(self.child_field, self.limits, self.row_formset_class)
-
-    def _row_formset_class(self) -> type[RowFormSet]:
-        """Build this field's concrete row formset and bind its row limits."""
-        row_form = (
-            self.child_field.form_class
-            if isinstance(self.child_field, MappingField)
-            else type("Row", (self.RowForm,), {"value": self.child_field})
-        )
-        formset = cast(
-            "type[SequenceField.RowFormSet]",
-            formset_factory(
-                row_form,
-                formset=SequenceField.RowFormSet,
-                extra=0,
-                can_delete=True,
-                min_num=self.limits.min_length,
-                max_num=self.limits.max_length,
-                absolute_max=self.limits.absolute_max,
-                validate_min=False,
-                validate_max=False,
-            ),
-        )
-        formset.submission_max = self.limits.submission_max
-        return formset
+        self.widget.configure(self.child_field, self.limits)
 
     def __deepcopy__(self, memo: dict[int, object]) -> Self:
         """Copy this field, its child field, and the link between them.
@@ -623,8 +521,7 @@ class SequenceField(CompositeField):
         """
         result = super().__deepcopy__(memo)
         result.child_field = copy.deepcopy(self.child_field, memo)
-        result.row_formset_class = result._row_formset_class()
-        result.widget.child_field = result.child_field
+        result.widget.configure(result.child_field, result.limits)
         return result
 
     @staticmethod
@@ -723,9 +620,7 @@ class SequenceField(CompositeField):
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
 
-        with SequenceWidget.SubmissionCountdown(
-            self.limits.submission_max
-        ) as countdown:
+        with self.widget.SubmissionCountdown(self.limits.submission_max) as countdown:
             formset = bound_field.formset
             valid = formset.is_valid()
         bound_field.submission_overflow = bool(countdown)
@@ -752,16 +647,7 @@ class SequenceField(CompositeField):
                 form.empty_permitted and not form.has_changed()
             ):
                 continue
-            if "value" in form.cleaned_data:
-                cleaned_data.append(form.cleaned_data["value"])
-            else:
-                cleaned_data.append(
-                    {
-                        name: value
-                        for name, value in form.cleaned_data.items()
-                        if name != "DELETE"
-                    }
-                )
+            cleaned_data.append(form.cleaned_data["value"])
         result = self.compress(cleaned_data)
         self.validate(result)
         self.run_validators(result)

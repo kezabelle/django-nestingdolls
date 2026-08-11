@@ -13,7 +13,6 @@ __all__ = [
     "InvalidInitialValueError",
     "ItemValidationError",
     "MappingInputValidationError",
-    "MissingManagementFormValidationError",
     "SequenceInputValidationError",
     "TooManyComparisonsError",
     "TooManyFormsValidationError",
@@ -84,17 +83,6 @@ class SequenceInputValidationError(ValidationError):
 
     def __init__(self, message: str | StrPromise) -> None:
         super().__init__(message, code="invalid")
-
-
-class MissingManagementFormValidationError(ValidationError):
-    """Submitted sequence management data is missing or malformed."""
-
-    def __init__(self, message: str | StrPromise, *, field_names: str) -> None:
-        super().__init__(
-            message,
-            code="missing_management_form",
-            params={"field_names": field_names},
-        )
 
 
 class TooManyComparisonsError(RuntimeError):
