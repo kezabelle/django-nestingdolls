@@ -9,6 +9,7 @@ from .errors import (
     TooManyFormsValidationError,
 )
 from .fields import (
+    DataclassField,
     DictField,
     FormField,
     FrozenSequenceField,
@@ -24,6 +25,7 @@ from .fields import (
 from .widgets import MappingWidget, SequenceWidget
 
 __all__ = [
+    "DataclassField",
     "DictField",
     "FormField",
     "FrozenSequenceField",

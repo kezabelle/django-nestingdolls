@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+from collections import namedtuple
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from itertools import chain, islice
-from typing import Self, cast
+from typing import Any, Self, cast
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
@@ -12,7 +13,7 @@ from django.forms import BaseForm, BaseFormSet, Field
 from django.forms.boundfield import BoundField
 from django.forms.fields import FileField
 from django.forms.formsets import DEFAULT_MAX_NUM, DEFAULT_MIN_NUM
-from django.utils.functional import Promise
+from django.utils.functional import Promise, cached_property
 from django.utils.translation import gettext_lazy as _
 from django.utils.translation import ngettext_lazy
 
@@ -32,6 +33,7 @@ from nestingdolls.errors import (
 from nestingdolls.widgets import CompositeWidget, MappingWidget, SequenceWidget
 
 __all__ = [
+    "DataclassField",
     "DictField",
     "FormField",
     "FrozenSequenceField",
@@ -85,6 +87,24 @@ class MappingField(CompositeField):
     }
     bound_field_class: type[MappingBoundField] = MappingBoundField
 
+    @cached_property
+    def inferred_names(self) -> tuple[str, ...]:
+        """Return the form's declared field names."""
+        return tuple(
+            cast(Mapping[str, Field], self.form_class.base_fields)  # type: ignore[attr-defined]
+        )
+
+    @property
+    def output(self) -> Callable[..., object]:
+        """Return the callable that builds cleaned output."""
+        return self._output
+
+    @output.setter
+    def output(self, value: Callable[..., object] | None) -> None:
+        if not callable(value):
+            raise TypeError("output must be callable")
+        self._output = value
+
     def __init__(
         self,
         form_class: type[BaseForm],
@@ -97,7 +117,8 @@ class MappingField(CompositeField):
         help_text: str | Promise = "",
         error_messages: Mapping[str, str | Promise] | None = None,
         show_hidden_initial: bool = False,
-        validators: Sequence[Callable[[dict[str, object]], None]] = (),
+        output: Callable[..., object] | None = dict,
+        validators: Sequence[Callable[[object], None]] = (),
         localize: bool = False,
         disabled: bool = False,
         label_suffix: str | None = None,
@@ -147,6 +168,7 @@ class MappingField(CompositeField):
         # Configure the copy that Django made, not the widget that the caller
         # gave.
         self.widget.configure(form_class)
+        self.output = output
 
     def initial_value(self, value: object) -> dict[str, object]:
         """Return the initial value as a dict, or raise ``InvalidInitialValueError``."""
@@ -180,11 +202,8 @@ class MappingField(CompositeField):
         return value
 
     def compress(self, data: dict[str, object]) -> object:
-        """Return the cleaned mapping members, or a value built from them.
-
-        A subclass changes the type of the result here.
-        """
-        return data
+        """Build the cleaned output from the child form data."""
+        return self.output(data)
 
     def _clean_form(self, form: BaseForm) -> object:
         """Return the cleaned data of the child Form, or raise its errors.
@@ -297,19 +316,12 @@ Subform = MappingField
 
 
 class NamedTupleField(MappingField):
-    """Clean and validate the fixed set of children that one Form declares, as a ``NamedTuple``.
-
-    ``namedtuple_type`` must declare exactly the same field names as
-    ``form_class``, as a set; ``__init__`` refuses any other pairing. The
-    cleaned value is one instance of ``namedtuple_type``, built from the
-    child Form's ``cleaned_data`` by keyword, or ``None`` when the field is
-    not required and gets no value.
-    """
+    """Clean a child form into a named tuple."""
 
     def __init__(
         self,
         form_class: type[BaseForm],
-        namedtuple_type: type[tuple[object, ...]],
+        output: type[tuple[object, ...]] | None = None,
         /,
         *,
         required: bool = True,
@@ -326,15 +338,6 @@ class NamedTupleField(MappingField):
         template_name: str | None = None,
         bound_field_class: type[MappingBoundField] | None = None,
     ) -> None:
-        """Configure a fixed mapping field that cleans to a ``namedtuple_type`` instance."""
-        if not (
-            isinstance(namedtuple_type, type)
-            and issubclass(namedtuple_type, tuple)
-            and hasattr(namedtuple_type, "_fields")
-        ):
-            raise ImproperlyConfigured(
-                "namedtuple_type argument for NamedTupleField must be a NamedTuple class"
-            )
         super().__init__(
             form_class,
             required=required,
@@ -344,48 +347,143 @@ class NamedTupleField(MappingField):
             help_text=help_text,
             error_messages=error_messages,
             show_hidden_initial=show_hidden_initial,
-            # MappingField.__init__ declares validators for its own dict
-            # result. NamedTupleField.compress() replaces that dict with a
-            # namedtuple_type instance or None, so this field's own
-            # validators are typed for that result instead. Both feed the
-            # same super().__init__(validators=...) storage slot untouched.
-            validators=cast(
-                "Sequence[Callable[[dict[str, object]], None]]", validators
-            ),
+            output=output,
+            validators=cast(Sequence[Callable[[object], None]], validators),
             localize=localize,
             disabled=disabled,
             label_suffix=label_suffix,
             template_name=template_name,
             bound_field_class=bound_field_class,
         )
-        declared = frozenset(self.widget.fields)
-        expected = frozenset(namedtuple_type._fields)
-        if declared != expected:
-            raise ImproperlyConfigured(
-                "form_class fields must match namedtuple_type._fields exactly: "
-                f"form declares {sorted(declared)!r}, "
-                f"namedtuple_type expects {sorted(expected)!r}"
+
+    @property
+    def output(self) -> Callable[..., object]:
+        return super().output
+
+    @output.setter
+    def output(self, value: Callable[..., object] | None) -> None:
+        if value is None:
+            self._output = cast(
+                type[tuple[object, ...]],
+                namedtuple(
+                    f"{self.form_class.__name__}Value",
+                    self.inferred_names,
+                    defaults=(None,) * len(self.inferred_names),
+                ),
             )
-        self.namedtuple_type = namedtuple_type
+            return
+        if not (
+            isinstance(value, type)
+            and issubclass(value, tuple)
+            and hasattr(value, "_fields")
+        ):
+            raise ImproperlyConfigured(
+                "output argument for NamedTupleField must be a named tuple class"
+            )
+        if frozenset(self.widget.fields) != frozenset(
+            cast(tuple[str, ...], value._fields)
+        ):
+            raise ImproperlyConfigured(
+                "form_class fields must match output._fields exactly"
+            )
+        self._output = value
 
     def initial_value(self, value: object) -> dict[str, object]:
-        """Return the initial value as a dict, and accept a namedtuple_type instance too."""
         as_dict = getattr(value, "_asdict", None)
-        if callable(as_dict):
-            value = as_dict()
-        return super().initial_value(value)
+        return super().initial_value(as_dict() if callable(as_dict) else value)
 
     def compress(self, data: dict[str, object]) -> tuple[object, ...] | None:
-        """Return cleaned members as one namedtuple_type instance, or None when empty.
-
-        ``MappingField._clean_form`` and ``MappingField.clean`` only call this
-        with every declared field present, or with an empty dict when the
-        field got no value. The ``__init__`` field-name check above
-        guarantees every keyword matches one namedtuple_type field.
-        """
         if not data:
             return None
-        return self.namedtuple_type(**data)
+        return cast(
+            tuple[object, ...],
+            self.output(**(dict.fromkeys(self.inferred_names) | data)),
+        )
+
+
+class DataclassField(MappingField):
+    """Clean a child form into a dataclass."""
+
+    def __init__(
+        self,
+        form_class: type[BaseForm],
+        output: type[object] | None = None,
+        /,
+        *,
+        required: bool = True,
+        widget: MappingWidget | type[MappingWidget] | None = None,
+        label: str | Promise | None = None,
+        initial: object | Callable[[], object] | None = None,
+        help_text: str | Promise = "",
+        error_messages: Mapping[str, str | Promise] | None = None,
+        show_hidden_initial: bool = False,
+        validators: Sequence[Callable[[object | None], None]] = (),
+        localize: bool = False,
+        disabled: bool = False,
+        label_suffix: str | None = None,
+        template_name: str | None = None,
+        bound_field_class: type[MappingBoundField] | None = None,
+    ) -> None:
+        super().__init__(
+            form_class,
+            required=required,
+            widget=widget,
+            label=label,
+            initial=initial,
+            help_text=help_text,
+            error_messages=error_messages,
+            show_hidden_initial=show_hidden_initial,
+            output=output,
+            validators=validators,
+            localize=localize,
+            disabled=disabled,
+            label_suffix=label_suffix,
+            template_name=template_name,
+            bound_field_class=bound_field_class,
+        )
+
+    @property
+    def output(self) -> Callable[..., object]:
+        return super().output
+
+    @output.setter
+    def output(self, value: Callable[..., object] | None) -> None:
+        if value is None:
+            self._output = cast(
+                type[object],
+                dataclasses.make_dataclass(
+                    f"{self.form_class.__name__}Value",
+                    [
+                        (name, object, dataclasses.field(default=None))
+                        for name in self.inferred_names
+                    ],
+                ),
+            )
+            return
+        if not isinstance(value, type) or not dataclasses.is_dataclass(value):
+            raise ImproperlyConfigured(
+                "output argument for DataclassField must be a dataclass"
+            )
+        if frozenset(self.widget.fields) != frozenset(
+            field.name for field in dataclasses.fields(cast(Any, value))
+        ):
+            raise ImproperlyConfigured(
+                "form_class fields must match output fields exactly"
+            )
+        self._output = value
+
+    def initial_value(self, value: object) -> dict[str, object]:
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            value = {
+                field.name: getattr(value, field.name)
+                for field in dataclasses.fields(cast(Any, value))
+            }
+        return super().initial_value(value)
+
+    def compress(self, data: dict[str, object]) -> object | None:
+        if not data:
+            return None
+        return self.output(**(dict.fromkeys(self.inferred_names) | data))
 
 
 class SequenceField(CompositeField):

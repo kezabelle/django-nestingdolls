@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import MappingProxyType
 
 import django
 from django import forms
@@ -842,6 +843,17 @@ class MappingFieldUnitTestCase(FormBindingUnitTestCase):
         self.assertIs(cleaned, False)
         self.assertEqual(field.clean({"a": "2"}), {"a": 2})
         self.assertIs(cleaned, True)
+
+    def test_output_builds_another_mapping_type(self):
+        class ChildForm(forms.Form):
+            value = forms.IntegerField()
+
+        cleaned = nestingdolls.MappingField(ChildForm, output=MappingProxyType).clean(
+            {"value": "2"}
+        )
+
+        self.assertIsInstance(cleaned, MappingProxyType)
+        self.assertEqual(cleaned, {"value": 2})
 
     def test_dynamic_child_fields_use_instantiated_form_fields(self):
         """Rendering and cleaning use fields added by the child Form instance."""

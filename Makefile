@@ -4,7 +4,7 @@ RUFF := $(UV_RUN) ruff
 MYPY := $(UV_RUN) mypy
 NPM := npm --silent
 
-PYTHON_FILES := demo.py nestingdolls test_composite.py test_dictfield.py test_hostile.py test_listfield.py test_namedtuplefield.py test_patches.py mypy_settings.py
+PYTHON_FILES := demo.py nestingdolls test_composite.py test_dataclassfield.py test_dictfield.py test_hostile.py test_listfield.py test_namedtuplefield.py test_patches.py mypy_settings.py
 COMPILED_JS := nestingdolls/static/nestingdolls/sequence.js
 
 .PHONY: js jsdrift tscheck jstest format formatcheck ruff rufffix mypy test check fix
@@ -50,7 +50,7 @@ mypy: ## Run mypy with strict checks.
 	$(MYPY) demo.py nestingdolls
 
 test: ## Run the Django test files.
-	$(PYTHON) -W error::DeprecationWarning -W error::PendingDeprecationWarning -m unittest test_composite test_listfield test_dictfield test_hostile test_namedtuplefield test_patches
+	$(PYTHON) -W error::DeprecationWarning -W error::PendingDeprecationWarning -m unittest test_composite test_dataclassfield test_listfield test_dictfield test_hostile test_namedtuplefield test_patches
 
 check: ## Run every fast check. Writes nothing, so CI can gate on it.
 check: tscheck jsdrift jstest ruff formatcheck test mypy

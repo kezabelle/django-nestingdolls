@@ -37,13 +37,13 @@ class PointForm(forms.Form):
 
 
 class NamedTupleFieldConstructionTestCase(SimpleTestCase):
-    def test_rejects_a_plain_tuple_type(self):
-        """A namedtuple_type must expose ``_fields``, not just be a tuple subclass."""
+    def test_rejects_a_plain_tuple_output(self):
+        """An output must expose ``_fields``, not just be a tuple subclass."""
         with self.assertRaises(ImproperlyConfigured):
             nestingdolls.NamedTupleField(PointForm, tuple)
 
-    def test_rejects_mismatched_field_names(self):
-        """The child Form's field names must match namedtuple_type._fields exactly."""
+    def test_rejects_mismatched_output_names(self):
+        """The child Form's field names must match output._fields exactly."""
 
         class WrongForm(forms.Form):
             x = forms.IntegerField()
@@ -52,11 +52,26 @@ class NamedTupleFieldConstructionTestCase(SimpleTestCase):
         with self.assertRaises(ImproperlyConfigured):
             nestingdolls.NamedTupleField(WrongForm, Point)
 
+    def test_infers_type_from_base_fields_and_fills_removed_fields(self):
+        class Form(forms.Form):
+            x = forms.IntegerField()
+            y = forms.IntegerField()
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.fields.pop("y")
+
+        cleaned = nestingdolls.NamedTupleField(Form).clean({"x": "1"})
+
+        self.assertEqual(cleaned.x, 1)
+        self.assertIsNone(cleaned.y)
+
 
 class NamedTupleFieldCleaningTestCase(SimpleTestCase):
-    def test_clean_builds_the_namedtuple_type(self):
-        """Direct Python-value cleaning returns one namedtuple_type instance."""
+    def test_clean_builds_the_namedtuple_output(self):
+        """Direct Python-value cleaning returns one output instance."""
         field = nestingdolls.NamedTupleField(PointForm, Point)
+        self.assertIs(field.output, Point)
 
         cleaned = field.clean({"x": "1", "y": "2"})
 
