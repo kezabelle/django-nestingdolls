@@ -367,10 +367,6 @@ class SequenceField(CompositeField):
                 absolute_max = max_length + DEFAULT_MAX_NUM
             return cls(min_length, max_length, absolute_max)
 
-        def over_hard_cap(self, count: int) -> bool:
-            """Report whether a row count is above the limit on submitted rows."""
-            return count > self.absolute_max
-
         @property
         def submission_max(self) -> int:
             """Return the shared cap for all rows in one field's own submission.
@@ -397,15 +393,6 @@ class SequenceField(CompositeField):
             # Zero and None are not supported here. Both use Django's default row cap.
             keys = settings.DATA_UPLOAD_MAX_NUMBER_FIELDS or DEFAULT_MAX_NUM
             return max(self.absolute_max, keys)
-
-        def empty_count(self, required: bool) -> int:
-            """Return the number of empty rows for a field that has no value.
-
-            A required field shows one row, so that the user can give a value.
-            ``min_length`` can ask for more rows, and ``max_length`` limits the
-            count.
-            """
-            return min(max(self.min_length, int(required)), self.max_length)
 
     limits: Limits
 
@@ -453,10 +440,10 @@ class SequenceField(CompositeField):
             )
         self.limits = self.Limits.build(min_length, max_length, absolute_max)
         if required and max_length == 0:
-            # empty_count() renders zero rows and zero controls when
-            # max_length is 0. A required field can never be satisfied
-            # then. Limits does not know about `required`. So this check
-            # belongs here.
+            # A required field must always be able to show at least one row,
+            # so a user can give a value. With max_length=0 it never can.
+            # Limits does not know about `required`, so this check belongs
+            # here.
             raise ValueError("max_length=0 requires required=False")
         if (
             initial is not None
@@ -569,7 +556,7 @@ class SequenceField(CompositeField):
         initial_values: list[object],
     ) -> Collection[object]:
         """Clean each row, then validate the result, as ``MultiValueField`` does."""
-        if self.limits.over_hard_cap(len(values)):
+        if len(values) > self.limits.absolute_max:
             raise TooManyFormsValidationError(
                 self.error_messages["too_many_forms"], num=self.limits.max_length
             )
@@ -608,8 +595,7 @@ class SequenceField(CompositeField):
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
         input = bound_field.input
-        assert isinstance(input, self.widget.Input), "for mypy"
-        if input.direct_rows is not None:
+        if bound_field.html_name in input.data or bound_field.html_name in input.files:
             return self._clean_values(bound_field.data, bound_field.initial)
         if not bound_field.is_bound_formset:
             if isinstance(self.child_field, FileField) and bound_field.initial:
@@ -689,7 +675,7 @@ class SequenceField(CompositeField):
         # Show no rows for a submission that is too large. The clean step
         # records the too_many_forms error, and no row must reach a child
         # widget.
-        if self.limits.over_hard_cap(len(data)):
+        if len(data) > self.limits.absolute_max:
             return []
         initial = self.initial_values(initial)
         values = []
@@ -737,7 +723,7 @@ class SequenceField(CompositeField):
         """Compare submitted rows using child-field change semantics."""
         if self.disabled:
             return False
-        if isinstance(data, list) and self.limits.over_hard_cap(len(data)):
+        if isinstance(data, list) and len(data) > self.limits.absolute_max:
             return True
         # A value that no field can read counts as a change. A change that the
         # form misses would lose data, and an extra change costs one save.
@@ -825,14 +811,14 @@ class SetField(SequenceField):
         claimed: set[int] = dataclasses.field(default_factory=set)
         # Members come from a set. They are unique under __hash__/__eq__.
         # So one index per key is enough.
-        indexed: dict[object, int] = dataclasses.field(init=False, repr=False)
+        _indexed: dict[object, int] = dataclasses.field(init=False, repr=False)
 
         def __post_init__(self) -> None:
             # compress() refused an unhashable member already, so every member
             # can go into the index.
-            self.indexed = {member: index for index, member in enumerate(self.members)}
+            self._indexed = {member: index for index, member in enumerate(self.members)}
 
-        def candidate(self, value: object) -> int | None:
+        def _candidate(self, value: object) -> int | None:
             """Return the member index that hashes equal to one row, if there is one.
 
             The index only helps when the child's ``to_python()`` agrees with
@@ -845,13 +831,13 @@ class SetField(SequenceField):
             ``claim()`` then reads every member.
             """
             try:
-                return self.indexed.get(value)
+                return self._indexed.get(value)
             except TypeError:
                 # A compound child value can be unhashable. Give no candidate,
                 # and let claim() do the full scan.
                 return None
 
-        def claim(self, row: object, candidate: int | None) -> bool:
+        def claim(self, row: object, value: object) -> bool:
             """Claim one member for a row, and report whether it found one.
 
             Look at an unclaimed member first, so two equal rows never
@@ -863,20 +849,21 @@ class SetField(SequenceField):
             Raise ``TooManyComparisonsError`` when the comparison has looked
             at ``members_left`` members already.
             """
-            for index in self.members_to_check(candidate):
+            candidate = self._candidate(value)
+            for index in self._members_to_check(candidate):
                 if index in self.claimed:
                     continue
-                if self.member_matches(index, row):
+                if self._member_matches(index, row):
                     self.claimed.add(index)
                     return True
-            for index in self.members_to_check(candidate):
+            for index in self._members_to_check(candidate):
                 if index not in self.claimed:
                     continue
-                if self.member_matches(index, row):
+                if self._member_matches(index, row):
                     return True
             return False
 
-        def members_to_check(self, candidate: int | None) -> Iterator[int]:
+        def _members_to_check(self, candidate: int | None) -> Iterator[int]:
             """Yield each member index to check, and count each one.
 
             The hash candidate comes first, because it is usually the only
@@ -901,7 +888,7 @@ class SetField(SequenceField):
                 self.members_left -= 1
                 yield index
 
-        def member_matches(self, index: int, row: object) -> bool:
+        def _member_matches(self, index: int, row: object) -> bool:
             """Report whether one member equals a row."""
             return not self.child_field.has_changed(self.members[index], row)
 
@@ -920,7 +907,7 @@ class SetField(SequenceField):
         """
         if self.disabled:
             return False
-        if isinstance(data, list) and self.limits.over_hard_cap(len(data)):
+        if isinstance(data, list) and len(data) > self.limits.absolute_max:
             return True
         try:
             members = list(self.compress(self.initial_values(initial)))
@@ -945,7 +932,7 @@ class SetField(SequenceField):
                     value = self.child_field.to_python(row)
                 except (TypeError, ValidationError):
                     return True
-                if not match.claim(row, match.candidate(value)) and (
+                if not match.claim(row, value) and (
                     self.child_field.has_changed(None, row)
                 ):
                     return True

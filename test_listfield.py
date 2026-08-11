@@ -1126,9 +1126,12 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["values"][0].code, "unhashable")
 
-    def test_absolute_max_needs_no_key_addressability_limit(self):
-        """Formsets name rows directly, without a package digit cap."""
-        nestingdolls.ListField(forms.CharField(), absolute_max=10_000_000)
+    def test_absolute_max_requires_an_addressable_row_index(self):
+        """The key parser rejects a hard cap that its row keys cannot name."""
+        with self.assertRaisesMessage(
+            ValueError, "absolute_max must be less than 10000000"
+        ):
+            nestingdolls.ListField(forms.CharField(), absolute_max=10_000_000)
 
     def test_client_counts_composite_list_rows_not_their_child_keys(self):
         """Client accepts four mapping rows that each submit three child controls."""
@@ -1354,7 +1357,7 @@ class SetFieldTestCase(SimpleTestCase):
         tracemalloc.start()
         try:
             for row in rows:
-                self.assertIs(match.claim(row, match.candidate(row)), True)
+                self.assertIs(match.claim(row, row), True)
             peak = tracemalloc.get_traced_memory()[1]
         finally:
             tracemalloc.stop()

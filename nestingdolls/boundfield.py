@@ -85,7 +85,7 @@ class CompositeBoundField(BoundField):
 
     def _prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
         """Put the submitted state this render needs on the widget."""
-        widget.bound = widget.Bound(
+        widget.render_state = widget.RenderState(
             hidden_initial_value=self._hidden_initial_value(widget)
             if only_initial
             else None
@@ -255,7 +255,7 @@ class MappingBoundField(CompositeBoundField):
         # A hidden initial render must not use the bound child Form, because
         # that Form holds the prefix and the data of the visible render.
         value = self._hidden_initial_value(widget) if only_initial else None
-        widget.bound = widget.Bound(
+        widget.render_state = widget.RenderState(
             hidden_initial_value=value,
             subform=None if only_initial else self.subform,
             initial_error=(
@@ -285,11 +285,11 @@ class SequenceBoundField(CompositeBoundField):
     def is_bound_formset(self) -> bool:
         """Report whether the narrowed browser submission binds a formset."""
         input = self.input
-        assert isinstance(input, self.field.widget.Input)
         return (
             self.form.is_bound
             and not self.field.disabled
-            and input.direct_rows is None
+            and self.html_name not in input.data
+            and self.html_name not in input.files
             and bool(input.data or input.files)
         )
 
@@ -297,8 +297,10 @@ class SequenceBoundField(CompositeBoundField):
     def formset(self) -> BaseFormSet[Any]:
         """Return the cached, prefix-aware row formset for cleaning and rendering."""
         input = self.input
-        assert isinstance(input, self.field.widget.Input)
-        initial_values = self.data if input.direct_rows is not None else self.initial
+        has_unflattened_value = (
+            self.html_name in input.data or self.html_name in input.files
+        )
+        initial_values = self.data if has_unflattened_value else self.initial
         initial = self.field.widget._initial_formset_rows(initial_values)
         if (
             not initial
@@ -321,10 +323,12 @@ class SequenceBoundField(CompositeBoundField):
 
     @cached_property
     def data(self) -> list[object]:
-        """Return direct rows or the row values needed for change detection."""
+        """Return a whole sequence value or formset row values."""
         input = self.input
-        assert isinstance(input, self.field.widget.Input)
-        if input.direct_rows is not None:
+        has_unflattened_value = (
+            self.html_name in input.data or self.html_name in input.files
+        )
+        if has_unflattened_value:
             return self.field.widget.value_from_input(input, self.html_name)
         if not self.is_bound_formset:
             return []
@@ -338,13 +342,13 @@ class SequenceBoundField(CompositeBoundField):
         if not isinstance(widget, SequenceWidget):
             return super()._prepare_widget(widget, only_initial)
         if only_initial:
-            widget.bound = widget.Bound(
+            widget.render_state = widget.RenderState(
                 hidden_initial_value=self._hidden_initial_value(widget)
             )
         elif self.field.disabled:
-            widget.bound = widget.Bound()
+            widget.render_state = widget.RenderState()
         else:
-            widget.bound = widget.Bound(
+            widget.render_state = widget.RenderState(
                 formset=self.formset, submission_overflow=self.submission_overflow
             )
 
@@ -380,12 +384,14 @@ class SequenceBoundField(CompositeBoundField):
         return value
 
     def _has_changed(self) -> bool:
-        """Report direct edits and deletions through the row formset."""
+        """Report whole-value edits and row-formset deletions."""
         input = self.input
-        assert isinstance(input, self.field.widget.Input)
+        has_unflattened_value = (
+            self.html_name in input.data or self.html_name in input.files
+        )
         changed = (
-            self.field.has_changed(self.initial, input.direct_rows)
-            if input.direct_rows is not None
+            self.field.has_changed(self.initial, self.data)
+            if has_unflattened_value
             else super()._has_changed()
         )
         if changed or self.field.disabled:

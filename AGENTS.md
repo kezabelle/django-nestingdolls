@@ -57,9 +57,9 @@ keys can ask for about 996000 rows across two levels. It stays below every
 Django request limit. The nested multiplication is the only limit that belongs
 to this package.
 
-`SequenceWidget.SubmissionCountdown` is the one limit that belongs to this package. It protects attacker-controlled multiplication from recursive sequence nesting, not every collection configured by an application.
+`SequenceWidget.submission_countdown` is the one limit that belongs to this package. It protects attacker-controlled multiplication from recursive sequence nesting, not every collection configured by an application.
 
-- Enter `with SubmissionCountdown(limits.submission_max)` only in sequence
+- Enter `with submission_countdown(limits.submission_max)` only in sequence
   parsing, extraction, or rendering. It starts one context-local counter at
   the outer sequence; nested sequences reuse it. Do not open it in a
   mapping, `clean()`, a shared composite base class, or a field-tree walk.

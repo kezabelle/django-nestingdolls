@@ -544,6 +544,21 @@ class HostileSequenceCrashTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["value"], [["kept"]])
 
+    def test_client_discards_row_indexes_that_cannot_name_a_form(self):
+        """Oversized and overlong indexes do not reach the formset."""
+        response = self.client.post(
+            "/hostile-integer-list/",
+            {
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                "values-0": "5",
+                "values-9999999": "ignored",
+                "values-12345678": "ignored",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["value"], [5])
+
     def test_client_survives_a_body_that_is_not_form_data(self):
         """A JSON body carries no form controls and gives an empty submission."""
         response = self.client.post(
@@ -965,7 +980,7 @@ class HostileRenderCostTestCase(HostileClientTestCase):
 class HostileCleanCostTestCase(HostileClientTestCase):
     """Measure the cost to reject hostile nested submissions.
 
-    ``SubmissionCountdown`` stops nested totals from multiplying rows. Other
+    ``submission_countdown`` stops nested totals from multiplying rows. Other
     tests check the rejection result. These tests check the server work required
     to reject it.
     """

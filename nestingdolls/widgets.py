@@ -8,7 +8,14 @@ from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 from django.core.files.uploadedfile import UploadedFile
 from django.forms import BaseForm, BaseFormSet, Field, Form
-from django.forms.formsets import DELETION_FIELD_NAME, TOTAL_FORM_COUNT, formset_factory
+from django.forms.formsets import (
+    DELETION_FIELD_NAME,
+    INITIAL_FORM_COUNT,
+    MAX_NUM_FORM_COUNT,
+    MIN_NUM_FORM_COUNT,
+    TOTAL_FORM_COUNT,
+    formset_factory,
+)
 from django.forms.widgets import Media as WidgetMedia
 from django.forms.widgets import MultiWidget, Widget
 from django.utils.datastructures import MultiValueDict
@@ -22,23 +29,23 @@ if TYPE_CHECKING:
 
 class CompositeWidget(Widget):
     class Keys:
-        """Hold static parsing configuration for one composite widget."""
+        """Namespace the key operations shared by composite widgets."""
 
         __slots__ = ()
 
         @staticmethod
-        def _split(key: object, name: str) -> tuple[str, str] | None:
-            """Split Django's dash-prefixed child grammar."""
+        def child_key(key: object, name: str) -> str | None:
+            """Return the dash-prefixed child part of a composite key."""
             if not isinstance(key, str):
                 return None
             prefix = f"{name}-"
             if not key.startswith(prefix):
                 return None
-            remainder = key.removeprefix(prefix)
-            return (remainder, "") if remainder else None
+            child_key = key.removeprefix(prefix)
+            return child_key or None
 
         @staticmethod
-        def _values(data: Mapping[str, object], key: str) -> list[object]:
+        def values_for(data: Mapping[str, object], key: str) -> list[object]:
             """Read repeated values through Django's mapping protocol."""
             if key not in data:
                 return []
@@ -47,15 +54,15 @@ class CompositeWidget(Widget):
             except AttributeError:
                 return [data.get(key)]
 
-        @staticmethod
-        def _copy_key(
+        def copy_values(
+            self,
             result: MultiValueDict[str, object],
             data: Mapping[str, object],
             source: str,
             target: str,
         ) -> None:
-            """Copy one key without depending on its concrete mapping type."""
-            result.setlist(target, CompositeWidget.Keys._values(data, source))
+            """Copy input values from one key to another."""
+            result.setlist(target, self.values_for(data, source))
 
     @dataclasses.dataclass(frozen=True, slots=True)
     class Input:
@@ -65,15 +72,14 @@ class CompositeWidget(Widget):
         files: MultiValueDict[str, object]
 
     @dataclasses.dataclass(frozen=True, slots=True)
-    class Bound:
+    class RenderState:
         """Hold the submitted state that one render of a composite widget needs."""
 
         hidden_initial_value: object = None
 
     _template_name: str
     input_type: str | None = None
-    keys: Keys
-    bound: Bound = Bound()
+    render_state: RenderState = RenderState()
 
     def read_input(
         self,
@@ -156,8 +162,8 @@ class MappingWidget(CompositeWidget):
     form_class: type[BaseForm]
 
     @dataclasses.dataclass(frozen=True, slots=True)
-    class Bound(CompositeWidget.Bound):
-        """Hold the child Form that one render of a mapping widget needs.
+    class RenderState(CompositeWidget.RenderState):
+        """Hold the child Form that one mapping render needs.
 
         The bound field builds the child Form, because only the bound field
         holds the data that the browser sent and the errors of that Form. A
@@ -168,18 +174,15 @@ class MappingWidget(CompositeWidget):
         subform: BaseForm | None = None
         initial_error: str | None = None
 
-    bound: Bound = Bound()
+    render_state: RenderState = RenderState()
 
     @dataclasses.dataclass(frozen=True)
     class Keys(CompositeWidget.Keys):
-        """Read the input keys of one mapping field as child keys.
+        """Normalize the declared child keys of one mapping field.
 
-        Every child of a mapping has a declared name. This object changes each
-        accepted key format into one canonical child key. It drops a key that
-        no child declares. It holds the child Form class, and it reads the
-        child names from an instance of that class, so the names contain the
-        fields that ``__init__`` adds. This dataclass has no ``slots``, because
-        ``cached_property`` needs the instance dictionary.
+        It holds the child Form class and gets its names from an instance, so
+        the names include fields that ``__init__`` adds. This dataclass has no
+        ``slots``, because ``cached_property`` needs the instance dictionary.
         """
 
         form_class: type[BaseForm]
@@ -190,11 +193,11 @@ class MappingWidget(CompositeWidget):
             return tuple(self.form_class().fields)
 
         def canonical(self, key: object, name: str) -> str | None:
-            """Return the canonical declared-child key, or ``None``."""
-            if (child_key := self._split(key, name)) is None:
+            """Return a canonical declared-child key, or ``None``."""
+            child_key = self.child_key(key, name)
+            if child_key is None:
                 return None
-            token, suffix = child_key
-            key = f"{name}-{token}{suffix}"
+            key = f"{name}-{child_key}"
             return (
                 key
                 if any(
@@ -238,7 +241,7 @@ class MappingWidget(CompositeWidget):
                 assert isinstance(value, Mapping)
                 for child_name in self.keys.names:
                     if child_name in value:
-                        self.keys._copy_key(
+                        self.keys.copy_values(
                             result, value, child_name, f"{name}-{child_name}"
                         )
                 return result
@@ -246,12 +249,12 @@ class MappingWidget(CompositeWidget):
                 if (target := self.keys.canonical(source_key, name)) is None:
                     continue
                 previous = result.getlist(target)
-                self.keys._copy_key(result, source, source_key, target)
+                self.keys.copy_values(result, source, source_key, target)
                 if previous:
                     previous.extend(result.getlist(target))
                     result.setlist(target, previous)
             if not result and name in source:
-                self.keys._copy_key(result, source, name, name)
+                self.keys.copy_values(result, source, name, name)
             return result
 
         return self.Input(canonicalize(data), canonicalize(files))
@@ -301,13 +304,13 @@ class MappingWidget(CompositeWidget):
         bounds each formset level, not aggregate nested rows.
         """
         context = super().get_context(name, value, attrs)
-        subform = self.bound.subform
+        subform = self.render_state.subform
         if subform is None:
             # A hidden initial render must show the initial value, because
             # change detection compares it with the value that the browser
             # sent.
-            if self.bound.hidden_initial_value is not None:
-                value = self.bound.hidden_initial_value
+            if self.render_state.hidden_initial_value is not None:
+                value = self.render_state.hidden_initial_value
             subform = self.form_class(
                 initial=dict(value) if isinstance(value, Mapping) else {},
                 prefix=name,
@@ -323,7 +326,11 @@ class MappingWidget(CompositeWidget):
                     else subform.hidden_fields()
                 ),
                 "non_field_errors": (
-                    ([self.bound.initial_error] if self.bound.initial_error else [])
+                    (
+                        [self.render_state.initial_error]
+                        if self.render_state.initial_error
+                        else []
+                    )
                     + list(subform.non_field_errors())
                 ),
             }
@@ -421,6 +428,45 @@ class SequenceWidget(CompositeWidget):
             self._submission_total_form_count = allowed
             return allowed
 
+    @dataclasses.dataclass(frozen=True, slots=True)
+    class Keys(CompositeWidget.Keys):
+        """Accept only row keys a configured sequence can build.
+
+        A nested sequence receives untrusted row indexes. This parser rejects
+        indexes outside the formset hard cap and digit runs too long to name a
+        permitted row before the widget copies them into its narrowed input.
+        """
+
+        absolute_max: int
+
+        max_index_digits: ClassVar[int] = 7
+
+        def __post_init__(self) -> None:
+            if self.absolute_max >= 10**self.max_index_digits:
+                raise ValueError("absolute_max must be less than 10000000")
+
+        def canonical(self, key: object, name: str) -> str | None:
+            """Return an accepted management or row key unchanged."""
+            child_key = self.child_key(key, name)
+            if child_key is None:
+                return None
+            key = f"{name}-{child_key}"
+            if child_key in (
+                TOTAL_FORM_COUNT,
+                INITIAL_FORM_COUNT,
+                MIN_NUM_FORM_COUNT,
+                MAX_NUM_FORM_COUNT,
+            ):
+                return key
+            end = 0
+            while end < len(child_key) and "0" <= child_key[end] <= "9":
+                end += 1
+                if end > self.max_index_digits:
+                    return None
+            if end == 0 or (end < len(child_key) and child_key[end] not in "-_"):
+                return None
+            return key if int(child_key[:end]) < self.absolute_max else None
+
     @dataclasses.dataclass(slots=True)
     class submission_countdown:
         """Limit rows built by one recursively nested sequence extraction or render.
@@ -475,29 +521,24 @@ class SequenceWidget(CompositeWidget):
                 self._current.reset(self._token)
 
     @dataclasses.dataclass(frozen=True, slots=True)
-    class Bound(CompositeWidget.Bound):
+    class RenderState(CompositeWidget.RenderState):
         """Hold the formset that supplies one sequence render."""
 
         formset: BaseFormSet[Any] | None = None
         submission_overflow: bool = False
 
-    bound: Bound = Bound()
+    render_state: RenderState = RenderState()
 
     class Media:
         """Load the script that adds and removes rows in the browser."""
 
         js = ("nestingdolls/sequence.js",)
 
-    @dataclasses.dataclass(frozen=True, slots=True)
-    class Input(CompositeWidget.Input):
-        """Hold narrowed sequence input and an optional direct Python value."""
-
-        direct_rows: list[object] | None
-
     def configure(self, child_field: Field, limits: SequenceField.Limits) -> None:
         """Store the configuration of this field's private widget copy."""
         self.child_field = child_field
         self.limits = limits
+        self.keys = self.Keys(limits.absolute_max)
         self.__dict__.pop("formset_class", None)
 
     @cached_property
@@ -545,68 +586,47 @@ class SequenceWidget(CompositeWidget):
         data: Mapping[str, object],
         files: Mapping[str, object],
         name: str,
-    ) -> Input:
+    ) -> CompositeWidget.Input:
         """Narrow both request channels to this sequence exactly once."""
         input_data = MultiValueDict[str, object]()
         input_files = MultiValueDict[str, object]()
         prefix = f"{name}-"
+        has_flattened_rows = False
+        has_formset_data = False
 
         for source, target in ((data, input_data), (files, input_files)):
             for key in source:
-                if key == name or (isinstance(key, str) and key.startswith(prefix)):
-                    self.Keys._copy_key(target, source, key, key)
+                if key == name:
+                    self.keys.copy_values(target, source, key, key)
+                    continue
+                canonical = self.keys.canonical(key, name)
+                if canonical is not None:
+                    self.keys.copy_values(target, source, key, canonical)
+                    has_formset_data = True
+                if (
+                    isinstance(key, str)
+                    and len(key) > len(prefix)
+                    and key.startswith(prefix)
+                    and "0" <= key[len(prefix)] <= "9"
+                ):
+                    has_flattened_rows = True
+                    has_formset_data = True
 
-        def direct_rows(source: Mapping[str, object]) -> list[object] | None:
-            values = self.Keys._values(source, name)
-            if not values:
-                return None
-            return (
-                values[0]
-                if len(values) == 1 and isinstance(values[0], list)
-                else values
-            )
-
-        data_direct = direct_rows(data)
-        file_direct = direct_rows(files)
-        has_row_values = any(
-            isinstance(key, str)
-            and key.startswith(prefix)
-            and key.removeprefix(prefix)
-            and "0" <= key.removeprefix(prefix)[0] <= "9"
-            for source in (data, files)
-            for key in source
-        )
-        if data_direct is not None and not has_row_values:
-            return self.Input(input_data, input_files, data_direct)
-        if file_direct is not None and not has_row_values:
-            return self.Input(input_data, input_files, file_direct)
-        management_names = {
-            "TOTAL_FORMS",
-            "INITIAL_FORMS",
-            "MIN_NUM_FORMS",
-            "MAX_NUM_FORMS",
-        }
-        has_formset_data = any(
-            isinstance(key, str)
-            and key.startswith(prefix)
-            and (
-                key.removeprefix(prefix) in management_names
-                or (
-                    key.removeprefix(prefix)
-                    and "0" <= key.removeprefix(prefix)[0] <= "9"
-                )
-            )
-            for source in (data, files)
-            for key in source
-        )
+        if has_flattened_rows:
+            input_data.pop(name, None)
+            input_files.pop(name, None)
         if not has_formset_data:
-            return self.Input(MultiValueDict(), MultiValueDict(), None)
+            if self.keys.values_for(input_data, name) or self.keys.values_for(
+                input_files, name
+            ):
+                return self.Input(input_data, input_files)
+            return self.Input(MultiValueDict(), MultiValueDict())
         for field_name, value in (
-            ("MIN_NUM_FORMS", self.limits.min_length),
-            ("MAX_NUM_FORMS", self.limits.max_length),
+            (MIN_NUM_FORM_COUNT, self.limits.min_length),
+            (MAX_NUM_FORM_COUNT, self.limits.max_length),
         ):
-            input_data.setlist(f"{name}-{field_name}", [str(value)])
-        return self.Input(input_data, input_files, None)
+            input_data[f"{name}-{field_name}"] = str(value)
+        return self.Input(input_data, input_files)
 
     def value_from_datadict(
         self,
@@ -614,15 +634,23 @@ class SequenceWidget(CompositeWidget):
         files: Mapping[str, object],
         name: str,
     ) -> object:
-        """Read once and extract a standalone direct sequence submission."""
+        """Read a whole sequence value or flattened browser rows once."""
         return self.value_from_input(self.read_input(data, files, name), name)
 
     def value_from_input(self, input: CompositeWidget.Input, name: str) -> list[object]:
-        """Extract direct rows or flattened initial rows from the row formset."""
-        assert isinstance(input, self.Input), "SequenceWidget requires its own Input"
-        if input.direct_rows is not None:
+        """Extract a whole sequence value or flattened formset rows."""
+        unflattened_values = self.keys.values_for(input.data, name)
+        if not unflattened_values:
+            unflattened_values = self.keys.values_for(input.files, name)
+        if unflattened_values:
+            values = (
+                unflattened_values[0]
+                if len(unflattened_values) == 1
+                and isinstance(unflattened_values[0], list)
+                else unflattened_values
+            )
             with self.submission_countdown(self.limits.submission_max) as countdown:
-                return input.direct_rows[: countdown.take(len(input.direct_rows))]
+                return values[: countdown.take(len(values))]
         if not input.data and not input.files:
             return []
         formset = self._new_formset(
@@ -653,16 +681,16 @@ class SequenceWidget(CompositeWidget):
         final_attrs.pop("aria-invalid", None)
         id_ = final_attrs.get("id")
         disabled = bool(final_attrs.get("disabled"))
-        if self.is_hidden and self.bound.hidden_initial_value is not None:
-            value = cast(Sequence[object], self.bound.hidden_initial_value)
-        formset = self.bound.formset
+        if self.is_hidden and self.render_state.hidden_initial_value is not None:
+            value = cast(Sequence[object], self.render_state.hidden_initial_value)
+        formset = self.render_state.formset
         if formset is None:
             initial = self._initial_formset_rows(value)
             if not initial and self.is_required and self.limits.min_length == 0:
                 initial = [self._empty_formset_row()]
             formset = self._new_formset(initial=initial, prefix=name)
 
-        if self.bound.submission_overflow:
+        if self.render_state.submission_overflow:
             formset = self._new_formset(initial=[], prefix=name)
 
         management_form = formset.management_form
@@ -738,7 +766,7 @@ class SequenceWidget(CompositeWidget):
         finally:
             child_widget = self._child_widget(self.child_field)
             if isinstance(child_widget, CompositeWidget):
-                child_widget.bound = child_widget.Bound()
+                child_widget.render_state = child_widget.RenderState()
 
         context["widget"].update(
             {
@@ -748,10 +776,10 @@ class SequenceWidget(CompositeWidget):
                 "minimum_forms": self.limits.min_length,
                 "maximum_forms": self.limits.max_length,
                 "absolute_maximum_forms": self.limits.absolute_max,
-                "disabled": disabled or self.bound.submission_overflow,
+                "disabled": disabled or self.render_state.submission_overflow,
             }
         )
-        if deleted_forms and not self.bound.submission_overflow:
+        if deleted_forms and not self.render_state.submission_overflow:
             context["widget"]["deleted_rows"] = [
                 {"delete_name": f"{form.prefix}-{DELETION_FIELD_NAME}"}
                 for form in forms
