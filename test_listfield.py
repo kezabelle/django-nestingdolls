@@ -1044,8 +1044,8 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
                 self.assertEqual(error.child_message, "50% off is required")
                 self.assertEqual(error.params["message"], "50% off is required")
                 self.assertEqual(
-                    dict(form["values"].submission.errors),
-                    {0: ["50% off is required"]},
+                    dict(form["values"].formset.forms[0].errors),
+                    {"value": ["50% off is required"]},
                 )
                 html = form.as_p()
                 self.assertIn("50% off is required", html)
@@ -1128,10 +1128,9 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["values"][0].code, "unhashable")
 
-    def test_absolute_max_must_stay_addressable_by_a_row_index(self):
-        """``max_index_digits`` is an invariant, so a limit past it is refused."""
-        with self.assertRaises(ValueError):
-            nestingdolls.ListField(forms.CharField(), absolute_max=10_000_000)
+    def test_absolute_max_needs_no_key_addressability_limit(self):
+        """Formsets name rows directly, without a package digit cap."""
+        nestingdolls.ListField(forms.CharField(), absolute_max=10_000_000)
 
     def test_client_counts_composite_list_rows_not_their_child_keys(self):
         """Client accepts four mapping rows that each submit three child controls."""

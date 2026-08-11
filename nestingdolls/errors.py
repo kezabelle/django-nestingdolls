@@ -28,7 +28,6 @@ class ItemValidationError(ValidationError):
     """A child item failed validation inside a composite field."""
 
     item: int | str
-    item_path: tuple[int | str, ...]
     child_code: str | None
     child_message: str
 
@@ -38,12 +37,10 @@ class ItemValidationError(ValidationError):
         *,
         item: int | str,
         child_code: str | None,
-        child_path: tuple[int | str, ...] = (),
     ) -> None:
         # ``message`` is a rendered child message. It is never a lazy string.
         # ``ValidationError.messages`` always translates the message first.
         self.item = item
-        self.item_path = (item, *child_path)
         self.child_code = child_code
         self.child_message = message
         super().__init__(
@@ -63,16 +60,12 @@ class ItemValidationError(ValidationError):
         Django flattens a composite error to its leaf messages. This method
         makes one item error for each leaf message.
 
-        A leaf can be an ``ItemValidationError`` from a deeper nested field.
-        This method keeps that leaf's own item path under the current item.
-        A widget many levels down can then still find its own error.
         """
         return [
             cls(
                 message,
                 item=item,
                 child_code=(leaf.params or {}).get("child_code", leaf.code),
-                child_path=leaf.item_path if isinstance(leaf, cls) else (),
             )
             for leaf in error.error_list
             for message in leaf.messages

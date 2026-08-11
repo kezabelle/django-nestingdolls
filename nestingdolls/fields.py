@@ -4,15 +4,19 @@ import copy
 import dataclasses
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from itertools import chain, islice
-from types import MappingProxyType
-from typing import Self, cast
+from typing import ClassVar, Self, cast
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.forms import BaseForm, BaseFormSet, Field
+from django.forms import BaseForm, BaseFormSet, Field, Form
 from django.forms.boundfield import BoundField
 from django.forms.fields import FileField
-from django.forms.formsets import DEFAULT_MAX_NUM, DEFAULT_MIN_NUM, TOTAL_FORM_COUNT
+from django.forms.formsets import (
+    DEFAULT_MAX_NUM,
+    DEFAULT_MIN_NUM,
+    DELETION_FIELD_NAME,
+    formset_factory,
+)
 from django.utils.functional import Promise
 from django.utils.translation import gettext_lazy as _
 from django.utils.translation import ngettext_lazy
@@ -26,7 +30,6 @@ from nestingdolls.errors import (
     InvalidInitialValueError,
     ItemValidationError,
     MappingInputValidationError,
-    MissingManagementFormValidationError,
     SequenceInputValidationError,
     TooManyComparisonsError,
     TooManyFormsValidationError,
@@ -331,6 +334,64 @@ class SequenceField(CompositeField):
             "limit_value",
         ),
     }
+
+    class RowForm(Form):
+        """Wrap one bare child field without changing its visible key."""
+
+        def add_prefix(self, field_name: str) -> str:
+            if field_name == "value" and self.prefix:
+                return self.prefix
+            return super().add_prefix(field_name)
+
+    class RowFormSet(BaseFormSet):  # type: ignore[type-arg]
+        """Limit this formset's rows across recursively nested sequences."""
+
+        submission_max: ClassVar[int]
+        invalid_mapping_rows: frozenset[int]
+        _submission_total_form_count: int
+
+        def _construct_form(self, index: int, **kwargs: object) -> BaseForm:
+            form = cast(BaseForm, super()._construct_form(index, **kwargs))  # type: ignore[misc]
+            fields = [
+                field
+                for name, field in form.fields.items()
+                if name != DELETION_FIELD_NAME
+            ]
+            if form.empty_permitted and (
+                any(
+                    not field.widget.value_omitted_from_data(
+                        self.data, self.files, form[name].html_name
+                    )
+                    for name, field in form.fields.items()
+                    if name != DELETION_FIELD_NAME
+                )
+                or (
+                    len(fields) == 1
+                    and not fields[0].required
+                    and not isinstance(fields[0], FileField)
+                )
+            ):
+                # Django's formset only calls full_clean() when has_changed() is
+                # true. Composite widgets can submit a nested management form
+                # while still reporting no scalar change, so the row formset
+                # must mark the row non-empty before Django skips validation.
+                form.empty_permitted = False
+            return form
+
+        def total_form_count(self) -> int:
+            # Django consults this method both while constructing forms and while
+            # validating the formset. Reserve once, as required by SIMPLIFY.md's
+            # shared-countdown contract, rather than charging that same level twice.
+            if hasattr(self, "_submission_total_form_count"):
+                return self._submission_total_form_count
+            total = super().total_form_count()
+            with SequenceWidget.SubmissionCountdown(self.submission_max) as countdown:
+                allowed = countdown.take(total)
+            self._submission_total_form_count = allowed
+            return allowed
+
+    row_formset_class: type[RowFormSet]
+
     bound_field_class: type[SequenceBoundField] = SequenceBoundField
     widget: SequenceWidget
 
@@ -494,6 +555,7 @@ class SequenceField(CompositeField):
         # because a field holds its widget and its own configuration.
         self.child_field = copy.deepcopy(child_field)
         self.child_field.localize = localize
+        self.row_formset_class = self._row_formset_class()
 
         bound_field_class = bound_field_class or self.bound_field_class
         if not issubclass(bound_field_class, SequenceBoundField):
@@ -519,7 +581,31 @@ class SequenceField(CompositeField):
             raise TypeError("widget must be a SequenceWidget instance or subclass")
         # Configure the copy that Django made, not the widget that the caller
         # gave.
-        self.widget.configure(self.child_field, self.limits)
+        self.widget.configure(self.child_field, self.limits, self.row_formset_class)
+
+    def _row_formset_class(self) -> type[RowFormSet]:
+        """Build this field's concrete row formset and bind its row limits."""
+        row_form = (
+            self.child_field.form_class
+            if isinstance(self.child_field, MappingField)
+            else type("Row", (self.RowForm,), {"value": self.child_field})
+        )
+        formset = cast(
+            "type[SequenceField.RowFormSet]",
+            formset_factory(
+                row_form,
+                formset=SequenceField.RowFormSet,
+                extra=0,
+                can_delete=True,
+                min_num=self.limits.min_length,
+                max_num=self.limits.max_length,
+                absolute_max=self.limits.absolute_max,
+                validate_min=False,
+                validate_max=False,
+            ),
+        )
+        formset.submission_max = self.limits.submission_max
+        return formset
 
     def __deepcopy__(self, memo: dict[int, object]) -> Self:
         """Copy this field, its child field, and the link between them.
@@ -537,6 +623,7 @@ class SequenceField(CompositeField):
         """
         result = super().__deepcopy__(memo)
         result.child_field = copy.deepcopy(self.child_field, memo)
+        result.row_formset_class = result._row_formset_class()
         result.widget.child_field = result.child_field
         return result
 
@@ -583,9 +670,6 @@ class SequenceField(CompositeField):
         self,
         values: list[object],
         initial_values: list[object],
-        deleted_indexes: frozenset[int] = frozenset(),
-        omitted_indexes: frozenset[int] = frozenset(),
-        nested_deleted: Mapping[int, frozenset[int]] = MappingProxyType({}),
     ) -> Collection[object]:
         """Clean each row, then validate the result, as ``MultiValueField`` does."""
         if self.limits.over_hard_cap(len(values)):
@@ -595,18 +679,6 @@ class SequenceField(CompositeField):
         cleaned_data: list[object] = []
         errors = []
         for index, value in enumerate(values):
-            if index in deleted_indexes or index in omitted_indexes:
-                continue
-            if index in nested_deleted and isinstance(value, list):
-                # A nested sequence has no bound field of its own. It has
-                # no way to remove its own deleted rows before cleaning.
-                # Remove them here, just before the nested field cleans.
-                dropped = nested_deleted[index]
-                value = [
-                    row
-                    for row_index, row in enumerate(value)
-                    if row_index not in dropped
-                ]
             initial = initial_values[index] if index < len(initial_values) else None
             try:
                 if self.child_field.disabled:
@@ -631,64 +703,69 @@ class SequenceField(CompositeField):
         return self._clean_values(self.to_python(value), [])
 
     def _clean_bound_field(self, bound_field: BoundField) -> Collection[object]:
-        """Clean rows already extracted by the sequence-owned countdown."""
+        """Clean browser submissions through Django's real row formset."""
         assert isinstance(bound_field, SequenceBoundField), "for mypy"
         if self.disabled:
             return cast(
                 Collection[object],
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
-        rows = bound_field.data
-        submission = bound_field.submission
-        if submission.over_submission_max:
-            raise TooManyFormsValidationError(
-                self.error_messages["submission_too_many_forms"],
-                num=self.limits.submission_max,
-            )
-        management_form = submission.management_form
-        if (
-            management_form is None
-            and not submission.deleted
-            and not submission.omitted
-            and not submission.nested_deleted
-            and not isinstance(self.child_field, FileField)
-        ):
+        input = cast(SequenceWidget.Input, bound_field.input)
+        if input.direct_rows is not None:
+            return self._clean_values(bound_field.data, bound_field.initial)
+        if not bound_field.is_bound_formset:
+            if isinstance(self.child_field, FileField) and bound_field.initial:
+                return self._clean_values(
+                    [None] * len(bound_field.initial), bound_field.initial
+                )
             return cast(
                 Collection[object],
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
-        if management_form is not None:
-            if not management_form.is_valid():
-                raise MissingManagementFormValidationError(
-                    self.error_messages["missing_management_form"],
-                    field_names=", ".join(
-                        management_form.add_prefix(field_name)
-                        for field_name in management_form.errors
-                    ),
-                )
-            submitted_total = management_form.cleaned_data[TOTAL_FORM_COUNT]
-            if isinstance(submitted_total, int) and self.limits.over_hard_cap(
-                submitted_total
+
+        with SequenceWidget.SubmissionCountdown(
+            self.limits.submission_max
+        ) as countdown:
+            formset = bound_field.formset
+            valid = formset.is_valid()
+        bound_field.submission_overflow = bool(countdown)
+        if bound_field.submission_overflow:
+            raise TooManyFormsValidationError(
+                self.error_messages["submission_too_many_forms"],
+                num=self.limits.submission_max,
+            )
+        if not valid:
+            errors: list[ValidationError] = list(formset.non_form_errors().as_data())
+            errors.extend(
+                item_error
+                for index, form in enumerate(formset.forms)
+                for field_errors in form.errors.as_data().values()
+                for error in field_errors
+                for item_error in ItemValidationError.for_messages_of(index, error)
+            )
+            raise ValidationError(errors)
+
+        deleted_forms = {id(form) for form in formset.deleted_forms}
+        cleaned_data: list[object] = []
+        for form in formset.forms:
+            if id(form) in deleted_forms or (
+                form.empty_permitted and not form.has_changed()
             ):
-                raise TooManyFormsValidationError(
-                    self.error_messages["too_many_forms"], num=self.limits.max_length
+                continue
+            if "value" in form.cleaned_data:
+                cleaned_data.append(form.cleaned_data["value"])
+            else:
+                cleaned_data.append(
+                    {
+                        name: value
+                        for name, value in form.cleaned_data.items()
+                        if name != "DELETE"
+                    }
                 )
-        initial = bound_field.initial
-        data = self.to_python(rows)
-        if (
-            management_form is None
-            and isinstance(self.child_field, FileField)
-            and not data
-            and initial
-        ):
-            data = [None] * len(initial)
-        return self._clean_values(
-            data,
-            initial,
-            submission.deleted,
-            submission.omitted,
-            submission.nested_deleted,
-        )
+        result = self.compress(cleaned_data)
+        self.validate(result)
+        self.run_validators(result)
+        return result
 
     def validate(self, value: Collection[object]) -> None:
         """Apply required, minimum, and maximum length checks."""

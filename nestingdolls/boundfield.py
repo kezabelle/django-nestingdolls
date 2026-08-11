@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import dataclasses
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import datetime, time
 from typing import TYPE_CHECKING, Any, cast
 
@@ -9,7 +8,6 @@ from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import UploadedFile
 from django.forms import BaseForm, Field
 from django.forms.boundfield import BoundField
-from django.forms.formsets import ManagementForm
 from django.forms.utils import ErrorList
 from django.forms.widgets import Widget
 from django.utils.datastructures import MultiValueDict
@@ -249,14 +247,7 @@ class MappingBoundField(CompositeBoundField):
 
 
 class SequenceBoundField(CompositeBoundField):
-    """Give the sequence widget the row state that the browser sent.
-
-    Django gives a widget no errors when it renders a bound field. A sequence
-    has one error list, but many rows and many child widgets. This class finds
-    the row of each error, and it finds the rows that the user deleted. It puts
-    that state on the widget before each render, so the field keeps no state of
-    its own.
-    """
+    """Bind one sequence to its Django row formset."""
 
     field: SequenceField
 
@@ -266,172 +257,95 @@ class SequenceBoundField(CompositeBoundField):
         super().__init__(form, field, name)
         if not isinstance(self.field, SequenceField):
             raise TypeError("field must be a SequenceField")
-
-    @dataclasses.dataclass(frozen=True)
-    class Submission:
-        """Hold the one parsed request cohort and derived sequence state."""
-
-        bound_field: SequenceBoundField
-        rows: list[object] = dataclasses.field(init=False)
-        over_submission_max: bool = dataclasses.field(init=False)
-
-        def __post_init__(self) -> None:
-            bf = self.bound_field
-            widget = bf.field.widget
-            with widget.SubmissionCountdown(
-                bf.field.limits.submission_max
-            ) as countdown:
-                rows = widget.value_from_input(bf.input, bf.html_name)
-            object.__setattr__(self, "rows", rows)
-            object.__setattr__(self, "over_submission_max", bool(countdown))
-
-        @property
-        def input(self) -> SequenceWidget.Input:
-            """Return the already-cached, sequence-specific input cohort."""
-            input = self.bound_field.input
-            assert isinstance(input, SequenceWidget.Input)
-            return input
-
-        @property
-        def management_form(self) -> ManagementForm | None:
-            return self.input.management_form
-
-        @cached_property
-        def deleted(self) -> frozenset[int]:
-            """Return rows marked for deletion."""
-            bf = self.bound_field
-            return bf.field.widget.deleted_row_indexes(
-                self.input.data, bf.html_name, len(self.rows)
-            )
-
-        @cached_property
-        def omitted(self) -> frozenset[int]:
-            """Return extra rows that their child widget considers omitted."""
-            if self.input.direct_rows is not None:
-                return frozenset()
-            bf = self.bound_field
-            widget = bf.field.widget
-            child_widget = widget._child_widget(widget.child_field)
-            initial_count = len(bf.field.initial_values(bf.initial))
-            omitted: set[int] = set()
-            # A composite child's read_input() below can build its own nested
-            # rows, so share one countdown across every row instead of
-            # letting each one spend a fresh budget.
-            with widget.SubmissionCountdown(bf.field.limits.submission_max):
-                for index, (data, files) in enumerate(
-                    zip(self.input.data_rows, self.input.file_rows, strict=True)
-                ):
-                    if index < initial_count:
-                        continue
-                    name = f"{bf.html_name}-{index}"
-                    if isinstance(child_widget, CompositeWidget):
-                        child_input = child_widget.read_input(data, files, name)
-                        is_omitted = not child_input.data and not child_input.files
-                    else:
-                        is_omitted = child_widget.value_omitted_from_data(
-                            data,
-                            cast("MultiValueDict[str, UploadedFile[Any]]", files),
-                            name,
-                        )
-                    if is_omitted:
-                        omitted.add(index)
-            return frozenset(omitted)
-
-        @cached_property
-        def nested_deleted(self) -> Mapping[int, frozenset[int]]:
-            """Return the deleted nested rows of each row that is a sequence.
-
-            A nested sequence has no bound field of its own. It has no way
-            to read its own rows' delete marks. This method reads them
-            here, from the rows and the input already read for the outer
-            field.
-
-            ``SequenceField._clean_values`` uses this result. It removes
-            the marked rows before it cleans the nested value.
-            ``self.rows`` still holds the raw rows, with no rows removed.
-            The render step needs the deleted row to show it as deleted.
-            """
-            bf = self.bound_field
-            child_widget = bf.field.widget._child_widget(bf.field.child_field)
-            if not isinstance(child_widget, SequenceWidget):
-                return {}
-            result: dict[int, frozenset[int]] = {}
-            for index, row in enumerate(self.rows):
-                if not isinstance(row, list):
-                    continue
-                name = f"{bf.html_name}-{index}"
-                deleted = child_widget.deleted_row_indexes(
-                    self.input.data, name, len(row)
-                )
-                if deleted:
-                    result[index] = deleted
-            return result
-
-        @cached_property
-        def item_errors(self) -> Sequence[ItemValidationError]:
-            """Return every item error of this field, at any nesting depth."""
-            return [
-                error
-                for error in self.bound_field._all_errors.as_data()
-                if isinstance(error, ItemValidationError)
-            ]
-
-        @cached_property
-        def errors(self) -> Mapping[int, list[object]]:
-            """Return the error messages of each row. Do not count nested rows."""
-            result: dict[int, list[object]] = {}
-            for error in self.item_errors:
-                if len(error.item_path) == 1 and isinstance(error.item, int):
-                    result.setdefault(error.item, []).append(error.child_message)
-            return result
+        self.submission_overflow = False
 
     @cached_property
-    def submission(self) -> Submission:
-        """Return the one bound-request cohort for this sequence."""
-        return self.Submission(self)
+    def is_bound_formset(self) -> bool:
+        """Report whether the narrowed browser submission binds a formset."""
+        input = self.input
+        assert isinstance(input, SequenceWidget.Input)
+        return (
+            self.form.is_bound
+            and not self.field.disabled
+            and input.direct_rows is None
+            and bool(input.data or input.files)
+        )
+
+    @cached_property
+    def formset(self) -> SequenceField.RowFormSet:
+        """Return the cached, prefix-aware row formset for cleaning and rendering."""
+        input = self.input
+        assert isinstance(input, SequenceWidget.Input)
+        initial_values = self.data if input.direct_rows is not None else self.initial
+        initial = self.field.widget._initial_formset_rows(initial_values)
+        if (
+            not initial
+            and self.field.required
+            and self.field.limits.min_length == 0
+            and not self.is_bound_formset
+        ):
+            initial = [self.field.widget._empty_formset_row()]
+        formset = self.field.row_formset_class(
+            data=input.data if self.is_bound_formset else None,
+            files=cast("MultiValueDict[str, UploadedFile[Any]]", input.files)
+            if self.is_bound_formset
+            else None,
+            initial=initial,
+            prefix=self.html_name,
+            auto_id=cast(str, self.form.auto_id),
+            form_kwargs={"use_required_attribute": False},
+        )
+        from nestingdolls.fields import MappingField
+
+        if isinstance(self.field.child_field, MappingField):
+            formset.invalid_mapping_rows = frozenset(
+                index
+                for index, row in enumerate(initial_values)
+                if not isinstance(row, Mapping)
+            )
+        return formset
 
     @cached_property
     def data(self) -> list[object]:
-        """Return extracted rows unless nested extraction exceeded its budget."""
-        return [] if self.submission.over_submission_max else self.submission.rows
+        """Return direct rows or the row values needed for change detection."""
+        input = self.input
+        assert isinstance(input, SequenceWidget.Input)
+        if input.direct_rows is not None:
+            return self.field.widget.value_from_input(input, self.html_name)
+        if not self.is_bound_formset:
+            return []
+        values: list[object] = []
+        for form in self.formset.forms:
+            if "value" in form.fields:
+                values.append(form["value"].data)
+            else:
+                values.append(
+                    {name: form[name].data for name in form.fields if name != "DELETE"}
+                )
+        return values
 
     def _prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
-        """Give the sequence widget its cached input, errors, and deletions."""
+        """Give the sequence widget the formset that owns row state."""
         if not isinstance(widget, SequenceWidget):
-            super()._prepare_widget(widget, only_initial)
-        elif only_initial:
-            name = self.html_initial_name
-            input = widget.read_input(self.form.data, self.form.files, name)
-            assert isinstance(input, SequenceWidget.Input)
+            return super()._prepare_widget(widget, only_initial)
+        if only_initial:
             widget.bound = widget.Bound(
-                hidden_initial_value=(
-                    widget.value_from_input(input, name)
-                    if input.data or input.files
-                    else self.value()
-                ),
-                management_input=input.data if input.data else None,
-                management_form=input.management_form,
+                hidden_initial_value=self._hidden_initial_value(widget)
             )
         elif self.field.disabled:
             widget.bound = widget.Bound()
         else:
-            submission = self.submission
             widget.bound = widget.Bound(
-                management_input=submission.input.data,
-                management_form=submission.management_form,
-                item_errors=submission.item_errors,
-                deleted_indexes=submission.deleted,
-                submission_overflow=submission.over_submission_max,
+                formset=self.formset, submission_overflow=self.submission_overflow
             )
+
+    def value(self) -> object:
+        """Let the row formset, not Field.prepare_value(), prepare row values."""
+        return self.initial
 
     @cached_property
     def initial(self) -> list[object]:
-        """Return the initial rows of this field.
-
-        Initial data can use flat row keys, for example ``values-0``. Read
-        those keys when the initial data of the form has no key for this field,
-        or when the value of that key is a mapping.
-        """
+        """Return the initial rows of this field."""
         value: object = None
         if self.form.initial and self.name not in self.form.initial:
             value = self._initial_from_flat_keys(self.form.initial)
@@ -442,16 +356,11 @@ class SequenceBoundField(CompositeBoundField):
         ):
             value = normalized
         try:
-            # Read no more than absolute_max rows. A large initial collection
-            # must not make a large page.
             value = self.field.initial_values(
                 value, limit=self.field.limits.absolute_max
             )
         except InvalidInitialValueError:
             value = [value]
-        # A widget that does not show microseconds would send back a different
-        # value, and every render would report a change. Django's
-        # BoundField.initial removes them for the same reason.
         if not self.field.child_field.widget.supports_microseconds:
             return [
                 item.replace(microsecond=0)
@@ -462,14 +371,13 @@ class SequenceBoundField(CompositeBoundField):
         return value
 
     def _has_changed(self) -> bool:
-        """Report a change when the user deleted a row that the initial holds.
-
-        The rows that the browser sent do not contain a deleted row, and the
-        two row counts can still agree. Compare the deleted indexes with the
-        number of initial rows instead.
-        """
+        """Report a change when the user deleted an initial row."""
         changed = super()._has_changed()
-        if changed or self.field.disabled or not self.submission.deleted:
+        if changed or self.field.disabled:
             return changed
-        initial_length = len(self.initial)
-        return any(index < initial_length for index in self.submission.deleted)
+        deleted_forms = set(self.formset.deleted_forms)
+        return any(
+            index < len(self.initial)
+            for index, form in enumerate(self.formset.forms)
+            if form in deleted_forms
+        )
