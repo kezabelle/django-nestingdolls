@@ -38,6 +38,7 @@ __all__ = [
     "FrozenSetField",
     "ListField",
     "MappingField",
+    "NamedTupleField",
     "SequenceField",
     "SetField",
     "Subform",
@@ -147,8 +148,7 @@ class MappingField(CompositeField):
         # gave.
         self.widget.configure(form_class)
 
-    @staticmethod
-    def initial_value(value: object) -> dict[str, object]:
+    def initial_value(self, value: object) -> dict[str, object]:
         """Return the initial value as a dict, or raise ``InvalidInitialValueError``."""
         if value is None or value == "":
             return {}
@@ -179,7 +179,14 @@ class MappingField(CompositeField):
                 value[name] = self._hidden_initial_to_python(child_field, value[name])
         return value
 
-    def _clean_form(self, form: BaseForm) -> dict[str, object]:
+    def compress(self, data: dict[str, object]) -> object:
+        """Return the cleaned mapping members, or a value built from them.
+
+        A subclass changes the type of the result here.
+        """
+        return data
+
+    def _clean_form(self, form: BaseForm) -> object:
         """Return the cleaned data of the child Form, or raise its errors.
 
         Django keeps the leaf messages of a composite error only, so this
@@ -195,12 +202,12 @@ class MappingField(CompositeField):
                     for item_error in ItemValidationError.for_messages_of(name, error)
                 ]
             )
-        result: dict[str, object] = form.cleaned_data
+        result = self.compress(form.cleaned_data)
         self.validate(result)
         self.run_validators(result)
         return result
 
-    def clean(self, value: object) -> dict[str, object]:
+    def clean(self, value: object) -> object:
         """Clean a mapping of values that a caller collected.
 
         The child Form gets ``_ValueBoundField``, because this input holds
@@ -209,7 +216,7 @@ class MappingField(CompositeField):
         """
         value = self.to_python(value)
         if not value:
-            return cast(dict[str, object], super().clean(value))
+            return self.compress(cast(dict[str, object], super().clean(value)))
         return self._clean_form(
             self.form_class(
                 data=value,
@@ -217,7 +224,7 @@ class MappingField(CompositeField):
             )
         )
 
-    def _clean_bound_field(self, bound_field: BoundField) -> dict[str, object]:
+    def _clean_bound_field(self, bound_field: BoundField) -> object:
         """Clean the prefixed child Form of a bound outer form.
 
         The child Form owns both the narrowed input and its cleaned state. A
@@ -226,15 +233,9 @@ class MappingField(CompositeField):
         """
         assert isinstance(bound_field, MappingBoundField), "for mypy"
         if self.disabled:
-            return cast(
-                dict[str, object],
-                super()._clean_bound_field(bound_field),  # type: ignore[misc]
-            )
+            return super()._clean_bound_field(bound_field)  # type: ignore[misc]
         if not bound_field.is_bound_subform:
-            return cast(
-                dict[str, object],
-                super()._clean_bound_field(bound_field),  # type: ignore[misc]
-            )
+            return super()._clean_bound_field(bound_field)  # type: ignore[misc]
         return self._clean_form(bound_field.subform)
 
     def bound_data(self, data: object, initial: object) -> object:
@@ -293,6 +294,98 @@ class MappingField(CompositeField):
 DictField = MappingField
 FormField = MappingField
 Subform = MappingField
+
+
+class NamedTupleField(MappingField):
+    """Clean and validate the fixed set of children that one Form declares, as a ``NamedTuple``.
+
+    ``namedtuple_type`` must declare exactly the same field names as
+    ``form_class``, as a set; ``__init__`` refuses any other pairing. The
+    cleaned value is one instance of ``namedtuple_type``, built from the
+    child Form's ``cleaned_data`` by keyword, or ``None`` when the field is
+    not required and gets no value.
+    """
+
+    def __init__(
+        self,
+        form_class: type[BaseForm],
+        namedtuple_type: type[tuple[object, ...]],
+        /,
+        *,
+        required: bool = True,
+        widget: MappingWidget | type[MappingWidget] | None = None,
+        label: str | Promise | None = None,
+        initial: object | Callable[[], object] | None = None,
+        help_text: str | Promise = "",
+        error_messages: Mapping[str, str | Promise] | None = None,
+        show_hidden_initial: bool = False,
+        validators: Sequence[Callable[[tuple[object, ...] | None], None]] = (),
+        localize: bool = False,
+        disabled: bool = False,
+        label_suffix: str | None = None,
+        template_name: str | None = None,
+        bound_field_class: type[MappingBoundField] | None = None,
+    ) -> None:
+        """Configure a fixed mapping field that cleans to a ``namedtuple_type`` instance."""
+        if not (
+            isinstance(namedtuple_type, type)
+            and issubclass(namedtuple_type, tuple)
+            and hasattr(namedtuple_type, "_fields")
+        ):
+            raise ImproperlyConfigured(
+                "namedtuple_type argument for NamedTupleField must be a NamedTuple class"
+            )
+        super().__init__(
+            form_class,
+            required=required,
+            widget=widget,
+            label=label,
+            initial=initial,
+            help_text=help_text,
+            error_messages=error_messages,
+            show_hidden_initial=show_hidden_initial,
+            # MappingField.__init__ declares validators for its own dict
+            # result. NamedTupleField.compress() replaces that dict with a
+            # namedtuple_type instance or None, so this field's own
+            # validators are typed for that result instead. Both feed the
+            # same super().__init__(validators=...) storage slot untouched.
+            validators=cast(
+                "Sequence[Callable[[dict[str, object]], None]]", validators
+            ),
+            localize=localize,
+            disabled=disabled,
+            label_suffix=label_suffix,
+            template_name=template_name,
+            bound_field_class=bound_field_class,
+        )
+        declared = frozenset(self.widget.fields)
+        expected = frozenset(namedtuple_type._fields)
+        if declared != expected:
+            raise ImproperlyConfigured(
+                "form_class fields must match namedtuple_type._fields exactly: "
+                f"form declares {sorted(declared)!r}, "
+                f"namedtuple_type expects {sorted(expected)!r}"
+            )
+        self.namedtuple_type = namedtuple_type
+
+    def initial_value(self, value: object) -> dict[str, object]:
+        """Return the initial value as a dict, and accept a namedtuple_type instance too."""
+        as_dict = getattr(value, "_asdict", None)
+        if callable(as_dict):
+            value = as_dict()
+        return super().initial_value(value)
+
+    def compress(self, data: dict[str, object]) -> tuple[object, ...] | None:
+        """Return cleaned members as one namedtuple_type instance, or None when empty.
+
+        ``MappingField._clean_form`` and ``MappingField.clean`` only call this
+        with every declared field present, or with an empty dict when the
+        field got no value. The ``__init__`` field-name check above
+        guarantees every keyword matches one namedtuple_type field.
+        """
+        if not data:
+            return None
+        return self.namedtuple_type(**data)
 
 
 class SequenceField(CompositeField):
@@ -511,8 +604,9 @@ class SequenceField(CompositeField):
         result.widget.configure(result.child_field, result.limits)
         return result
 
-    @staticmethod
-    def initial_values(value: object, *, limit: int | None = None) -> list[object]:
+    def initial_values(
+        self, value: object, *, limit: int | None = None
+    ) -> list[object]:
         """Return the initial value as a list, or raise ``InvalidInitialValueError``."""
         if value is None or value == "":
             return []
