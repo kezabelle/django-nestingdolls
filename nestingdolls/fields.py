@@ -607,7 +607,8 @@ class SequenceField(CompositeField):
                 Collection[object],
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
-        input = cast(SequenceWidget.Input, bound_field.input)
+        input = bound_field.input
+        assert isinstance(input, self.widget.Input), "for mypy"
         if input.direct_rows is not None:
             return self._clean_values(bound_field.data, bound_field.initial)
         if not bound_field.is_bound_formset:
@@ -620,7 +621,7 @@ class SequenceField(CompositeField):
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
 
-        with self.widget.SubmissionCountdown(self.limits.submission_max) as countdown:
+        with self.widget.submission_countdown(self.limits.submission_max) as countdown:
             formset = bound_field.formset
             valid = formset.is_valid()
         bound_field.submission_overflow = bool(countdown)
@@ -716,9 +717,7 @@ class SequenceField(CompositeField):
         rather than raising, without discovering every nested field first.
         """
         rows = self.initial_values(value, limit=self.limits.absolute_max)
-        with SequenceWidget.SubmissionCountdown(
-            self.limits.submission_max
-        ) as countdown:
+        with self.widget.submission_countdown(self.limits.submission_max) as countdown:
             rows = rows[: countdown.take(len(rows))]
             values = []
             for row in rows:

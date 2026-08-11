@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import UploadedFile
-from django.forms import BaseForm, Field
+from django.forms import BaseForm, BaseFormSet, Field
 from django.forms.boundfield import BoundField
 from django.forms.utils import ErrorList
 from django.forms.widgets import Widget
@@ -285,7 +285,7 @@ class SequenceBoundField(CompositeBoundField):
     def is_bound_formset(self) -> bool:
         """Report whether the narrowed browser submission binds a formset."""
         input = self.input
-        assert isinstance(input, SequenceWidget.Input)
+        assert isinstance(input, self.field.widget.Input)
         return (
             self.form.is_bound
             and not self.field.disabled
@@ -294,10 +294,10 @@ class SequenceBoundField(CompositeBoundField):
         )
 
     @cached_property
-    def formset(self) -> SequenceWidget.RowFormSet:
+    def formset(self) -> BaseFormSet[Any]:
         """Return the cached, prefix-aware row formset for cleaning and rendering."""
         input = self.input
-        assert isinstance(input, SequenceWidget.Input)
+        assert isinstance(input, self.field.widget.Input)
         initial_values = self.data if input.direct_rows is not None else self.initial
         initial = self.field.widget._initial_formset_rows(initial_values)
         if (
@@ -323,7 +323,7 @@ class SequenceBoundField(CompositeBoundField):
     def data(self) -> list[object]:
         """Return direct rows or the row values needed for change detection."""
         input = self.input
-        assert isinstance(input, SequenceWidget.Input)
+        assert isinstance(input, self.field.widget.Input)
         if input.direct_rows is not None:
             return self.field.widget.value_from_input(input, self.html_name)
         if not self.is_bound_formset:
@@ -382,7 +382,7 @@ class SequenceBoundField(CompositeBoundField):
     def _has_changed(self) -> bool:
         """Report direct edits and deletions through the row formset."""
         input = self.input
-        assert isinstance(input, SequenceWidget.Input)
+        assert isinstance(input, self.field.widget.Input)
         changed = (
             self.field.has_changed(self.initial, input.direct_rows)
             if input.direct_rows is not None

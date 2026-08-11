@@ -1058,12 +1058,12 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
             value = forms.IntegerField()
 
         class CountingWidget(nestingdolls.MappingWidget):
-            key_visits = 0
+            normalized_keys = 0
 
-            class Keys(nestingdolls.MappingWidget.Keys):
-                def normalized(self, data, name):
-                    CountingWidget.key_visits += len(data)
-                    return super().normalized(data, name)
+            def read_input(self, data, files, name):
+                input = super().read_input(data, files, name)
+                CountingWidget.normalized_keys += len(input.data) + len(input.files)
+                return input
 
         class Form(forms.Form):
             values = nestingdolls.ListField(
@@ -1081,11 +1081,9 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         )
 
         self.assertIs(form.is_valid(), True, form.errors)
-        # The bound must stay sub-quadratic in the row count. A per-row
-        # rescan of the whole input visits row_count * row_count keys.
-        # The exact figure is an implementation detail. Do not pin it
-        # here.
-        self.assertLess(CountingWidget.key_visits, row_count * row_count)
+        # Each nested mapping receives only its own normalized child values.
+        # The exact number of values is an implementation detail.
+        self.assertLess(CountingWidget.normalized_keys, row_count * row_count)
 
     def test_added_removed_and_failing_rows_drive_has_changed(self):
         """Row cardinality changes and child comparison errors both mean "changed"."""
@@ -1962,10 +1960,9 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
         class CountingWidget(nestingdolls.SequenceWidget):
             key_visits = 0
 
-            class Keys(nestingdolls.SequenceWidget.Keys):
-                def rows(self, data, name, form_count):
-                    CountingWidget.key_visits += len(data)
-                    return super().rows(data, name, form_count)
+            def read_input(self, data, files, name):
+                CountingWidget.key_visits += len(data) + len(files)
+                return super().read_input(data, files, name)
 
         class Form(forms.Form):
             values = nestingdolls.ListField(
@@ -2030,13 +2027,13 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
 class SyntheticSubmissionCountdownContractTestCase(FormBindingUnitTestCase):
     """Define behavior for manually nested private countdown scopes.
 
-    ``SequenceWidget.SubmissionCountdown`` is not public API. This test
+    The sequence widget's submission countdown is not public API. This test
     manufactures an unsupported situation anyway, by opening the scope by hand
     around ``is_valid()`` to demonstrate a synthetic issue.
 
-    No request path opens a second ``SubmissionCountdown``. This test does so to
-    record that a joined scope does not receive overflow state. This unsupported
-    call can truncate and accept data.
+    No request path opens a second countdown. This test does so to record that
+    a joined scope does not receive overflow state. This unsupported call can
+    truncate and accept data.
 
     Do not change this behavior, do not try and fix this because it is beyond the
     scope of a Field and moves towards either an owning form, or an owning view.
@@ -2052,6 +2049,8 @@ class SyntheticSubmissionCountdownContractTestCase(FormBindingUnitTestCase):
             a = nestingdolls.ListField(
                 nestingdolls.ListField(forms.CharField(required=False), required=False),
                 required=False,
+                max_length=10,
+                absolute_max=10,
             )
             b = nestingdolls.ListField(
                 nestingdolls.ListField(forms.CharField(required=False), required=False),
@@ -2072,7 +2071,8 @@ class SyntheticSubmissionCountdownContractTestCase(FormBindingUnitTestCase):
         form = self.post_urlencoded_form(Form, pairs)
 
         # Synthetic only: no shipped code path opens this scope by hand.
-        with nestingdolls.SequenceWidget.SubmissionCountdown(10):
+        widget = form.fields["a"].widget
+        with widget.submission_countdown(widget.limits.submission_max):
             valid = form.is_valid()
 
         # A real (fixed) implementation would reject the whole submission
@@ -2293,8 +2293,8 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
     def test_reused_widget_derives_multipart_requirement_from_the_new_child(self):
         """It does not retain multipart state from a widget's original child."""
-        text_widget = nestingdolls.SequenceWidget(forms.CharField())
-        file_widget = nestingdolls.SequenceWidget(forms.FileField())
+        text_widget = nestingdolls.SequenceWidget()
+        file_widget = nestingdolls.SequenceWidget()
 
         class UploadForm(forms.Form):
             values = nestingdolls.ListField(forms.FileField(), widget=text_widget)
@@ -2553,23 +2553,21 @@ class PublicApiTestCase(SimpleTestCase):
         self.assertEqual(constructor_html, keyword_html)
 
     def test_rejects_non_fields_and_legacy_widget_usage(self):
-        """It rejects invalid child fields and legacy widget arguments."""
+        """It rejects invalid child fields and legacy widget configuration."""
         with self.assertRaises(ImproperlyConfigured):
             nestingdolls.ListField(object())
         with self.assertRaises(TypeError):
             nestingdolls.ListField(forms.IntegerField(), widget=forms.TextInput)
         with self.assertRaises(TypeError):
             nestingdolls.ListField(forms.IntegerField(), min_num=1)
+        with self.assertRaises(TypeError):
+            nestingdolls.SequenceWidget(child_field=forms.IntegerField())
+        with self.assertRaises(TypeError):
+            nestingdolls.MappingWidget(form_class=forms.Form)
 
     def test_widget_instance_is_copied_and_rebound_to_field_configuration(self):
         """Django copies a supplied widget before the field configures it."""
-        original_child = forms.CharField()
-        widget = nestingdolls.SequenceWidget(
-            original_child,
-            min_length=4,
-            max_length=5,
-            absolute_max=6,
-        )
+        widget = nestingdolls.SequenceWidget()
 
         field = nestingdolls.ListField(
             forms.IntegerField(),
@@ -2585,10 +2583,6 @@ class PublicApiTestCase(SimpleTestCase):
         self.assertEqual(field.widget.limits.max_length, 2)
         self.assertEqual(field.absolute_max, 3)
         self.assertEqual(field.widget.limits.absolute_max, field.absolute_max)
-        self.assertIs(widget.child_field, original_child)
-        self.assertEqual(widget.limits.min_length, 4)
-        self.assertEqual(widget.limits.max_length, 5)
-        self.assertEqual(widget.limits.absolute_max, 6)
 
 
 if __name__ == "__main__":  # pragma: no cover

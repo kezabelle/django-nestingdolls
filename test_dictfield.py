@@ -983,13 +983,10 @@ class MappingFieldUnitTestCase(FormBindingUnitTestCase):
     def test_widget_extensions_are_copied_and_rebound_to_the_child_form(self):
         """Django copies widget instances and the field supplies its Form class."""
 
-        class OtherForm(forms.Form):
-            other = forms.CharField()
-
         class CustomWidget(nestingdolls.MappingWidget):
             pass
 
-        widget = CustomWidget(OtherForm)
+        widget = CustomWidget()
         instance_field = nestingdolls.MappingField(
             MappingProbeFixtures.PointForm, widget=widget
         )
@@ -999,7 +996,6 @@ class MappingFieldUnitTestCase(FormBindingUnitTestCase):
 
         self.assertIsNot(instance_field.widget, widget)
         self.assertIs(instance_field.widget.form_class, MappingProbeFixtures.PointForm)
-        self.assertIs(widget.form_class, OtherForm)
         self.assertIsInstance(class_field.widget, CustomWidget)
         self.assertIs(class_field.widget.form_class, MappingProbeFixtures.PointForm)
 

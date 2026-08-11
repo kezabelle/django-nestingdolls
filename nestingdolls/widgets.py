@@ -8,13 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 from django.core.files.uploadedfile import UploadedFile
 from django.forms import BaseForm, BaseFormSet, Field, Form
-from django.forms.formsets import (
-    DEFAULT_MAX_NUM,
-    DEFAULT_MIN_NUM,
-    DELETION_FIELD_NAME,
-    TOTAL_FORM_COUNT,
-    formset_factory,
-)
+from django.forms.formsets import DELETION_FIELD_NAME, TOTAL_FORM_COUNT, formset_factory
 from django.forms.widgets import Media as WidgetMedia
 from django.forms.widgets import MultiWidget, Widget
 from django.utils.datastructures import MultiValueDict
@@ -213,20 +207,6 @@ class MappingWidget(CompositeWidget):
             )
 
     keys: Keys
-
-    def __init__(
-        self,
-        form_class: type[BaseForm] | None = None,
-        attrs: Mapping[str, object] | None = None,
-    ) -> None:
-        """Store the child Form class that this widget renders.
-
-        A field can supply the widget class only. Django then builds the widget
-        with no Form class, and the field configures that copy.
-        """
-        if form_class is not None:
-            self.configure(form_class)
-        super().__init__(dict(attrs) if attrs is not None else None)
 
     def configure(self, form_class: type[BaseForm]) -> None:
         """Store the configuration of the field that owns this widget.
@@ -434,7 +414,7 @@ class SequenceWidget(CompositeWidget):
             if hasattr(self, "_submission_total_form_count"):
                 return self._submission_total_form_count
             total = super().total_form_count()
-            with self.sequence_widget.SubmissionCountdown(
+            with self.sequence_widget.submission_countdown(
                 self.sequence_widget.limits.submission_max
             ) as countdown:
                 allowed = countdown.take(total)
@@ -442,7 +422,7 @@ class SequenceWidget(CompositeWidget):
             return allowed
 
     @dataclasses.dataclass(slots=True)
-    class SubmissionCountdown:
+    class submission_countdown:
         """Limit rows built by one recursively nested sequence extraction or render.
 
         Django limits request keys, files, and bytes before a form sees them, and a
@@ -469,7 +449,7 @@ class SequenceWidget(CompositeWidget):
         def take(self, count: int) -> int:
             """Reserve the rows that fit in the active shared allowance."""
             state = self._current.get()
-            assert state is not None, "SubmissionCountdown must be active"
+            assert state is not None, "submission_countdown must be active"
             remaining, ran_out = state
             allowed = min(count, remaining)
             self._current.set((remaining - allowed, ran_out or allowed < count))
@@ -490,7 +470,7 @@ class SequenceWidget(CompositeWidget):
             """Remember outer overflow and restore the preceding context."""
             if self._token is not None:
                 state = self._current.get()
-                assert state is not None, "SubmissionCountdown must be active"
+                assert state is not None, "submission_countdown must be active"
                 self._ran_out = state[1]
                 self._current.reset(self._token)
 
@@ -513,23 +493,6 @@ class SequenceWidget(CompositeWidget):
         """Hold narrowed sequence input and an optional direct Python value."""
 
         direct_rows: list[object] | None
-
-    def __init__(
-        self,
-        child_field: Field | None = None,
-        *,
-        min_length: int = DEFAULT_MIN_NUM,
-        max_length: int = DEFAULT_MAX_NUM,
-        absolute_max: int | None = None,
-        attrs: Mapping[str, object] | None = None,
-    ) -> None:
-        """Store the child widget and its row limits."""
-        from nestingdolls.fields import SequenceField
-
-        self.limits = SequenceField.Limits.build(min_length, max_length, absolute_max)
-        if child_field is not None:
-            self.child_field = child_field
-        super().__init__(dict(attrs) if attrs is not None else None)
 
     def configure(self, child_field: Field, limits: SequenceField.Limits) -> None:
         """Store the configuration of this field's private widget copy."""
@@ -656,11 +619,9 @@ class SequenceWidget(CompositeWidget):
 
     def value_from_input(self, input: CompositeWidget.Input, name: str) -> list[object]:
         """Extract direct rows or flattened initial rows from the row formset."""
-        assert isinstance(input, self.Input), (
-            "SequenceWidget requires SequenceWidget.Input"
-        )
+        assert isinstance(input, self.Input), "SequenceWidget requires its own Input"
         if input.direct_rows is not None:
-            with self.SubmissionCountdown(self.limits.submission_max) as countdown:
+            with self.submission_countdown(self.limits.submission_max) as countdown:
                 return input.direct_rows[: countdown.take(len(input.direct_rows))]
         if not input.data and not input.files:
             return []
@@ -805,7 +766,7 @@ class SequenceWidget(CompositeWidget):
         attrs: dict[str, Any] | None,
     ) -> dict[str, Any]:
         """Keep nested row construction inside one shared render budget."""
-        with self.SubmissionCountdown(self.limits.submission_max):
+        with self.submission_countdown(self.limits.submission_max):
             return self._get_context(name, value, attrs)
 
     def _mark_row_invalid(
