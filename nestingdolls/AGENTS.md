@@ -39,7 +39,7 @@ normal Django behavior and uses JavaScript only for progressive enhancement.
 
 ### Input handling
 
-- Preserve direct, dash, dot, and bracket input forms.
+- Preserve direct and dash input forms.
 - Preserve direct-value priority over flat input names.
 - Preserve all input forms through mapping and sequence nesting.
 - Retain original keys and canonical keys during normalization.

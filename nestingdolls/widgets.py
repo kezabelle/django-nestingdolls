@@ -397,25 +397,59 @@ class SequenceWidget(CompositeWidget):
 
         def _construct_form(self, index: int, **kwargs: object) -> BaseForm:
             form = cast(BaseForm, super()._construct_form(index, **kwargs))  # type: ignore[misc]
-            if form.empty_permitted and (
-                any(
-                    isinstance(key, str)
-                    and (key == form.prefix or key.startswith(f"{form.prefix}-"))
-                    and key != f"{form.prefix}-{DELETION_FIELD_NAME}"
-                    for source in (self.data, self.files)
-                    for key in source
-                )
-                or (
-                    not form.is_multipart()
-                    and any(
-                        not field.required
-                        for name, field in form.fields.items()
-                        if name != DELETION_FIELD_NAME
-                    )
-                )
-            ):
+            if not form.empty_permitted:
+                return form
+            row_has_value = self._row_carries_submitted_value(form.prefix)
+            row_has_optional_field = self._row_has_an_optional_field(form)
+            if row_has_value or row_has_optional_field:
                 form.empty_permitted = False
             return form
+
+        def _row_carries_submitted_value(self, prefix: str | None) -> bool:
+            """Report whether the browser sent a non-blank value for this row.
+
+            Check keys under the row's own prefix. Skip the row's own
+            delete key. A rendered row always sends that key, checked or
+            not. Its presence alone does not show real content.
+
+            A rendered row also always sends its other keys, even when
+            the user left them blank. A blank value is not real content
+            either. Only a non-blank value shows that the user put real
+            data in this row. ``Form.has_changed()`` must not skip a row
+            with real data.
+            """
+            delete_key = f"{prefix}-{DELETION_FIELD_NAME}"
+            for source in (self.data, self.files):
+                for key in source:
+                    if not isinstance(key, str):
+                        continue
+                    is_row_key = key == prefix or key.startswith(f"{prefix}-")
+                    is_delete_key = key == delete_key
+                    if not is_row_key or is_delete_key:
+                        continue
+                    values = self.sequence_widget.keys.values_for(source, key)
+                    has_non_blank_value = any(
+                        value not in (None, "") for value in values
+                    )
+                    if has_non_blank_value:
+                        return True
+            return False
+
+        def _row_has_an_optional_field(self, form: BaseForm) -> bool:
+            """Report whether this row has a field the user may leave blank.
+
+            Return False for a multipart row. Check every other field
+            except the row's own delete field. Return True for the first
+            field that is not required.
+            """
+            if form.is_multipart():
+                return False
+            for name, field in form.fields.items():
+                if name == DELETION_FIELD_NAME:
+                    continue
+                if not field.required:
+                    return True
+            return False
 
         def total_form_count(self) -> int:
             if hasattr(self, "_submission_total_form_count"):
@@ -476,15 +510,23 @@ class SequenceWidget(CompositeWidget):
         empty rows across sequence levels. This small context-local counter is only
         for that attacker-controlled recursive work. It is intentionally not a
         mapping or form-wide policy.
+
+        The shared context holds one signed integer: the remaining row
+        budget. ``take`` always subtracts the full requested count, not
+        only the allowed part. This lets the remaining value fall below
+        zero. A negative value means some caller already asked for more
+        rows than the budget had left. One value thus carries two facts:
+        how many rows are left, and whether any caller ran out. A second
+        stored flag is not needed.
         """
 
-        _current: ClassVar[ContextVar[tuple[int, bool] | None]] = ContextVar(
+        _current: ClassVar[ContextVar[int | None]] = ContextVar(
             "nestingdolls_submission_countdown", default=None
         )
 
         count: int
         _ran_out: bool = False
-        _token: Token[tuple[int, bool] | None] | None = dataclasses.field(
+        _token: Token[int | None] | None = dataclasses.field(
             default=None, init=False, repr=False
         )
 
@@ -493,18 +535,23 @@ class SequenceWidget(CompositeWidget):
             return self._ran_out
 
         def take(self, count: int) -> int:
-            """Reserve the rows that fit in the active shared allowance."""
-            state = self._current.get()
-            assert state is not None, "submission_countdown must be active"
-            remaining, ran_out = state
-            allowed = min(count, remaining)
-            self._current.set((remaining - allowed, ran_out or allowed < count))
+            """Reserve the rows that fit in the active shared allowance.
+
+            Subtract the full requested count, not only the allowed part.
+            A negative remaining value then marks that the budget ran out.
+            Clamp the return value at zero: a caller must never build a
+            negative number of rows.
+            """
+            remaining = self._current.get()
+            assert remaining is not None, "submission_countdown must be active"
+            allowed = max(0, min(count, remaining))
+            self._current.set(remaining - count)
             return allowed
 
         def __enter__(self) -> Self:
             """Start the counter at the outer sequence and reuse it inside rows."""
             if self._current.get() is None:
-                self._token = self._current.set((self.count, False))
+                self._token = self._current.set(self.count)
             return self
 
         def __exit__(
@@ -513,11 +560,35 @@ class SequenceWidget(CompositeWidget):
             exc_value: BaseException | None,
             traceback: TracebackType | None,
         ) -> None:
-            """Remember outer overflow and restore the preceding context."""
+            """Remember overflow. Reset the token only if this scope owns it.
+
+            Read the shared state on every exit. Copy the overflow flag on
+            every exit. Do this even if this scope does not own the token.
+            A nested scope never owns the token. Its own ``__enter__``
+            method found the shared context already open.
+
+            An earlier version read the state only inside the token check
+            below. Then a nested scope could not update its own overflow
+            flag. The flag stayed at its default value. Do not move this
+            read back inside the token check. Find a different fix for
+            that other problem.
+
+            Reset the token only if this scope owns it. Do the reset
+            after the read above, not before it. The reset puts back the
+            value from before this scope opened the shared context. For
+            the owning scope, that value is ``None``. A read after the
+            reset would see that old value, not the final state. The
+            assertion below would then fail.
+
+            A scope that does not own the token must not call reset.
+            That scope did not open the shared context. It has no old
+            value to put back. A reset with a token it did not receive
+            would damage the owning scope's context.
+            """
+            remaining = self._current.get()
+            assert remaining is not None, "submission_countdown must be active"
+            self._ran_out = remaining < 0
             if self._token is not None:
-                state = self._current.get()
-                assert state is not None, "submission_countdown must be active"
-                self._ran_out = state[1]
                 self._current.reset(self._token)
 
     @dataclasses.dataclass(frozen=True, slots=True)

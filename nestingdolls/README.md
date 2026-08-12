@@ -164,14 +164,9 @@ Both fields accept direct input. Give `DictField` a mapping. Give `ListField`
 a list.
 
 Both fields also accept flat input names. Use a child name for `DictField`.
-Use a numeric row index for `ListField`:
-
-- Dash style: `point-x` or `values-0`
-- Dot style: `point.x` or `values.0`
-- Bracket style: `point[x]` or `values[0]`
-
-These name styles work for form data and initial values. They also work in
-nested fields.
+Use a numeric row index for `ListField`, joined to the field name with a
+dash: `point-x` or `values-0`. This dash style works for form data and
+initial values. It also works in nested fields.
 
 ### Nested fields
 

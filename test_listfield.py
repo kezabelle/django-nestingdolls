@@ -972,9 +972,15 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         )
 
         self.assertIs(blanks.is_valid(), False)
+        # Row 4 sits past ``min_length``/``min_num``. Django's own formset
+        # machinery already forces rows 0-3 to validate (index < min_num), so
+        # each of those four reports its own blank-email error. Row 4 has no
+        # submitted content anywhere in the request, so it is a genuine
+        # untouched extra row and is silently omitted, matching a vanilla
+        # Django formset's own "add row, leave it blank" behavior.
         self.assertEqual(
             [error.code for error in blanks.errors.as_data()["emails"]],
-            ["item_invalid"] * 5,
+            ["item_invalid"] * 4,
         )
         self.assertEqual(list(blanks["emails"].errors), [])
 
@@ -1185,6 +1191,69 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
                 self.assertEqual(form.cleaned_data["values"], [1, 2])
                 self.assertIn('value="1"', html)
                 self.assertIn('value="2"', html)
+
+    def test_untouched_added_row_does_not_block_an_optional_list(self):
+        """An unfilled extra row must not fail a required child on an optional list.
+
+        A browser's "add row" control raises ``TOTAL_FORMS`` and renders a
+        blank input before the user types anything; that blank input still
+        submits its own key. A vanilla Django formset treats an unedited row
+        beyond ``INITIAL_FORMS``/``min_num`` as unchanged and silently omits
+        it. This field must match that, even though the row's own key is
+        present in the request.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.CharField(), required=False)
+
+        form = Form(
+            QueryDict(
+                f"values-{TOTAL_FORM_COUNT}=1&values-{INITIAL_FORM_COUNT}=0&values-0="
+            )
+        )
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["values"], [])
+
+    def test_untouched_added_row_beside_a_filled_initial_row(self):
+        """An added-but-blank row is dropped while the filled initial row survives."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.CharField(), required=False)
+
+        form = Form(
+            QueryDict(
+                f"values-{TOTAL_FORM_COUNT}=2&values-{INITIAL_FORM_COUNT}=1&"
+                "values-0=kept&values-1="
+            )
+        )
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["values"], ["kept"])
+
+    def test_optional_child_still_preserves_a_declared_blank_row(self):
+        """A blank row is preserved, not dropped, when the child field allows blank.
+
+        This is the other half of the contract: when the *child* field
+        itself accepts a blank value, a declared extra row's blank
+        submission is real data (an explicit empty string), not an
+        untouched placeholder, so it must not be dropped.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.CharField(required=False), required=False
+            )
+
+        form = Form(
+            QueryDict(
+                f"values-{TOTAL_FORM_COUNT}=2&values-{INITIAL_FORM_COUNT}=1&"
+                "values-0=kept&values-1="
+            )
+        )
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["values"], ["kept", ""])
 
 
 class TupleFieldTestCase(SimpleTestCase):
