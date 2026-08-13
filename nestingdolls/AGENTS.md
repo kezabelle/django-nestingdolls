@@ -77,6 +77,16 @@ normal Django behavior and uses JavaScript only for progressive enhancement.
   add or remove. Emit the `nestingdolls:sequence-change` event instead, and
   let the host page build its own announcement from it.
 
+### Rendering layouts
+
+- The form-layout render patch in `patches.py` and the four layout
+  templates for each composite widget are a deliberate, supported
+  feature. Do not propose their removal to reduce code size.
+- `show_hidden_initial` and hidden composite rendering are also
+  supported. Keep their cost close to Django's own: one conversion
+  hook (`from_hidden_initial`) and one render-state field
+  (`hidden_initial_value`). Do not grow this path.
+
 ### Collection semantics
 
 - Preserve set deduplication and order-independent set comparison.

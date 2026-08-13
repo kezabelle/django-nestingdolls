@@ -25,8 +25,7 @@ Every command below is a `make` target. Run `make help` for the list.
   the settings in `mypy_settings.py`, which exists only for `django-stubs`; no
   test imports it.
 - `make ruff` and `make formatcheck` cover the maintained Python files listed in
-  the Makefile's `PYTHON_FILES`. `scripts/diagnose_form_data_mappings.py` is
-  deliberately absent from that list.
+  the Makefile's `PYTHON_FILES`.
 
 # Input limits
 

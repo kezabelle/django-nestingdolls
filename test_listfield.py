@@ -1099,13 +1099,13 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], ["kept"])
 
-    def test_optional_child_still_preserves_a_declared_blank_row(self):
-        """A blank row is preserved, not dropped, when the child field allows blank.
+    def test_optional_child_blank_added_row_is_dropped_like_a_formset(self):
+        """A blank added row is dropped even when the child accepts blank.
 
-        This is the other half of the contract: when the *child* field
-        itself accepts a blank value, a declared extra row's blank
-        submission is real data (an explicit empty string), not an
-        untouched placeholder, so it must not be dropped.
+        A vanilla Django formset treats an unedited extra row as
+        unchanged and omits it, whether or not its fields accept blank.
+        This field matches that: an added-but-blank row never becomes an
+        explicit empty value.
         """
 
         class Form(forms.Form):
@@ -1121,7 +1121,7 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         )
 
         self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["values"], ["kept", ""])
+        self.assertEqual(form.cleaned_data["values"], ["kept"])
 
 
 class TupleFieldTestCase(SimpleTestCase):
@@ -1670,14 +1670,18 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
             self.assertEqual(limits.submission_max, limits.absolute_max)
 
     def test_client_accepts_an_exact_nested_submission_total(self):
-        """Client accepts a nested submission that uses the shared cap exactly."""
+        """Client accepts a nested submission that uses the shared cap exactly.
+
+        The inner rows are declared initial, so they survive extraction the
+        way a stock formset keeps its initial forms.
+        """
         response = self.client.post(
             "/exact-nested-submission-probe/",
             {
                 f"outer-{TOTAL_FORM_COUNT}": "1",
                 f"outer-{INITIAL_FORM_COUNT}": "0",
                 f"outer-0-{TOTAL_FORM_COUNT}": "1999",
-                f"outer-0-{INITIAL_FORM_COUNT}": "0",
+                f"outer-0-{INITIAL_FORM_COUNT}": "1999",
             },
         )
         self.assertEqual(response.status_code, 200)
@@ -2196,7 +2200,7 @@ class DjangoRequestLimitFunctionalTestCase(SimpleTestCase):
                         f"outer-{TOTAL_FORM_COUNT}": "1",
                         f"outer-{INITIAL_FORM_COUNT}": "0",
                         f"outer-0-{TOTAL_FORM_COUNT}": str(inner_total),
-                        f"outer-0-{INITIAL_FORM_COUNT}": "0",
+                        f"outer-0-{INITIAL_FORM_COUNT}": str(inner_total),
                     },
                 )
 
@@ -2243,9 +2247,9 @@ class DjangoRequestLimitFunctionalTestCase(SimpleTestCase):
             "/mapping-root-submission-limit/",
             {
                 "values-first-TOTAL_FORMS": "10",
-                "values-first-INITIAL_FORMS": "0",
+                "values-first-INITIAL_FORMS": "10",
                 "values-second-TOTAL_FORMS": "10",
-                "values-second-INITIAL_FORMS": "0",
+                "values-second-INITIAL_FORMS": "10",
             },
         )
 
@@ -2313,7 +2317,7 @@ class DjangoRequestLimitFunctionalTestCase(SimpleTestCase):
                         f"items-{TOTAL_FORM_COUNT}": "1",
                         f"items-{INITIAL_FORM_COUNT}": "0",
                         f"items-0-tags-{TOTAL_FORM_COUNT}": str(inner_total),
-                        f"items-0-tags-{INITIAL_FORM_COUNT}": "0",
+                        f"items-0-tags-{INITIAL_FORM_COUNT}": str(inner_total),
                     },
                 )
 

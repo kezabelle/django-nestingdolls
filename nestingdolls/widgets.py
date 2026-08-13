@@ -14,7 +14,6 @@ from django.forms.formsets import (
     MAX_NUM_FORM_COUNT,
     MIN_NUM_FORM_COUNT,
     TOTAL_FORM_COUNT,
-    ManagementForm,
     formset_factory,
 )
 from django.forms.widgets import Media as WidgetMedia
@@ -266,6 +265,9 @@ class MappingWidget(CompositeWidget):
                 prefix=name,
                 use_required_attribute=self.is_required,
             )
+        initial_error = self.render_state.initial_error
+        errors: list[object] = [initial_error] if initial_error else []
+        errors += subform.non_field_errors()
         context["widget"].update(
             {
                 "subform": subform,
@@ -275,14 +277,7 @@ class MappingWidget(CompositeWidget):
                     if self.is_hidden
                     else subform.hidden_fields()
                 ),
-                "non_field_errors": (
-                    (
-                        [self.render_state.initial_error]
-                        if self.render_state.initial_error
-                        else []
-                    )
-                    + list(subform.non_field_errors())
-                ),
+                "non_field_errors": errors,
             }
         )
         return context
@@ -347,11 +342,7 @@ class SequenceWidget(CompositeWidget):
 
         def _construct_form(self, index: int, **kwargs: object) -> BaseForm:
             form = cast(BaseForm, super()._construct_form(index, **kwargs))  # type: ignore[misc]
-            if not form.empty_permitted:
-                return form
-            row_has_value = self._row_carries_submitted_value(form.prefix)
-            row_has_optional_field = self._row_has_an_optional_field(form)
-            if row_has_value or row_has_optional_field:
+            if form.empty_permitted and self._row_carries_submitted_value(form.prefix):
                 form.empty_permitted = False
             return form
 
@@ -385,22 +376,6 @@ class SequenceWidget(CompositeWidget):
                         return True
             return False
 
-        def _row_has_an_optional_field(self, form: BaseForm) -> bool:
-            """Report whether this row has a field the user may leave blank.
-
-            Return False for a multipart row. Check every other field
-            except the row's own delete field. Return True for the first
-            field that is not required.
-            """
-            if form.is_multipart():
-                return False
-            for name, field in form.fields.items():
-                if name == DELETION_FIELD_NAME:
-                    continue
-                if not field.required:
-                    return True
-            return False
-
         def total_form_count(self) -> int:
             if hasattr(self, "_submission_total_form_count"):
                 return self._submission_total_form_count
@@ -411,38 +386,6 @@ class SequenceWidget(CompositeWidget):
                 allowed = countdown.take(total)
             self._submission_total_form_count = allowed
             return allowed
-
-        @cached_property
-        def management_form(self) -> ManagementForm:
-            """Read TOTAL and INITIAL from the submission; supply MIN and MAX here.
-
-            Django never checks the submitted MIN_NUM and MAX_NUM values, but
-            a junk value would still fail the ManagementForm's own field
-            validation and reject good rows. Bind the form to the two counts
-            the browser owns plus the two limits the server owns.
-            """
-            if not self.is_bound:
-                return super().management_form
-            data = {
-                self.add_prefix(MIN_NUM_FORM_COUNT): str(
-                    self.sequence_widget.limits.min_length
-                ),
-                self.add_prefix(MAX_NUM_FORM_COUNT): str(
-                    self.sequence_widget.limits.max_length
-                ),
-            }
-            for field_name in (TOTAL_FORM_COUNT, INITIAL_FORM_COUNT):
-                key = self.add_prefix(field_name)
-                if key in self.data:
-                    data[key] = cast(str, self.data[key])
-            form = ManagementForm(
-                data,
-                auto_id=self.auto_id,
-                prefix=self.prefix,
-                renderer=self.renderer,  # type: ignore[attr-defined]
-            )
-            form.full_clean()
-            return form
 
     @dataclasses.dataclass(slots=True)
     class submission_countdown:
@@ -594,7 +537,7 @@ class SequenceWidget(CompositeWidget):
         formset.sequence_widget = self
         return formset
 
-    def direct_formset_rows(
+    def direct_rows(
         self, values: Sequence[object], name: str
     ) -> MultiValueDict[str, object]:
         """Give each row of a direct value its own key.
@@ -680,13 +623,11 @@ class SequenceWidget(CompositeWidget):
         )
         return [form["value"].data for form in formset.forms]
 
-    def initial_formset_rows(
-        self, value: Sequence[object] | None
-    ) -> list[dict[str, object]]:
+    def initial_rows(self, value: Sequence[object] | None) -> list[dict[str, object]]:
         """Adapt public sequence values to the concrete row form's initial data."""
         return [{"value": row} for row in value or ()]
 
-    def empty_formset_row(self) -> dict[str, object]:
+    def empty_initial_row(self) -> dict[str, object]:
         return {"value": None}
 
     def get_context(
@@ -706,9 +647,9 @@ class SequenceWidget(CompositeWidget):
                 value = cast(Sequence[object], self.render_state.hidden_initial_value)
             formset = self.render_state.formset
             if formset is None:
-                initial = self.initial_formset_rows(value)
+                initial = self.initial_rows(value)
                 if not initial and self.is_required and self.limits.min_length == 0:
-                    initial = [self.empty_formset_row()]
+                    initial = [self.empty_initial_row()]
                 formset = self.new_formset(initial=initial, prefix=name)
 
             if self.render_state.submission_overflow:
@@ -730,62 +671,15 @@ class SequenceWidget(CompositeWidget):
                 if getattr(form, "cleaned_data", {}).get(DELETION_FIELD_NAME)
             }
 
-            def make_row(form: BaseForm, index: int | str) -> dict[str, object]:
-                child_attrs = final_attrs.copy()
-                if id_:
-                    child_attrs["id"] = f"{id_}_{index}"
-                if self.child_field.disabled:
-                    child_attrs["disabled"] = True
-                from nestingdolls.boundfield import CompositeBoundField
-
-                child = form["value"]
-                child_widget = (
-                    child.field.hidden_widget()
-                    if self.input_type == "hidden"
-                    else child.field.widget
-                )
-                if isinstance(child, CompositeBoundField):
-                    child.prepare_widget(cast(CompositeWidget, child_widget), False)
-                child_value = (
-                    None
-                    if index == "__prefix__"
-                    else child.initial
-                    if isinstance(child, CompositeBoundField)
-                    else child.value()
-                )
-                if isinstance(child_widget, MultiWidget) and isinstance(
-                    child_value, str
-                ):
-                    child_value = None
-                subwidget = child_widget.get_context(
-                    child.html_name, child_value, child_attrs
-                )["widget"]
-                errors = [
-                    message
-                    for error in form.errors.as_data().get("value", [])
-                    for message in error.messages
-                ]
-                row: dict[str, object] = {
-                    "index": index,
-                    "delete_name": f"{form.prefix}-{DELETION_FIELD_NAME}",
-                    "subwidget": subwidget,
-                    "errors": errors,
-                }
-                if errors:
-                    child_id = subwidget["attrs"].get("id")
-                    error_id = f"{child_id}_error" if child_id else None
-                    if error_id:
-                        row["error_id"] = error_id
-                    self._mark_row_invalid(subwidget, error_id)
-                return row
-
             try:
                 rows = [
-                    make_row(form, index)
+                    self._row_context(form, index, final_attrs, id_)
                     for index, form in enumerate(forms)
                     if id(form) not in deleted_forms
                 ]
-                empty_row = make_row(formset.empty_form, "__prefix__")
+                empty_row = self._row_context(
+                    formset.empty_form, "__prefix__", final_attrs, id_
+                )
             finally:
                 child_widget = self._child_widget(self.child_field)
                 if isinstance(child_widget, CompositeWidget):
@@ -809,6 +703,60 @@ class SequenceWidget(CompositeWidget):
                     if id(form) in deleted_forms
                 ]
             return context
+
+    def _row_context(
+        self,
+        form: BaseForm,
+        index: int | str,
+        attrs: dict[str, Any],
+        id_: str | None,
+    ) -> dict[str, object]:
+        """Build the template context for one row form."""
+        from nestingdolls.boundfield import CompositeBoundField
+
+        child_attrs = attrs.copy()
+        if id_:
+            child_attrs["id"] = f"{id_}_{index}"
+        if self.child_field.disabled:
+            child_attrs["disabled"] = True
+        child = form["value"]
+        child_widget = (
+            child.field.hidden_widget()
+            if self.input_type == "hidden"
+            else child.field.widget
+        )
+        if isinstance(child, CompositeBoundField):
+            child.prepare_widget(cast(CompositeWidget, child_widget))
+        child_value = (
+            None
+            if index == "__prefix__"
+            else child.initial
+            if isinstance(child, CompositeBoundField)
+            else child.value()
+        )
+        if isinstance(child_widget, MultiWidget) and isinstance(child_value, str):
+            child_value = None
+        subwidget = child_widget.get_context(child.html_name, child_value, child_attrs)[
+            "widget"
+        ]
+        errors = [
+            message
+            for error in form.errors.as_data().get("value", [])
+            for message in error.messages
+        ]
+        row: dict[str, object] = {
+            "index": index,
+            "delete_name": f"{form.prefix}-{DELETION_FIELD_NAME}",
+            "subwidget": subwidget,
+            "errors": errors,
+        }
+        if errors:
+            child_id = subwidget["attrs"].get("id")
+            error_id = f"{child_id}_error" if child_id else None
+            if error_id:
+                row["error_id"] = error_id
+            self._mark_row_invalid(subwidget, error_id)
+        return row
 
     def _mark_row_invalid(
         self, widget_context: dict[str, Any], error_id: str | None

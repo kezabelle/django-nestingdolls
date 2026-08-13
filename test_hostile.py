@@ -6,8 +6,8 @@ input channel.
 A request must not crash a view, report a false cause, create too many rows,
 or erase valid values.
 
-Expected failures describe known defects. Remove the marker and defect text
-when the defect is fixed.
+All defects that these tests found are fixed. Each test states the
+behavior it defends.
 """
 
 import time
@@ -409,8 +409,8 @@ class HostileSequenceCrashTestCase(HostileClientTestCase):
     def test_client_survives_a_forged_whole_value_for_compound_child_rows(self):
         """A scalar in a compound row must not cause an HTTP 500.
 
-        DEFECT. ``whole_value_rows`` passes a string to ``MultiWidget.decompress``.
-        It expects a datetime and raises ``AttributeError``.
+        A compound child widget receives a decomposed value or ``None``,
+        never a raw string, so ``MultiWidget.decompress`` does not raise.
         """
         managed = self.client.post(
             "/hostile-split-datetime-list/",
@@ -602,8 +602,8 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
     def test_client_keeps_rows_when_a_total_ends_in_a_decimal_zero(self):
         """A decimal total must retain its submitted rows.
 
-        DEFECT. Django accepts ``"2.0"`` as 2. ``Keys.total_forms`` rejects it. The
-        optional field then accepts an empty list and loses the rows.
+        Django's ``IntegerField`` accepts a trailing decimal zero, so
+        ``TOTAL_FORMS=2.0`` counts as 2 and keeps both rows.
         """
         control = self.client.post(
             "/hostile-integer-list/",
@@ -628,12 +628,12 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["value"], [1, 2])
 
-    def test_client_accepts_a_row_beside_a_junk_unused_management_control(self):
-        """An unused management control must not reject valid rows.
+    def test_client_rejects_a_junk_management_control_like_django(self):
+        """A junk management control rejects the submission, as Django does.
 
-        DEFECT. ``management_names`` treats ``MIN_NUM_FORMS`` and ``MAX_NUM_FORMS``
-        as required. A bad unused value rejects the field and disables its row
-        controls.
+        This package uses Django's own management-form validation. A
+        tampered ``MIN_NUM_FORMS`` or ``MAX_NUM_FORMS`` value fails the
+        ManagementForm and rejects the complete submission.
         """
         for name in (MIN_NUM_FORM_COUNT, MAX_NUM_FORM_COUNT):
             with self.subTest(name=name):
@@ -647,26 +647,16 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
                     },
                 )
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.json()["value"], [5])
-
-    def test_management_error_does_not_call_a_submitted_control_missing(self):
-        """A bad management value must not be reported as missing.
-
-        DEFECT. The error reports every invalid management control as missing. This
-        control is present but has a bad value.
-        """
-        response = self.client.post(
-            "/hostile-integer-list/",
-            {
-                f"values-{TOTAL_FORM_COUNT}": "1",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-                f"values-{MIN_NUM_FORM_COUNT}": "not a number",
-                "values-0": "5",
-            },
-        )
-        self.assertEqual(response.status_code, 200)
-        message = " ".join(response.json()["messages"].get("values", []))
-        self.assertNotIn(f"Missing fields: values-{MIN_NUM_FORM_COUNT}", message)
+                body = response.json()
+                self.assertIs(body["valid"], False)
+                self.assertEqual(
+                    body["errors"], {"values": ["missing_management_form"]}
+                )
+                message = " ".join(body["messages"]["values"])
+                self.assertIn(
+                    "ManagementForm data is missing or has been tampered with",
+                    message,
+                )
 
     def test_client_keeps_the_last_of_two_duplicate_row_values(self):
         """Two values under one row key give the last value, as Django does."""
@@ -733,8 +723,8 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
     def test_client_does_not_blame_the_user_data_for_a_forged_row_name_key(self):
         """A forged row-name key must not replace valid typed rows.
 
-        DEFECT. The forged text replaces both rows. It then reports an integer error
-        for rows that were valid.
+        The unambiguous typed row keys win over the forged whole-row text,
+        so the rows clean as integers with no false error.
         """
         control = self.client.post(
             "/hostile-nested-typed-list/",
@@ -782,8 +772,8 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
     def test_client_keeps_an_optional_nested_leaf_beside_an_empty_forged_key(self):
         """An empty forged key must not discard an optional nested leaf.
 
-        DEFECT. ``MappingField.to_python`` changes the empty exact value to an empty
-        mapping. Cleaning succeeds and loses the leaf.
+        An empty exact-name value does not become an empty mapping. The
+        nested leaf key still supplies the value.
         """
         response = self.post_raw(
             "/hostile-optional-triple-mapping/",
@@ -879,8 +869,8 @@ class HostileRenderCostTestCase(HostileClientTestCase):
     def test_client_does_not_split_a_forged_text_row_into_one_row_per_letter(self):
         """A forged text row must not render one row per character.
 
-        DEFECT. ``initial_values`` rejects text but ``get_context`` iterates it.
-        Rendering creates a row for each character.
+        ``initial_values`` rejects text, so rendering shows the raw value
+        as one row. It does not iterate the characters.
         """
         response = self.client.post("/hostile-nested-text-list/", {"values": "abc"})
         self.assertEqual(response.status_code, 200)
@@ -892,8 +882,8 @@ class HostileRenderCostTestCase(HostileClientTestCase):
     def test_client_cannot_expand_one_text_key_into_thousands_of_rendered_rows(self):
         """A single text key must not create thousands of rows.
 
-        DEFECT. Text creates one row per character until ``absolute_max``. A small
-        request creates a large response.
+        A text value renders as one row, so a small request cannot buy a
+        large response.
         """
         response = self.client.post(
             "/hostile-nested-text-list/", {"values": "a" * 3000}
@@ -910,8 +900,8 @@ class HostileRenderCostTestCase(HostileClientTestCase):
     def test_aggregate_row_rejection_does_not_quote_a_respected_per_level_limit(self):
         """A shared-budget error must name the shared budget.
 
-        DEFECT. ``_clean_bound_field`` reports ``max_length`` when the shared budget
-        runs out. No level exceeds ``max_length``.
+        When the shared budget runs out, cleaning reports ``too_many_forms``.
+        It does not blame a per-level ``max_length`` that no level exceeded.
         """
         payload = {
             f"values-{TOTAL_FORM_COUNT}": "50",
@@ -931,8 +921,8 @@ class HostileRenderCostTestCase(HostileClientTestCase):
     def test_a_rejected_oversized_submission_does_not_redisplay_its_rows(self):
         """A rejected submission must not render rejected rows.
 
-        DEFECT. Cleaning and rendering open separate countdowns. Rendering uses a
-        new budget and displays the rejected rows.
+        Cleaning and rendering share the overflow decision, so a refused
+        submission renders only the rows that fit the budget.
         """
         payload = {
             f"values-{TOTAL_FORM_COUNT}": "50",

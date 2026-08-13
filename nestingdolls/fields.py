@@ -61,16 +61,18 @@ class CompositeField(Field):
         widget.input_type = "hidden"
         return widget
 
-    @staticmethod
-    def _hidden_initial_to_python(field: Field, value: object, /) -> object:
-        """Convert what one child's hidden initial widget submitted."""
-        if isinstance(field, CompositeField):
-            return field.children_from_hidden_initial(value)
-        return field.to_python(value)
-
-    def children_from_hidden_initial(self, value: object, /) -> object:
-        """Convert this field's children back from their hidden initial values."""
+    def from_hidden_initial(self, value: object, /) -> object:
+        """Convert this field's submitted hidden initial back to Python values."""
         return self.to_python(value)
+
+    @staticmethod
+    def _child_from_hidden_initial(field: Field, value: object, /) -> object:
+        """Convert one child's hidden initial. A file has no text form; keep it."""
+        if isinstance(field, FileField):
+            return value
+        if isinstance(field, CompositeField):
+            return field.from_hidden_initial(value)
+        return field.to_python(value)
 
 
 class MappingField(CompositeField):
@@ -93,18 +95,17 @@ class MappingField(CompositeField):
             cast(Mapping[str, Field], self.form_class.base_fields)  # type: ignore[attr-defined]
         )
 
-    @property
-    def output(self) -> Callable[..., object]:
-        """Return the callable that builds cleaned output."""
-        return self._output
+    output: Callable[..., object]
 
-    @output.setter
-    def output(self, value: Callable[..., object] | None) -> None:
-        if value is None:
-            value = dict
-        if not callable(value):
+    def _build_output(
+        self, output: Callable[..., object] | None
+    ) -> Callable[..., object]:
+        """Return the callable that builds cleaned output."""
+        if output is None:
+            return dict
+        if not callable(output):
             raise TypeError("output must be callable")
-        self._output = value
+        return output
 
     def __init__(
         self,
@@ -169,7 +170,7 @@ class MappingField(CompositeField):
         # Configure the copy that Django made, not the widget that the caller
         # gave.
         self.widget.configure(form_class)
-        self.output = output
+        self.output = self._build_output(output)
 
     def initial_value(self, value: object) -> dict[str, object]:
         """Return the initial value as a dict, or raise ``InvalidInitialValueError``."""
@@ -191,16 +192,16 @@ class MappingField(CompositeField):
             raise MappingInputValidationError(self.error_messages["invalid"])
         return dict(value)
 
-    def children_from_hidden_initial(self, value: object, /) -> object:
+    def from_hidden_initial(self, value: object, /) -> object:
         """Convert each member back from its hidden initial value."""
         # to_python() gives a mapping of members here, or raises for other input.
-        value = cast(dict[str, object], super().children_from_hidden_initial(value))
+        members = cast(dict[str, object], super().from_hidden_initial(value))
         for name, child_field in self.widget.fields.items():
-            # A file has no text form in a hidden input, so keep the value of a
-            # FileField child as it is.
-            if name in value and not isinstance(child_field, FileField):
-                value[name] = self._hidden_initial_to_python(child_field, value[name])
-        return value
+            if name in members:
+                members[name] = self._child_from_hidden_initial(
+                    child_field, members[name]
+                )
+        return members
 
     def compress(self, data: dict[str, object]) -> object:
         """Build the cleaned output from the child form data."""
@@ -329,14 +330,12 @@ Subform = MappingField
 class NamedTupleField(MappingField):
     """Clean a child form into a named tuple."""
 
-    @property
-    def output(self) -> Callable[..., object]:
-        return super().output
-
-    @output.setter
-    def output(self, value: Callable[..., object] | None) -> None:
-        if value is None:
-            self._output = cast(
+    def _build_output(
+        self, output: Callable[..., object] | None
+    ) -> Callable[..., object]:
+        """Return the named tuple class that builds cleaned output."""
+        if output is None:
+            return cast(
                 type[tuple[object, ...]],
                 namedtuple(
                     f"{self.form_class.__name__}Value",
@@ -344,22 +343,21 @@ class NamedTupleField(MappingField):
                     defaults=(None,) * len(self.inferred_names),
                 ),
             )
-            return
         if not (
-            isinstance(value, type)
-            and issubclass(value, tuple)
-            and hasattr(value, "_fields")
+            isinstance(output, type)
+            and issubclass(output, tuple)
+            and hasattr(output, "_fields")
         ):
             raise ImproperlyConfigured(
                 "output argument for NamedTupleField must be a named tuple class"
             )
         if frozenset(self.widget.fields) != frozenset(
-            cast(tuple[str, ...], value._fields)
+            cast(tuple[str, ...], output._fields)
         ):
             raise ImproperlyConfigured(
                 "form_class fields must match output._fields exactly"
             )
-        self._output = value
+        return output
 
     def initial_value(self, value: object) -> dict[str, object]:
         as_dict = getattr(value, "_asdict", None)
@@ -372,14 +370,12 @@ class NamedTupleField(MappingField):
 class DataclassField(MappingField):
     """Clean a child form into a dataclass."""
 
-    @property
-    def output(self) -> Callable[..., object]:
-        return super().output
-
-    @output.setter
-    def output(self, value: Callable[..., object] | None) -> None:
-        if value is None:
-            self._output = cast(
+    def _build_output(
+        self, output: Callable[..., object] | None
+    ) -> Callable[..., object]:
+        """Return the dataclass that builds cleaned output."""
+        if output is None:
+            return cast(
                 type[object],
                 dataclasses.make_dataclass(
                     f"{self.form_class.__name__}Value",
@@ -389,18 +385,17 @@ class DataclassField(MappingField):
                     ],
                 ),
             )
-            return
-        if not isinstance(value, type) or not dataclasses.is_dataclass(value):
+        if not isinstance(output, type) or not dataclasses.is_dataclass(output):
             raise ImproperlyConfigured(
                 "output argument for DataclassField must be a dataclass"
             )
         if frozenset(self.widget.fields) != frozenset(
-            field.name for field in dataclasses.fields(cast(Any, value))
+            field.name for field in dataclasses.fields(cast(Any, output))
         ):
             raise ImproperlyConfigured(
                 "form_class fields must match output fields exactly"
             )
-        self._output = value
+        return output
 
     def initial_value(self, value: object) -> dict[str, object]:
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
@@ -653,15 +648,11 @@ class SequenceField(CompositeField):
             raise SequenceInputValidationError(self.error_messages["invalid"])
         return value
 
-    def children_from_hidden_initial(self, value: object, /) -> object:
+    def from_hidden_initial(self, value: object, /) -> object:
         """Convert each row back from its hidden initial value."""
         # to_python() gives a list of rows here, or raises for other input.
-        value = cast(list[object], super().children_from_hidden_initial(value))
-        # A file has no text form in a hidden input, so keep the rows of a
-        # FileField child as they are.
-        if isinstance(self.child_field, FileField):
-            return value
-        return [self._hidden_initial_to_python(self.child_field, row) for row in value]
+        rows = cast(list[object], super().from_hidden_initial(value))
+        return [self._child_from_hidden_initial(self.child_field, row) for row in rows]
 
     def _clean_values(
         self,

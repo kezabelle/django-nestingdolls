@@ -75,16 +75,20 @@ class CompositeBoundField(BoundField):
         """Give the widget the submitted state, then let Django render it."""
         widget = widget or self.field.widget
         if isinstance(widget, CompositeWidget):
-            self.prepare_widget(widget, only_initial)
+            if only_initial:
+                # Django propagates a hidden initial only when the exact
+                # html_initial_name key was submitted. A composite hidden
+                # initial spans many keys, so rebuild it here instead.
+                widget.render_state = widget.RenderState(
+                    hidden_initial_value=self._hidden_initial_value(widget)
+                )
+            else:
+                self.prepare_widget(widget)
         return super().as_widget(widget, attrs, only_initial)
 
-    def prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
+    def prepare_widget(self, widget: CompositeWidget) -> None:
         """Put the submitted state this render needs on the widget."""
-        widget.render_state = widget.RenderState(
-            hidden_initial_value=self._hidden_initial_value(widget)
-            if only_initial
-            else None
-        )
+        widget.render_state = widget.RenderState()
 
     def _hidden_initial_value(self, widget: CompositeWidget) -> object:
         """Return a hidden initial rebuilt from the submitted composite keys."""
@@ -94,14 +98,19 @@ class CompositeBoundField(BoundField):
         return widget.value_from_datadict(self.form.data, self.form.files, name)
 
     def _has_changed(self) -> bool:
-        """Read hidden composite initial values through the composite widget."""
+        """Read hidden composite initial values through the composite widget.
+
+        This mirrors ``BoundField._has_changed`` with ``from_hidden_initial``
+        in place of ``to_python``. The ``disabled`` early return must stay:
+        a disabled field reports no change before the conversion can raise.
+        """
         if self.field.disabled:
             return False
         if not self.field.show_hidden_initial:
             return cast(bool, super()._has_changed())  # type: ignore[misc]
         widget = self.field.hidden_widget()
         try:
-            initial = self.field.children_from_hidden_initial(
+            initial = self.field.from_hidden_initial(
                 widget.value_from_datadict(
                     self.form.data, self.form.files, self.html_initial_name
                 )
@@ -237,21 +246,15 @@ class MappingBoundField(CompositeBoundField):
             return super()._has_changed()
         return self.subform.has_changed()
 
-    def prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
+    def prepare_widget(self, widget: CompositeWidget) -> None:
         """Give the mapping widget the child Form that holds the bound data."""
         if not isinstance(widget, MappingWidget):
-            return super().prepare_widget(widget, only_initial)
-        # A hidden initial render must not use the bound child Form, because
-        # that Form holds the prefix and the data of the visible render.
-        value = self._hidden_initial_value(widget) if only_initial else None
+            return super().prepare_widget(widget)
         widget.render_state = widget.RenderState(
-            hidden_initial_value=value,
-            subform=None if only_initial else self.subform,
+            subform=self.subform,
             initial_error=(
                 str(self.field.error_messages["invalid"])
-                if not only_initial
-                and self.initial is not None
-                and not isinstance(self.initial, Mapping)
+                if self.initial is not None and not isinstance(self.initial, Mapping)
                 else None
             ),
         )
@@ -300,14 +303,14 @@ class SequenceBoundField(CompositeBoundField):
     def formset(self) -> BaseFormSet[Any]:
         """Return the cached, prefix-aware row formset for cleaning and rendering."""
         initial_values = self.data if self.has_direct_value else self.initial
-        initial = self.field.widget.initial_formset_rows(initial_values)
+        initial = self.field.widget.initial_rows(initial_values)
         if (
             not initial
             and self.field.required
             and self.field.limits.min_length == 0
             and not self.is_bound_formset
         ):
-            initial = [self.field.widget.empty_formset_row()]
+            initial = [self.field.widget.empty_initial_row()]
         data: Mapping[str, object] | None
         files: MultiValueDict[str, UploadedFile[Any]] | None
         if self.has_direct_value and self.form.is_bound and not self.field.disabled:
@@ -316,7 +319,7 @@ class SequenceBoundField(CompositeBoundField):
             # its own row errors: Django gives an unbound form empty
             # errors, always, on purpose. Give each row its own key
             # instead, so the formset binds for real.
-            data = self.field.widget.direct_formset_rows(self.data, self.html_name)
+            data = self.field.widget.direct_rows(self.data, self.html_name)
             files = MultiValueDict()
         else:
             data = self.form.data if self.is_bound_formset else None
@@ -342,20 +345,16 @@ class SequenceBoundField(CompositeBoundField):
             return []
         return [form["value"].data for form in self.formset.forms]
 
-    def prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
+    def prepare_widget(self, widget: CompositeWidget) -> None:
         """Give the sequence widget the formset that owns row state."""
         if not isinstance(widget, SequenceWidget):
-            return super().prepare_widget(widget, only_initial)
-        if only_initial:
-            widget.render_state = widget.RenderState(
-                hidden_initial_value=self._hidden_initial_value(widget)
-            )
-        elif self.field.disabled:
+            return super().prepare_widget(widget)
+        if self.field.disabled:
             widget.render_state = widget.RenderState()
-        else:
-            widget.render_state = widget.RenderState(
-                formset=self.formset, submission_overflow=self.submission_overflow
-            )
+            return
+        widget.render_state = widget.RenderState(
+            formset=self.formset, submission_overflow=self.submission_overflow
+        )
 
     def value(self) -> object:
         """Let the row formset, not Field.prepare_value(), prepare row values."""
