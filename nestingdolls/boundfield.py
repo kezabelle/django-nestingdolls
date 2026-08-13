@@ -60,16 +60,11 @@ class CompositeBoundField(BoundField):
         )
 
     @cached_property
-    def input(self) -> CompositeWidget.Input:
-        """Cache this field's canonical submission cohort."""
-        return self.field.widget.read_input(
+    def data(self) -> object:
+        """Extract the submitted composite value exactly once."""
+        return self.field.widget.value_from_datadict(
             self.form.data, self.form.files, self.html_name
         )
-
-    @cached_property
-    def data(self) -> object:
-        """Return the value extracted from the cached submission cohort."""
-        return self.field.widget.value_from_input(self.input, self.html_name)
 
     def as_widget(
         self,
@@ -80,10 +75,10 @@ class CompositeBoundField(BoundField):
         """Give the widget the submitted state, then let Django render it."""
         widget = widget or self.field.widget
         if isinstance(widget, CompositeWidget):
-            self._prepare_widget(widget, only_initial)
+            self.prepare_widget(widget, only_initial)
         return super().as_widget(widget, attrs, only_initial)
 
-    def _prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
+    def prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
         """Put the submitted state this render needs on the widget."""
         widget.render_state = widget.RenderState(
             hidden_initial_value=self._hidden_initial_value(widget)
@@ -94,17 +89,9 @@ class CompositeBoundField(BoundField):
     def _hidden_initial_value(self, widget: CompositeWidget) -> object:
         """Return a hidden initial rebuilt from the submitted composite keys."""
         name = self.html_initial_name
-        input = widget.read_input(self.form.data, self.form.files, name)
-        if input.data or input.files:
-            return widget.value_from_input(input, name)
-        return self.value()
-
-    def _initial_from_flat_keys(self, source: Mapping[str, object]) -> object | None:
-        """Return an initial value rebuilt from flattened child keys, if present."""
-        input = self.field.widget.read_input(source, {}, self.name)
-        if not input.data and not input.files:
-            return None
-        return self.field.widget.value_from_input(input, self.name)
+        if widget.value_omitted_from_data(self.form.data, self.form.files, name):
+            return self.value()
+        return widget.value_from_datadict(self.form.data, self.form.files, name)
 
     def _has_changed(self) -> bool:
         """Read hidden composite initial values through the composite widget."""
@@ -161,18 +148,7 @@ class MappingBoundField(CompositeBoundField):
 
     @cached_property
     def initial(self) -> object:
-        """Return the initial mapping, and keep an unusable value as it is.
-
-        Initial data can use flat child keys, for example ``address-city``.
-        Read those keys when the initial data of the form has no key for this
-        field. Initial data uses the field's own ``name`` as its key.
-        Submitted data uses ``html_name`` instead. So this method reads
-        ``self.name``, while ``_data_input`` reads ``self.html_name``.
-        """
-        if self.form.initial and self.name not in self.form.initial:
-            value = self._initial_from_flat_keys(self.form.initial)
-            if isinstance(value, Mapping) and value:
-                return self.field.initial_value(value)
+        """Return the initial mapping, and keep an unusable value as it is."""
         value = super().initial
         try:
             return self.field.initial_value(value)
@@ -180,6 +156,23 @@ class MappingBoundField(CompositeBoundField):
             # Do not raise during a render. The widget can render a wrong
             # initial value, and validation reports the problem to the user.
             return value
+
+    @cached_property
+    def direct_value(self) -> object | None:
+        """Return the value submitted under this field's own exact key."""
+        if self.html_name in self.form.data:
+            return self.form.data.get(self.html_name)
+        if self.html_name in self.form.files:
+            return self.form.files.get(self.html_name)
+        return None
+
+    @cached_property
+    def has_wire_keys(self) -> bool:
+        """Report whether the browser sent prefixed child keys."""
+        widget = self.field.widget
+        return widget.has_child_keys(self.form.data, self.html_name) or (
+            widget.has_child_keys(self.form.files, self.html_name)
+        )
 
     @cached_property
     def is_bound_subform(self) -> bool:
@@ -198,17 +191,10 @@ class MappingBoundField(CompositeBoundField):
             return False
         if self.field.disabled:
             return False
-        input = self.input
-        if (
-            self.html_name in input.data
-            and not isinstance(input.data.get(self.html_name), Mapping)
-        ) or (
-            self.html_name in input.files
-            and not isinstance(input.files.get(self.html_name), Mapping)
-        ):
-            return False
-        if input.data or input.files:
+        if self.has_wire_keys:
             return True
+        if self.direct_value is not None:
+            return isinstance(self.direct_value, Mapping)
         return (
             isinstance(self.initial, dict)
             and bool(self.initial)
@@ -220,9 +206,12 @@ class MappingBoundField(CompositeBoundField):
         """Return the child Form for the clean step and for the render."""
         is_bound = self.is_bound_subform
         initial = self.initial
+        data, files = self.field.widget.bound_channels(
+            self.form.data, self.form.files, self.html_name
+        )
         subform = self.field.form_class(
-            data=self.input.data if is_bound else None,
-            files=cast("MultiValueDict[str, UploadedFile[Any]]", self.input.files)
+            data=data if is_bound else None,
+            files=cast("MultiValueDict[str, UploadedFile[Any]]", files)
             if is_bound
             else None,
             initial=initial if isinstance(initial, dict) else {},
@@ -248,10 +237,10 @@ class MappingBoundField(CompositeBoundField):
             return super()._has_changed()
         return self.subform.has_changed()
 
-    def _prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
+    def prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
         """Give the mapping widget the child Form that holds the bound data."""
         if not isinstance(widget, MappingWidget):
-            return super()._prepare_widget(widget, only_initial)
+            return super().prepare_widget(widget, only_initial)
         # A hidden initial render must not use the bound child Form, because
         # that Form holds the prefix and the data of the visible render.
         value = self._hidden_initial_value(widget) if only_initial else None
@@ -283,57 +272,56 @@ class SequenceBoundField(CompositeBoundField):
 
     @cached_property
     def is_bound_formset(self) -> bool:
-        """Report whether the narrowed browser submission binds a formset."""
-        input = self.input
-        return (
-            self.form.is_bound
-            and not self.field.disabled
-            and self.html_name not in input.data
-            and self.html_name not in input.files
-            and bool(input.data or input.files)
+        """Report whether the browser submission binds the row formset."""
+        if not self.form.is_bound or self.field.disabled or self.has_direct_value:
+            return False
+        widget = self.field.widget
+        return any(
+            widget.has_row_keys(source, self.html_name)
+            or widget.has_management_keys(source, self.html_name)
+            for source in (self.form.data, self.form.files)
         )
 
     @cached_property
-    def has_unflattened_value(self) -> bool:
-        """Report whether a direct value sits under this field's own exact key."""
-        input = self.input
-        return self.html_name in input.data or self.html_name in input.files
+    def has_direct_value(self) -> bool:
+        """Report whether a direct value sits under this field's own exact key.
+
+        Submitted row keys outrank the exact key, so a forged exact-name
+        key cannot replace real rows.
+        """
+        widget = self.field.widget
+        if widget.has_row_keys(self.form.data, self.html_name) or (
+            widget.has_row_keys(self.form.files, self.html_name)
+        ):
+            return False
+        return self.html_name in self.form.data or self.html_name in self.form.files
 
     @cached_property
     def formset(self) -> BaseFormSet[Any]:
         """Return the cached, prefix-aware row formset for cleaning and rendering."""
-        input = self.input
-        initial_values = self.data if self.has_unflattened_value else self.initial
-        initial = self.field.widget._initial_formset_rows(initial_values)
+        initial_values = self.data if self.has_direct_value else self.initial
+        initial = self.field.widget.initial_formset_rows(initial_values)
         if (
             not initial
             and self.field.required
             and self.field.limits.min_length == 0
             and not self.is_bound_formset
         ):
-            initial = [self.field.widget._empty_formset_row()]
-        data: MultiValueDict[str, object] | None
+            initial = [self.field.widget.empty_formset_row()]
+        data: Mapping[str, object] | None
         files: MultiValueDict[str, UploadedFile[Any]] | None
-        if (
-            self.has_unflattened_value
-            and self.form.is_bound
-            and not self.field.disabled
-        ):
+        if self.has_direct_value and self.form.is_bound and not self.field.disabled:
             # A direct value carries no browser row keys, so the row
             # formset would otherwise stay unbound and could never show
             # its own row errors: Django gives an unbound form empty
             # errors, always, on purpose. Give each row its own key
             # instead, so the formset binds for real.
-            data = self.field.widget._direct_formset_rows(self.data, self.html_name)
+            data = self.field.widget.direct_formset_rows(self.data, self.html_name)
             files = MultiValueDict()
         else:
-            data = input.data if self.is_bound_formset else None
-            files = (
-                cast("MultiValueDict[str, UploadedFile[Any]]", input.files)
-                if self.is_bound_formset
-                else None
-            )
-        formset = self.field.widget._new_formset(
+            data = self.form.data if self.is_bound_formset else None
+            files = self.form.files if self.is_bound_formset else None
+        formset = self.field.widget.new_formset(
             data=data,
             files=files,
             initial=initial,
@@ -346,19 +334,18 @@ class SequenceBoundField(CompositeBoundField):
     @cached_property
     def data(self) -> list[object]:
         """Return a whole sequence value or formset row values."""
-        if self.has_unflattened_value:
-            return self.field.widget.value_from_input(self.input, self.html_name)
+        if self.has_direct_value:
+            return self.field.widget.value_from_datadict(
+                self.form.data, self.form.files, self.html_name
+            )
         if not self.is_bound_formset:
             return []
-        values: list[object] = []
-        for form in self.formset.forms:
-            values.append(form["value"].data)
-        return values
+        return [form["value"].data for form in self.formset.forms]
 
-    def _prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
+    def prepare_widget(self, widget: CompositeWidget, only_initial: bool) -> None:
         """Give the sequence widget the formset that owns row state."""
         if not isinstance(widget, SequenceWidget):
-            return super()._prepare_widget(widget, only_initial)
+            return super().prepare_widget(widget, only_initial)
         if only_initial:
             widget.render_state = widget.RenderState(
                 hidden_initial_value=self._hidden_initial_value(widget)
@@ -377,15 +364,7 @@ class SequenceBoundField(CompositeBoundField):
     @cached_property
     def initial(self) -> list[object]:
         """Return the initial rows of this field."""
-        value: object = None
-        if self.form.initial and self.name not in self.form.initial:
-            value = self._initial_from_flat_keys(self.form.initial)
-        if value is None:
-            value = super().initial
-        if isinstance(value, Mapping) and (
-            (normalized := self._initial_from_flat_keys(value)) is not None
-        ):
-            value = normalized
+        value: object = super().initial
         try:
             value = self.field.initial_values(
                 value, limit=self.field.limits.absolute_max
@@ -405,7 +384,7 @@ class SequenceBoundField(CompositeBoundField):
         """Report whole-value edits and row-formset deletions."""
         changed = (
             self.field.has_changed(self.initial, self.data)
-            if self.has_unflattened_value
+            if self.has_direct_value
             else super()._has_changed()
         )
         if changed or self.field.disabled:

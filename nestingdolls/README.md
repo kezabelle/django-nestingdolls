@@ -165,8 +165,8 @@ a list.
 
 Both fields also accept flat input names. Use a child name for `DictField`.
 Use a numeric row index for `ListField`, joined to the field name with a
-dash: `point-x` or `values-0`. This dash style works for form data and
-initial values. It also works in nested fields.
+dash: `point-x` or `values-0`. This dash style works for form data, and it
+works in nested fields. Initial values use nested Python shapes only.
 
 ### Nested fields
 

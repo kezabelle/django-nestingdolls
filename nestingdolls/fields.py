@@ -3,8 +3,8 @@ from __future__ import annotations
 import copy
 import dataclasses
 from collections import namedtuple
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from itertools import chain, islice
+from collections.abc import Callable, Collection, Mapping, Sequence
+from itertools import islice
 from typing import Any, Self, cast
 
 from django.conf import settings
@@ -27,7 +27,6 @@ from nestingdolls.errors import (
     ItemValidationError,
     MappingInputValidationError,
     SequenceInputValidationError,
-    TooManyComparisonsError,
     TooManyFormsValidationError,
 )
 from nestingdolls.widgets import CompositeWidget, MappingWidget, SequenceWidget
@@ -101,6 +100,8 @@ class MappingField(CompositeField):
 
     @output.setter
     def output(self, value: Callable[..., object] | None) -> None:
+        if value is None:
+            value = dict
         if not callable(value):
             raise TypeError("output must be callable")
         self._output = value
@@ -117,7 +118,7 @@ class MappingField(CompositeField):
         help_text: str | Promise = "",
         error_messages: Mapping[str, str | Promise] | None = None,
         show_hidden_initial: bool = False,
-        output: Callable[..., object] | None = dict,
+        output: Callable[..., object] | None = None,
         validators: Sequence[Callable[[object], None]] = (),
         localize: bool = False,
         disabled: bool = False,
@@ -328,44 +329,6 @@ Subform = MappingField
 class NamedTupleField(MappingField):
     """Clean a child form into a named tuple."""
 
-    def __init__(
-        self,
-        form_class: type[BaseForm],
-        output: type[tuple[object, ...]] | None = None,
-        /,
-        *,
-        required: bool = True,
-        widget: MappingWidget | type[MappingWidget] | None = None,
-        label: str | Promise | None = None,
-        initial: object | Callable[[], object] | None = None,
-        help_text: str | Promise = "",
-        error_messages: Mapping[str, str | Promise] | None = None,
-        show_hidden_initial: bool = False,
-        validators: Sequence[Callable[[tuple[object, ...] | None], None]] = (),
-        localize: bool = False,
-        disabled: bool = False,
-        label_suffix: str | None = None,
-        template_name: str | None = None,
-        bound_field_class: type[MappingBoundField] | None = None,
-    ) -> None:
-        super().__init__(
-            form_class,
-            required=required,
-            widget=widget,
-            label=label,
-            initial=initial,
-            help_text=help_text,
-            error_messages=error_messages,
-            show_hidden_initial=show_hidden_initial,
-            output=output,
-            validators=cast(Sequence[Callable[[object], None]], validators),
-            localize=localize,
-            disabled=disabled,
-            label_suffix=label_suffix,
-            template_name=template_name,
-            bound_field_class=bound_field_class,
-        )
-
     @property
     def output(self) -> Callable[..., object]:
         return super().output
@@ -408,44 +371,6 @@ class NamedTupleField(MappingField):
 
 class DataclassField(MappingField):
     """Clean a child form into a dataclass."""
-
-    def __init__(
-        self,
-        form_class: type[BaseForm],
-        output: type[object] | None = None,
-        /,
-        *,
-        required: bool = True,
-        widget: MappingWidget | type[MappingWidget] | None = None,
-        label: str | Promise | None = None,
-        initial: object | Callable[[], object] | None = None,
-        help_text: str | Promise = "",
-        error_messages: Mapping[str, str | Promise] | None = None,
-        show_hidden_initial: bool = False,
-        validators: Sequence[Callable[[object | None], None]] = (),
-        localize: bool = False,
-        disabled: bool = False,
-        label_suffix: str | None = None,
-        template_name: str | None = None,
-        bound_field_class: type[MappingBoundField] | None = None,
-    ) -> None:
-        super().__init__(
-            form_class,
-            required=required,
-            widget=widget,
-            label=label,
-            initial=initial,
-            help_text=help_text,
-            error_messages=error_messages,
-            show_hidden_initial=show_hidden_initial,
-            output=output,
-            validators=validators,
-            localize=localize,
-            disabled=disabled,
-            label_suffix=label_suffix,
-            template_name=template_name,
-            bound_field_class=bound_field_class,
-        )
 
     @property
     def output(self) -> Callable[..., object]:
@@ -639,13 +564,7 @@ class SequenceField(CompositeField):
             # Limits does not know about `required`, so this check belongs
             # here.
             raise ValueError("max_length=0 requires required=False")
-        if (
-            initial is not None
-            and not callable(initial)
-            # A mapping initial holds flat row keys, not a collection of
-            # rows. SequenceBoundField.initial reads those flat keys.
-            and not isinstance(initial, Mapping)
-        ):
+        if initial is not None and not callable(initial):
             try:
                 initial_values = self.initial_values(initial)
             except InvalidInitialValueError:
@@ -696,9 +615,8 @@ class SequenceField(CompositeField):
         field and its widget. This method re-points the copy, to break
         that sharing.
 
-        ``result.widget.limits`` and ``.keys`` need no such fix. Both
-        are frozen ``slots`` dataclasses, and neither holds per-form
-        state.
+        ``result.widget.limits`` needs no such fix. It is a frozen
+        ``slots`` dataclass and holds no per-form state.
         """
         result = super().__deepcopy__(memo)
         result.child_field = copy.deepcopy(self.child_field, memo)
@@ -789,8 +707,7 @@ class SequenceField(CompositeField):
                 Collection[object],
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
-        input = bound_field.input
-        if bound_field.html_name in input.data or bound_field.html_name in input.files:
+        if bound_field.has_direct_value:
             return self._clean_values(bound_field.data, bound_field.initial)
         if not bound_field.is_bound_formset:
             if isinstance(self.child_field, FileField) and bound_field.initial:
@@ -980,160 +897,46 @@ class SetField(SequenceField):
                 self.error_messages["unhashable"], code="unhashable"
             ) from error
 
-    @dataclasses.dataclass(slots=True)
-    class Match:
-        """Match the rows that the browser sent to the initial members.
-
-        A set has no order, so one row can agree with any member. The child
-        field decides whether a row and a member are the same, because only it
-        knows how it reads its own input. This object claims one member for
-        each row that it can match, and it reports whether the rows claimed
-        every member. A field builds a new object for each comparison, because
-        a claim changes the object. This is the one holder that is not frozen.
-
-        ``members_left`` is the number of members the comparison may still
-        look at. An
-        attacker controls the rows, up to ``absolute_max``. The members come
-        from the server. Without this count, the scan cost is quadratic in a
-        number that the attacker picks. This count belongs to one comparison
-        only. It is deliberately not the row count of an extraction: a
-        comparison must not fail because an earlier extraction built rows.
-        """
-
-        child_field: Field
-        members: list[object]
-        members_left: int = 0
-        claimed: set[int] = dataclasses.field(default_factory=set)
-        # Members come from a set. They are unique under __hash__/__eq__.
-        # So one index per key is enough.
-        _indexed: dict[object, int] = dataclasses.field(init=False, repr=False)
-
-        def __post_init__(self) -> None:
-            # compress() refused an unhashable member already, so every member
-            # can go into the index.
-            self._indexed = {member: index for index, member in enumerate(self.members)}
-
-        def _candidate(self, value: object) -> int | None:
-            """Return the member index that hashes equal to one row, if there is one.
-
-            The index only helps when the child's ``to_python()`` agrees with
-            its ``clean()``. Members hold cleaned values, and this lookup uses
-            the converted row. A coercing child, such as ``TypedChoiceField``
-            or ``ModelChoiceField``, always misses the index. It falls back to
-            the full scan.
-
-            Return None when the row is unhashable, or matches no member.
-            ``claim()`` then reads every member.
-            """
-            try:
-                return self._indexed.get(value)
-            except TypeError:
-                # A compound child value can be unhashable. Give no candidate,
-                # and let claim() do the full scan.
-                return None
-
-        def claim(self, row: object, value: object) -> bool:
-            """Claim one member for a row, and report whether it found one.
-
-            Look at an unclaimed member first, so two equal rows never
-            compete for the same member. If none of those match, look at
-            the claimed members too: duplicate rows collapse into one set
-            member, so a repeat of an already-matched row must still count
-            as matched, even though it claims nothing new.
-
-            Raise ``TooManyComparisonsError`` when the comparison has looked
-            at ``members_left`` members already.
-            """
-            candidate = self._candidate(value)
-            for index in self._members_to_check(candidate):
-                if index in self.claimed:
-                    continue
-                if self._member_matches(index, row):
-                    self.claimed.add(index)
-                    return True
-            for index in self._members_to_check(candidate):
-                if index not in self.claimed:
-                    continue
-                if self._member_matches(index, row):
-                    return True
-            return False
-
-        def _members_to_check(self, candidate: int | None) -> Iterator[int]:
-            """Yield each member index to check, and count each one.
-
-            The hash candidate comes first, because it is usually the only
-            member a row has to check. ``has_changed()`` against every member
-            is expensive.
-
-            This is lazy on purpose. A row that matches its candidate never
-            walks the other members, and it never builds a list of them. The
-            count lives here, so no caller can read a member without paying
-            for it.
-            """
-            if candidate is None:
-                order: Iterable[int] = range(len(self.members))
-            else:
-                order = chain(
-                    (candidate,),
-                    (i for i in range(len(self.members)) if i != candidate),
-                )
-            for index in order:
-                if not self.members_left:
-                    raise TooManyComparisonsError("comparison limit reached")
-                self.members_left -= 1
-                yield index
-
-        def _member_matches(self, index: int, row: object) -> bool:
-            """Report whether one member equals a row."""
-            return not self.child_field.has_changed(self.members[index], row)
-
-        @property
-        def complete(self) -> bool:
-            """Report whether the submitted rows claimed every member."""
-            return len(self.claimed) == len(self.members)
-
     def has_changed(self, initial: object, data: object) -> bool:
-        """Compare semantic set members, not raw row order or raw row spelling.
+        """Compare set members; anything ambiguous counts as a change.
 
-        This method gets the raw rows of the browser, but the initial members
-        are Python values that the field cleaned already. A comparison with
-        ``==`` would be wrong for a child field that changes its input, or that
-        uses a compound widget.
+        Pair each row with the member its converted value hashes to, then
+        let the child field compare the pair, because only the child knows
+        how it reads its own input. A row that pairs with no member is a
+        change, unless the child says the row is blank. The safe direction
+        is "changed": a missed change loses data, an extra change costs one
+        save. A coercing or compound child, whose converted rows never hash
+        to a member (``TypedChoiceField``, ``MultipleChoiceField``),
+        therefore reports changed.
         """
         if self.disabled:
             return False
         if isinstance(data, list) and len(data) > self.limits.absolute_max:
             return True
         try:
-            members = list(self.compress(self.initial_values(initial)))
+            members = self.compress(self.initial_values(initial))
+            rows = self.to_python(data)
         except (InvalidInitialValueError, ValidationError):
             return True
-        try:
-            data = self.to_python(data)
-        except ValidationError:
-            return True
-
-        match = self.Match(
-            self.child_field,
-            members,
-            # Headroom over the hash fast path. A submission that needs more
-            # steps than this counts as changed. That is the safe direction.
-            # A missed change loses data. An extra change only costs one save.
-            members_left=4 * (len(members) + len(data)) + 32,
-        )
-        try:
-            for row in data:
-                try:
-                    value = self.child_field.to_python(row)
-                except (TypeError, ValidationError):
+        # Members are unique under __hash__/__eq__, so one key per member
+        # is enough. The dict returns the stored member, not the probe
+        # value: JSONField must compare True against "1", not 1.
+        paired = {member: member for member in members}
+        matched: set[object] = set()
+        unmatched = object()
+        for row in rows:
+            try:
+                member = paired.get(self.child_field.to_python(row), unmatched)
+            except (TypeError, ValidationError):
+                return True
+            if member is unmatched:
+                if self.child_field.has_changed(None, row):
                     return True
-                if not match.claim(row, value) and (
-                    self.child_field.has_changed(None, row)
-                ):
-                    return True
-        except (TypeError, ValidationError, TooManyComparisonsError):
-            return True
-        return not match.complete
+                continue
+            if self.child_field.has_changed(member, row):
+                return True
+            matched.add(member)
+        return len(matched) != len(members)
 
 
 class FrozenSetField(SetField):

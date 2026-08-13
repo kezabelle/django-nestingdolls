@@ -14,6 +14,7 @@ from django.forms.formsets import (
     MAX_NUM_FORM_COUNT,
     MIN_NUM_FORM_COUNT,
     TOTAL_FORM_COUNT,
+    ManagementForm,
     formset_factory,
 )
 from django.forms.widgets import Media as WidgetMedia
@@ -27,61 +28,25 @@ if TYPE_CHECKING:
     from nestingdolls.fields import SequenceField
 
 
+_MANAGEMENT_NAMES = (
+    TOTAL_FORM_COUNT,
+    INITIAL_FORM_COUNT,
+    MIN_NUM_FORM_COUNT,
+    MAX_NUM_FORM_COUNT,
+)
+
+
+def _getlist(data: Mapping[str, object], key: str) -> list[object]:
+    """Read repeated values through Django's mapping protocol."""
+    if key not in data:
+        return []
+    getlist = getattr(data, "getlist", None)
+    if getlist is None:
+        return [data[key]]
+    return cast("list[object]", list(getlist(key)))
+
+
 class CompositeWidget(Widget):
-    class Keys:
-        """Namespace the key operations shared by composite widgets."""
-
-        __slots__ = ()
-
-        @staticmethod
-        def child_key(key: object, name: str) -> str | None:
-            """Return the dash-prefixed child part of a composite key."""
-            if not isinstance(key, str):
-                return None
-            prefix = f"{name}-"
-            if not key.startswith(prefix):
-                return None
-            child_key = key.removeprefix(prefix)
-            return child_key or None
-
-        @staticmethod
-        def values_for(data: Mapping[str, object], key: str) -> list[object]:
-            """Read repeated values through Django's mapping protocol."""
-            if key not in data:
-                return []
-            try:
-                return list(data.getlist(key))  # type: ignore[attr-defined]
-            except AttributeError:
-                return [data.get(key)]
-
-        def copy_values(
-            self,
-            result: MultiValueDict[str, object],
-            data: Mapping[str, object],
-            source: str,
-            target: str,
-        ) -> None:
-            """Copy input values from one key to another."""
-            result.setlist(target, self.values_for(data, source))
-
-        def canonical(self, key: object, name: str) -> str | None:
-            """Return an accepted child key, or ``None``."""
-            child_key = self.child_key(key, name)
-            if child_key is None or not self._valid_child(child_key):
-                return None
-            return f"{name}-{child_key}"
-
-        def _valid_child(self, child_key: str) -> bool:
-            """Report whether one child key part is acceptable to this composite."""
-            raise NotImplementedError
-
-    @dataclasses.dataclass(frozen=True, slots=True)
-    class Input:
-        """Hold the canonical data and file values of one submission."""
-
-        data: MultiValueDict[str, object]
-        files: MultiValueDict[str, object]
-
     @dataclasses.dataclass(frozen=True, slots=True)
     class RenderState:
         """Hold the submitted state that one render of a composite widget needs."""
@@ -92,17 +57,8 @@ class CompositeWidget(Widget):
     input_type: str | None = None
     render_state: RenderState = RenderState()
 
-    def read_input(
-        self,
-        data: Mapping[str, object],
-        files: Mapping[str, object],
-        name: str,
-    ) -> Input:
-        """Read one submission into this widget's canonical input cohort."""
-        raise NotImplementedError
-
-    def value_from_input(self, input: Input, name: str) -> object:
-        """Extract this widget's value from a canonical input cohort."""
+    def _accepts_key(self, key: object, name: str) -> bool:
+        """Report whether one submitted key belongs to this composite."""
         raise NotImplementedError
 
     def _child_widget(self, field: Field) -> Widget:
@@ -139,15 +95,6 @@ class CompositeWidget(Widget):
         """Return the media of the children this widget renders."""
         raise NotImplementedError
 
-    def value_from_datadict(
-        self,
-        data: Mapping[str, object],
-        files: Mapping[str, object],
-        name: str,
-    ) -> object:
-        """Read once and extract the submitted composite value."""
-        return self.value_from_input(self.read_input(data, files, name), name)
-
     def value_omitted_from_data(
         self,
         data: Mapping[str, object],
@@ -155,8 +102,9 @@ class CompositeWidget(Widget):
         name: str,
     ) -> bool:
         """Report whether no supported composite input was submitted."""
-        input = self.read_input(data, files, name)
-        return not input.data and not input.files
+        return not any(
+            self._accepts_key(key, name) for source in (data, files) for key in source
+        )
 
     def use_required_attribute(self, initial: object) -> bool:
         return False
@@ -187,113 +135,112 @@ class MappingWidget(CompositeWidget):
 
     render_state: RenderState = RenderState()
 
-    @dataclasses.dataclass(frozen=True)
-    class Keys(CompositeWidget.Keys):
-        """Normalize the declared child keys of one mapping field.
-
-        It holds the child Form class and gets its names from an instance, so
-        the names include fields that ``__init__`` adds. This dataclass has no
-        ``slots``, because ``cached_property`` needs the instance dictionary.
-        """
-
-        form_class: type[BaseForm]
-
-        @cached_property
-        def names(self) -> tuple[str, ...]:
-            """Return the declared child names of the child Form."""
-            return tuple(self.form_class().fields)
-
-        def _valid_child(self, child_key: str) -> bool:
-            """Report whether the child key names a declared field of the child Form."""
-            return any(
-                child_key == child_name
-                or child_key.startswith(f"{child_name}{separator}")
-                for child_name in self.names
-                for separator in ("_", "-")
-            )
-
-    keys: Keys
-
     def configure(self, form_class: type[BaseForm]) -> None:
         """Store the configuration of the field that owns this widget.
 
         Django copies a widget before a field uses it, so the field calls this
-        method on its own copy. This method makes a new key reader, because a
-        key reader must read the child names of this Form class only.
+        method on its own copy.
         """
         self.form_class = form_class
-        self.keys = self.Keys(form_class)
 
     @cached_property
     def fields(self) -> dict[str, Field]:
         """Return the fields of one instance of the child Form."""
         return self.form_class().fields
 
-    def read_input(
+    def _accepts_key(self, key: object, name: str) -> bool:
+        """Report whether the key is this field's own name or a declared child key."""
+        if not isinstance(key, str):
+            return False
+        if key == name:
+            return True
+        child_key = key.removeprefix(f"{name}-")
+        if child_key == key:
+            return False
+        # A widget may extend its own name, such as ``birthday_day`` or
+        # ``time_0``, so accept a declared name with a suffix too.
+        return any(
+            child_key == child_name
+            or child_key.startswith((f"{child_name}-", f"{child_name}_"))
+            for child_name in self.fields
+        )
+
+    def has_child_keys(self, source: Mapping[str, object], name: str) -> bool:
+        """Report whether one channel holds any declared child key."""
+        return any(key != name and self._accepts_key(key, name) for key in source)
+
+    def direct_data(
+        self, value: Mapping[str, object], name: str
+    ) -> MultiValueDict[str, object]:
+        """Give each member of a direct mapping value its own child key.
+
+        Every composite child already reads a value under its own exact key
+        as a direct value, so one expansion makes a direct submission bind
+        exactly like a browser submission. ``getlist`` semantics survive, so
+        repeated values still reach child widgets that consume all of them.
+        """
+        expanded = MultiValueDict[str, object]()
+        for child_name in self.fields:
+            if child_name in value:
+                expanded.setlist(f"{name}-{child_name}", _getlist(value, child_name))
+        return expanded
+
+    def bound_channels(
         self,
         data: Mapping[str, object],
         files: Mapping[str, object],
         name: str,
-    ) -> CompositeWidget.Input:
-        """Canonicalize declared children in each input channel once."""
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        """Return both channels with a direct mapping value expanded to child keys."""
+        data_value = data.get(name) if name in data else None
+        if isinstance(data_value, Mapping):
+            data = self.direct_data(data_value, name)
+        files_value = files.get(name) if name in files else None
+        if isinstance(files_value, Mapping):
+            files = self.direct_data(files_value, name)
+        return data, files
 
-        def canonicalize(source: Mapping[str, object]) -> MultiValueDict[str, object]:
-            result = MultiValueDict[str, object]()
-            if name in source and isinstance(source.get(name), Mapping):
-                value = source.get(name)
-                assert isinstance(value, Mapping)
-                for child_name in self.keys.names:
-                    if child_name in value:
-                        self.keys.copy_values(
-                            result, value, child_name, f"{name}-{child_name}"
-                        )
-                return result
-            for source_key in source:
-                if (target := self.keys.canonical(source_key, name)) is None:
-                    continue
-                previous = result.getlist(target)
-                self.keys.copy_values(result, source, source_key, target)
-                if previous:
-                    previous.extend(result.getlist(target))
-                    result.setlist(target, previous)
-            if not result and name in source:
-                self.keys.copy_values(result, source, name, name)
-            return result
+    def value_from_datadict(
+        self,
+        data: Mapping[str, object],
+        files: Mapping[str, object],
+        name: str,
+    ) -> object:
+        """Extract child values, or return an unreadable direct value as it is."""
+        data, files = self.bound_channels(data, files, name)
+        data_submitted = self.has_child_keys(data, name)
+        if not data_submitted and name in data:
+            # A scalar under the exact name has no children to distribute.
+            # Return it, so that to_python() reports the "invalid" error.
+            return data.get(name)
+        if data_submitted or self.has_child_keys(files, name):
+            return self._extract_children(data, files, name)
+        if name in files:
+            return files.get(name)
+        return {}
 
-        return self.Input(canonicalize(data), canonicalize(files))
-
-    def value_from_input(self, input: CompositeWidget.Input, name: str) -> object:
-        """Extract child values from canonical data and files."""
-        if name in input.data:
-            return input.data.get(name)
-        if name in input.files and not input.data:
-            return input.files.get(name)
-        if not input.data and not input.files:
-            return {}
-
+    def _extract_children(
+        self,
+        data: Mapping[str, object],
+        files: Mapping[str, object],
+        name: str,
+    ) -> dict[str, object]:
+        """Collect each submitted child value under its declared name."""
         value: dict[str, object] = {}
         for child_name, field in self.fields.items():
             child_widget = self._child_widget(field)
             input_name = f"{name}-{child_name}"
-            if isinstance(child_widget, CompositeWidget):
-                child_input = child_widget.read_input(
-                    input.data, input.files, input_name
-                )
-                if not child_input.data and not child_input.files:
-                    continue
-                value[child_name] = child_widget.value_from_input(
-                    child_input, input_name
-                )
-            elif not child_widget.value_omitted_from_data(
-                input.data,
-                cast("MultiValueDict[str, UploadedFile[Any]]", input.files),
+            if child_widget.value_omitted_from_data(
+                data,
+                cast("MultiValueDict[str, UploadedFile[Any]]", files),
                 input_name,
             ):
-                value[child_name] = child_widget.value_from_datadict(
-                    input.data,
-                    cast("MultiValueDict[str, UploadedFile[Any]]", input.files),
-                    input_name,
-                )
+                continue
+            value[child_name] = child_widget.value_from_datadict(
+                data,
+                cast("MultiValueDict[str, UploadedFile[Any]]", files),
+                input_name,
+            )
         return value
 
     def get_context(
@@ -430,7 +377,7 @@ class SequenceWidget(CompositeWidget):
                     is_delete_key = key == delete_key
                     if not is_row_key or is_delete_key:
                         continue
-                    values = self.sequence_widget.keys.values_for(source, key)
+                    values = _getlist(source, key)
                     has_non_blank_value = any(
                         value not in (None, "") for value in values
                     )
@@ -465,40 +412,37 @@ class SequenceWidget(CompositeWidget):
             self._submission_total_form_count = allowed
             return allowed
 
-    @dataclasses.dataclass(frozen=True, slots=True)
-    class Keys(CompositeWidget.Keys):
-        """Accept only row keys a configured sequence can build.
+        @cached_property
+        def management_form(self) -> ManagementForm:
+            """Read TOTAL and INITIAL from the submission; supply MIN and MAX here.
 
-        A nested sequence receives untrusted row indexes. This parser rejects
-        indexes outside the formset hard cap and digit runs too long to name a
-        permitted row before the widget copies them into its narrowed input.
-        """
-
-        absolute_max: int
-
-        max_index_digits: ClassVar[int] = 7
-
-        def __post_init__(self) -> None:
-            if self.absolute_max >= 10**self.max_index_digits:
-                raise ValueError("absolute_max must be less than 10000000")
-
-        def _valid_child(self, child_key: str) -> bool:
-            """Report whether the child key is a management key or an in-range row index."""
-            if child_key in (
-                TOTAL_FORM_COUNT,
-                INITIAL_FORM_COUNT,
-                MIN_NUM_FORM_COUNT,
-                MAX_NUM_FORM_COUNT,
-            ):
-                return True
-            end = 0
-            while end < len(child_key) and "0" <= child_key[end] <= "9":
-                end += 1
-                if end > self.max_index_digits:
-                    return False
-            if end == 0 or (end < len(child_key) and child_key[end] not in "-_"):
-                return False
-            return int(child_key[:end]) < self.absolute_max
+            Django never checks the submitted MIN_NUM and MAX_NUM values, but
+            a junk value would still fail the ManagementForm's own field
+            validation and reject good rows. Bind the form to the two counts
+            the browser owns plus the two limits the server owns.
+            """
+            if not self.is_bound:
+                return super().management_form
+            data = {
+                self.add_prefix(MIN_NUM_FORM_COUNT): str(
+                    self.sequence_widget.limits.min_length
+                ),
+                self.add_prefix(MAX_NUM_FORM_COUNT): str(
+                    self.sequence_widget.limits.max_length
+                ),
+            }
+            for field_name in (TOTAL_FORM_COUNT, INITIAL_FORM_COUNT):
+                key = self.add_prefix(field_name)
+                if key in self.data:
+                    data[key] = cast(str, self.data[key])
+            form = ManagementForm(
+                data,
+                auto_id=self.auto_id,
+                prefix=self.prefix,
+                renderer=self.renderer,  # type: ignore[attr-defined]
+            )
+            form.full_clean()
+            return form
 
     @dataclasses.dataclass(slots=True)
     class submission_countdown:
@@ -608,7 +552,6 @@ class SequenceWidget(CompositeWidget):
         """Store the configuration of this field's private widget copy."""
         self.child_field = child_field
         self.limits = limits
-        self.keys = self.Keys(limits.absolute_max)
         self.__dict__.pop("formset_class", None)
 
     @cached_property
@@ -630,7 +573,7 @@ class SequenceWidget(CompositeWidget):
             ),
         )
 
-    def _new_formset(
+    def new_formset(
         self,
         *,
         data: Mapping[str, object] | None = None,
@@ -651,7 +594,7 @@ class SequenceWidget(CompositeWidget):
         formset.sequence_widget = self
         return formset
 
-    def _direct_formset_rows(
+    def direct_formset_rows(
         self, values: Sequence[object], name: str
     ) -> MultiValueDict[str, object]:
         """Give each row of a direct value its own key.
@@ -673,206 +616,78 @@ class SequenceWidget(CompositeWidget):
         total = str(len(values))
         rows[f"{name}-{TOTAL_FORM_COUNT}"] = total
         rows[f"{name}-{INITIAL_FORM_COUNT}"] = total
-        rows[f"{name}-{MIN_NUM_FORM_COUNT}"] = str(self.limits.min_length)
-        rows[f"{name}-{MAX_NUM_FORM_COUNT}"] = str(self.limits.max_length)
         return rows
 
-    def read_input(
+    def _accepts_key(self, key: object, name: str) -> bool:
+        """Report whether the key is this field's own name, a management key, or a row key."""
+        if not isinstance(key, str):
+            return False
+        if key == name:
+            return True
+        child_key = key.removeprefix(f"{name}-")
+        if child_key == key or not child_key:
+            return False
+        if child_key in _MANAGEMENT_NAMES:
+            return True
+        return "0" <= child_key[0] <= "9"
+
+    def has_row_keys(self, source: Mapping[str, object], name: str) -> bool:
+        """Report whether one channel holds any per-row browser key."""
+        prefix = f"{name}-"
+        return any(
+            isinstance(key, str)
+            and len(key) > len(prefix)
+            and key.startswith(prefix)
+            and "0" <= key[len(prefix)] <= "9"
+            for key in source
+        )
+
+    def has_management_keys(self, source: Mapping[str, object], name: str) -> bool:
+        """Report whether one channel holds any formset management key."""
+        return any(f"{name}-{field_name}" in source for field_name in _MANAGEMENT_NAMES)
+
+    def value_from_datadict(
         self,
         data: Mapping[str, object],
         files: Mapping[str, object],
         name: str,
-    ) -> CompositeWidget.Input:
-        """Narrow both request channels to this sequence exactly once."""
-        input_data = MultiValueDict[str, object]()
-        input_files = MultiValueDict[str, object]()
-        prefix = f"{name}-"
-        has_flattened_rows = False
-        has_formset_data = False
+    ) -> list[object]:
+        """Extract a whole direct value or bound formset rows.
 
-        for source, target in ((data, input_data), (files, input_files)):
-            for key in source:
-                if key == name:
-                    self.keys.copy_values(target, source, key, key)
-                    continue
-                canonical = self.keys.canonical(key, name)
-                if canonical is not None:
-                    self.keys.copy_values(target, source, key, canonical)
-                    has_formset_data = True
-                if (
-                    isinstance(key, str)
-                    and len(key) > len(prefix)
-                    and key.startswith(prefix)
-                    and "0" <= key[len(prefix)] <= "9"
-                ):
-                    has_flattened_rows = True
-                    has_formset_data = True
-
-        if has_flattened_rows:
-            input_data.pop(name, None)
-            input_files.pop(name, None)
-        if not has_formset_data:
-            if self.keys.values_for(input_data, name) or self.keys.values_for(
-                input_files, name
+        Row keys outrank a value under the field's own exact name, so a
+        forged exact-name key cannot replace submitted rows. Without row
+        keys, a direct value wins over management keys alone.
+        """
+        has_rows = self.has_row_keys(data, name) or self.has_row_keys(files, name)
+        if not has_rows:
+            direct_values = _getlist(data, name) or _getlist(files, name)
+            if direct_values:
+                values = (
+                    direct_values[0]
+                    if len(direct_values) == 1 and isinstance(direct_values[0], list)
+                    else direct_values
+                )
+                with self.submission_countdown(self.limits.submission_max) as countdown:
+                    return values[: countdown.take(len(values))]
+            if not self.has_management_keys(data, name) and not (
+                self.has_management_keys(files, name)
             ):
-                return self.Input(input_data, input_files)
-            return self.Input(MultiValueDict(), MultiValueDict())
-        for field_name, value in (
-            (MIN_NUM_FORM_COUNT, self.limits.min_length),
-            (MAX_NUM_FORM_COUNT, self.limits.max_length),
-        ):
-            input_data[f"{name}-{field_name}"] = str(value)
-        return self.Input(input_data, input_files)
-
-    def value_from_input(self, input: CompositeWidget.Input, name: str) -> list[object]:
-        """Extract a whole sequence value or flattened formset rows."""
-        unflattened_values = self.keys.values_for(input.data, name)
-        if not unflattened_values:
-            unflattened_values = self.keys.values_for(input.files, name)
-        if unflattened_values:
-            values = (
-                unflattened_values[0]
-                if len(unflattened_values) == 1
-                and isinstance(unflattened_values[0], list)
-                else unflattened_values
-            )
-            with self.submission_countdown(self.limits.submission_max) as countdown:
-                return values[: countdown.take(len(values))]
-        if not input.data and not input.files:
-            return []
-        formset = self._new_formset(
-            data=input.data,
-            files=cast("MultiValueDict[str, UploadedFile[Any]]", input.files),
+                return []
+        formset = self.new_formset(
+            data=data,
+            files=cast("MultiValueDict[str, UploadedFile[Any]]", files),
             prefix=name,
         )
         return [form["value"].data for form in formset.forms]
 
-    def _initial_formset_rows(
+    def initial_formset_rows(
         self, value: Sequence[object] | None
     ) -> list[dict[str, object]]:
         """Adapt public sequence values to the concrete row form's initial data."""
         return [{"value": row} for row in value or ()]
 
-    def _empty_formset_row(self) -> dict[str, object]:
+    def empty_formset_row(self) -> dict[str, object]:
         return {"value": None}
-
-    def _get_context(
-        self,
-        name: str,
-        value: Sequence[object] | None,
-        attrs: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        """Render row forms while keeping the established template context shape."""
-        context = super().get_context(name, value, attrs)
-        final_attrs = context["widget"]["attrs"]
-        final_attrs.pop("aria-invalid", None)
-        id_ = final_attrs.get("id")
-        disabled = bool(final_attrs.get("disabled"))
-        if self.is_hidden and self.render_state.hidden_initial_value is not None:
-            value = cast(Sequence[object], self.render_state.hidden_initial_value)
-        formset = self.render_state.formset
-        if formset is None:
-            initial = self._initial_formset_rows(value)
-            if not initial and self.is_required and self.limits.min_length == 0:
-                initial = [self._empty_formset_row()]
-            formset = self._new_formset(initial=initial, prefix=name)
-
-        if self.render_state.submission_overflow:
-            formset = self._new_formset(initial=[], prefix=name)
-
-        management_form = formset.management_form
-        if not self.is_hidden:
-            management_form.fields[TOTAL_FORM_COUNT].widget.attrs[
-                "data-sequence-total"
-            ] = ""
-        if disabled:
-            for management_field in management_form.fields.values():
-                management_field.widget.attrs["disabled"] = True
-
-        forms = formset.forms
-        deleted_forms = {
-            id(form)
-            for form in forms
-            if getattr(form, "cleaned_data", {}).get(DELETION_FIELD_NAME)
-        }
-
-        def make_row(form: BaseForm, index: int | str) -> dict[str, object]:
-            child_attrs = final_attrs.copy()
-            if id_:
-                child_attrs["id"] = f"{id_}_{index}"
-            if self.child_field.disabled:
-                child_attrs["disabled"] = True
-            from nestingdolls.boundfield import CompositeBoundField
-
-            child = form["value"]
-            child_widget = (
-                child.field.hidden_widget()
-                if self.input_type == "hidden"
-                else child.field.widget
-            )
-            if isinstance(child, CompositeBoundField):
-                child._prepare_widget(cast(CompositeWidget, child_widget), False)
-            child_value = (
-                None
-                if index == "__prefix__"
-                else child.initial
-                if isinstance(child, CompositeBoundField)
-                else child.value()
-            )
-            if isinstance(child_widget, MultiWidget) and isinstance(child_value, str):
-                child_value = None
-            subwidget = child_widget.get_context(
-                child.html_name, child_value, child_attrs
-            )["widget"]
-            errors = [
-                message
-                for error in form.errors.as_data().get("value", [])
-                for message in error.messages
-            ]
-            row: dict[str, object] = {
-                "index": index,
-                "delete_name": f"{form.prefix}-{DELETION_FIELD_NAME}",
-                "subwidget": subwidget,
-                "errors": errors,
-            }
-            if errors:
-                child_id = subwidget["attrs"].get("id")
-                error_id = f"{child_id}_error" if child_id else None
-                if error_id:
-                    row["error_id"] = error_id
-                self._mark_row_invalid(subwidget, error_id)
-            return row
-
-        try:
-            rows = [
-                make_row(form, index)
-                for index, form in enumerate(forms)
-                if id(form) not in deleted_forms
-            ]
-            empty_row = make_row(formset.empty_form, "__prefix__")
-        finally:
-            child_widget = self._child_widget(self.child_field)
-            if isinstance(child_widget, CompositeWidget):
-                child_widget.render_state = child_widget.RenderState()
-
-        context["widget"].update(
-            {
-                "rows": rows,
-                "empty_row": empty_row,
-                "management_form": management_form,
-                "minimum_forms": self.limits.min_length,
-                "maximum_forms": self.limits.max_length,
-                "absolute_maximum_forms": self.limits.absolute_max,
-                "disabled": disabled or self.render_state.submission_overflow,
-            }
-        )
-        if deleted_forms and not self.render_state.submission_overflow:
-            context["widget"]["deleted_rows"] = [
-                {"delete_name": f"{form.prefix}-{DELETION_FIELD_NAME}"}
-                for form in forms
-                if id(form) in deleted_forms
-            ]
-        return context
 
     def get_context(
         self,
@@ -880,9 +695,120 @@ class SequenceWidget(CompositeWidget):
         value: Sequence[object] | None,
         attrs: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Keep nested row construction inside one shared render budget."""
+        """Render row forms inside one shared render budget."""
         with self.submission_countdown(self.limits.submission_max):
-            return self._get_context(name, value, attrs)
+            context = super().get_context(name, value, attrs)
+            final_attrs = context["widget"]["attrs"]
+            final_attrs.pop("aria-invalid", None)
+            id_ = final_attrs.get("id")
+            disabled = bool(final_attrs.get("disabled"))
+            if self.is_hidden and self.render_state.hidden_initial_value is not None:
+                value = cast(Sequence[object], self.render_state.hidden_initial_value)
+            formset = self.render_state.formset
+            if formset is None:
+                initial = self.initial_formset_rows(value)
+                if not initial and self.is_required and self.limits.min_length == 0:
+                    initial = [self.empty_formset_row()]
+                formset = self.new_formset(initial=initial, prefix=name)
+
+            if self.render_state.submission_overflow:
+                formset = self.new_formset(initial=[], prefix=name)
+
+            management_form = formset.management_form
+            if not self.is_hidden:
+                management_form.fields[TOTAL_FORM_COUNT].widget.attrs[
+                    "data-sequence-total"
+                ] = ""
+            if disabled:
+                for management_field in management_form.fields.values():
+                    management_field.widget.attrs["disabled"] = True
+
+            forms = formset.forms
+            deleted_forms = {
+                id(form)
+                for form in forms
+                if getattr(form, "cleaned_data", {}).get(DELETION_FIELD_NAME)
+            }
+
+            def make_row(form: BaseForm, index: int | str) -> dict[str, object]:
+                child_attrs = final_attrs.copy()
+                if id_:
+                    child_attrs["id"] = f"{id_}_{index}"
+                if self.child_field.disabled:
+                    child_attrs["disabled"] = True
+                from nestingdolls.boundfield import CompositeBoundField
+
+                child = form["value"]
+                child_widget = (
+                    child.field.hidden_widget()
+                    if self.input_type == "hidden"
+                    else child.field.widget
+                )
+                if isinstance(child, CompositeBoundField):
+                    child.prepare_widget(cast(CompositeWidget, child_widget), False)
+                child_value = (
+                    None
+                    if index == "__prefix__"
+                    else child.initial
+                    if isinstance(child, CompositeBoundField)
+                    else child.value()
+                )
+                if isinstance(child_widget, MultiWidget) and isinstance(
+                    child_value, str
+                ):
+                    child_value = None
+                subwidget = child_widget.get_context(
+                    child.html_name, child_value, child_attrs
+                )["widget"]
+                errors = [
+                    message
+                    for error in form.errors.as_data().get("value", [])
+                    for message in error.messages
+                ]
+                row: dict[str, object] = {
+                    "index": index,
+                    "delete_name": f"{form.prefix}-{DELETION_FIELD_NAME}",
+                    "subwidget": subwidget,
+                    "errors": errors,
+                }
+                if errors:
+                    child_id = subwidget["attrs"].get("id")
+                    error_id = f"{child_id}_error" if child_id else None
+                    if error_id:
+                        row["error_id"] = error_id
+                    self._mark_row_invalid(subwidget, error_id)
+                return row
+
+            try:
+                rows = [
+                    make_row(form, index)
+                    for index, form in enumerate(forms)
+                    if id(form) not in deleted_forms
+                ]
+                empty_row = make_row(formset.empty_form, "__prefix__")
+            finally:
+                child_widget = self._child_widget(self.child_field)
+                if isinstance(child_widget, CompositeWidget):
+                    child_widget.render_state = child_widget.RenderState()
+
+            context["widget"].update(
+                {
+                    "rows": rows,
+                    "empty_row": empty_row,
+                    "management_form": management_form,
+                    "minimum_forms": self.limits.min_length,
+                    "maximum_forms": self.limits.max_length,
+                    "absolute_maximum_forms": self.limits.absolute_max,
+                    "disabled": disabled or self.render_state.submission_overflow,
+                }
+            )
+            if deleted_forms and not self.render_state.submission_overflow:
+                context["widget"]["deleted_rows"] = [
+                    {"delete_name": f"{form.prefix}-{DELETION_FIELD_NAME}"}
+                    for form in forms
+                    if id(form) in deleted_forms
+                ]
+            return context
 
     def _mark_row_invalid(
         self, widget_context: dict[str, Any], error_id: str | None

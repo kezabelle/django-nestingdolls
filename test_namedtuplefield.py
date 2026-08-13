@@ -40,7 +40,7 @@ class NamedTupleFieldConstructionTestCase(SimpleTestCase):
     def test_rejects_a_plain_tuple_output(self):
         """An output must expose ``_fields``, not just be a tuple subclass."""
         with self.assertRaises(ImproperlyConfigured):
-            nestingdolls.NamedTupleField(PointForm, tuple)
+            nestingdolls.NamedTupleField(PointForm, output=tuple)
 
     def test_rejects_mismatched_output_names(self):
         """The child Form's field names must match output._fields exactly."""
@@ -50,7 +50,7 @@ class NamedTupleFieldConstructionTestCase(SimpleTestCase):
             z = forms.IntegerField()
 
         with self.assertRaises(ImproperlyConfigured):
-            nestingdolls.NamedTupleField(WrongForm, Point)
+            nestingdolls.NamedTupleField(WrongForm, output=Point)
 
     def test_infers_type_from_base_fields_and_fills_removed_fields(self):
         class Form(forms.Form):
@@ -70,7 +70,7 @@ class NamedTupleFieldConstructionTestCase(SimpleTestCase):
 class NamedTupleFieldCleaningTestCase(SimpleTestCase):
     def test_clean_builds_the_namedtuple_output(self):
         """Direct Python-value cleaning returns one output instance."""
-        field = nestingdolls.NamedTupleField(PointForm, Point)
+        field = nestingdolls.NamedTupleField(PointForm, output=Point)
         self.assertIs(field.output, Point)
 
         cleaned = field.clean({"x": "1", "y": "2"})
@@ -82,7 +82,7 @@ class NamedTupleFieldCleaningTestCase(SimpleTestCase):
         """A required field with no submitted value reports "required"."""
 
         class Form(forms.Form):
-            point = nestingdolls.NamedTupleField(PointForm, Point)
+            point = nestingdolls.NamedTupleField(PointForm, output=Point)
 
         form = Form({})
 
@@ -93,7 +93,9 @@ class NamedTupleFieldCleaningTestCase(SimpleTestCase):
         """An optional field with no submitted value cleans to None."""
 
         class Form(forms.Form):
-            point = nestingdolls.NamedTupleField(PointForm, Point, required=False)
+            point = nestingdolls.NamedTupleField(
+                PointForm, output=Point, required=False
+            )
 
         form = Form({})
 
@@ -104,7 +106,7 @@ class NamedTupleFieldCleaningTestCase(SimpleTestCase):
         """A bound submission cleans to one namedtuple_type instance."""
 
         class Form(forms.Form):
-            point = nestingdolls.NamedTupleField(PointForm, Point)
+            point = nestingdolls.NamedTupleField(PointForm, output=Point)
 
         form = Form({"point-x": "3", "point-y": "4"})
 
@@ -121,7 +123,7 @@ class NamedTupleFieldCleaningTestCase(SimpleTestCase):
 
         class Form(forms.Form):
             point = nestingdolls.NamedTupleField(
-                PointForm, Point, validators=[seen.append]
+                PointForm, output=Point, validators=[seen.append]
             )
 
         form = Form({"point-x": "3", "point-y": "4"})
@@ -135,7 +137,9 @@ class NamedTupleFieldRenderingTestCase(SimpleTestCase):
         """A namedtuple_type instance given as initial renders like a mapping."""
 
         class Form(forms.Form):
-            point = nestingdolls.NamedTupleField(PointForm, Point, required=False)
+            point = nestingdolls.NamedTupleField(
+                PointForm, output=Point, required=False
+            )
 
         form = Form(initial={"point": Point(x=5, y=6)})
 
@@ -145,7 +149,7 @@ class NamedTupleFieldRenderingTestCase(SimpleTestCase):
         """Change detection compares submitted rows against a namedtuple initial."""
 
         class Form(forms.Form):
-            point = nestingdolls.NamedTupleField(PointForm, Point)
+            point = nestingdolls.NamedTupleField(PointForm, output=Point)
 
         unchanged = Form(
             {"point-x": "5", "point-y": "6"}, initial={"point": Point(x=5, y=6)}

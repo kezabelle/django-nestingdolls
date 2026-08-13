@@ -14,7 +14,6 @@ __all__ = [
     "ItemValidationError",
     "MappingInputValidationError",
     "SequenceInputValidationError",
-    "TooManyComparisonsError",
     "TooManyFormsValidationError",
 ]
 
@@ -83,18 +82,6 @@ class SequenceInputValidationError(ValidationError):
 
     def __init__(self, message: str | StrPromise) -> None:
         super().__init__(message, code="invalid")
-
-
-class TooManyComparisonsError(RuntimeError):
-    """A set field's change detection gave up after too many comparisons.
-
-    ``SetField.has_changed()`` compares each submitted row against the
-    initial members. Each comparison calls the child field's own
-    ``has_changed()`` method, and that method can be slow. The number of
-    rows comes from the submitted data, not from the server. This error
-    stops the comparison at a fixed limit. Past that limit, the field
-    reports a change and does not finish the comparison.
-    """
 
 
 class TooManyFormsValidationError(ValidationError):

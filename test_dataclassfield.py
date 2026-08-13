@@ -40,7 +40,7 @@ class PointForm(forms.Form):
 class DataclassFieldConstructionTestCase(SimpleTestCase):
     def test_rejects_a_non_dataclass_output(self):
         with self.assertRaises(ImproperlyConfigured):
-            nestingdolls.DataclassField(PointForm, tuple)
+            nestingdolls.DataclassField(PointForm, output=tuple)
 
     def test_rejects_mismatched_output_names(self):
         class WrongForm(forms.Form):
@@ -48,7 +48,7 @@ class DataclassFieldConstructionTestCase(SimpleTestCase):
             z = forms.IntegerField()
 
         with self.assertRaises(ImproperlyConfigured):
-            nestingdolls.DataclassField(WrongForm, Point)
+            nestingdolls.DataclassField(WrongForm, output=Point)
 
     def test_infers_type_from_base_fields_and_fills_removed_fields(self):
         class Form(forms.Form):
@@ -68,7 +68,7 @@ class DataclassFieldConstructionTestCase(SimpleTestCase):
 
 class DataclassFieldCleaningTestCase(SimpleTestCase):
     def test_clean_builds_the_dataclass_output(self):
-        field = nestingdolls.DataclassField(PointForm, Point)
+        field = nestingdolls.DataclassField(PointForm, output=Point)
         self.assertIs(field.output, Point)
 
         cleaned = field.clean({"x": "1", "y": "2"})
@@ -80,7 +80,7 @@ class DataclassFieldCleaningTestCase(SimpleTestCase):
 
         class Form(forms.Form):
             point = nestingdolls.DataclassField(
-                PointForm, Point, validators=[seen.append]
+                PointForm, output=Point, validators=[seen.append]
             )
 
         form = Form({"point-x": "3", "point-y": "4"})
@@ -92,7 +92,7 @@ class DataclassFieldCleaningTestCase(SimpleTestCase):
 class DataclassFieldRenderingTestCase(SimpleTestCase):
     def test_initial_and_change_detection_accept_a_dataclass_instance(self):
         class Form(forms.Form):
-            point = nestingdolls.DataclassField(PointForm, Point)
+            point = nestingdolls.DataclassField(PointForm, output=Point)
 
         initial = {"point": Point(x=5, y=6)}
         unchanged = Form({"point-x": "5", "point-y": "6"}, initial=initial)

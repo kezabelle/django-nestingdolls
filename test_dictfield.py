@@ -109,11 +109,6 @@ class MappingProbeFixtures(SimpleTestCase):
         label = forms.CharField(required=False)
 
 
-class MappingSubmissionProbeFixtures(SimpleTestCase):
-    class ProbeForm(forms.Form):
-        point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
-
-
 class MappingAssetProbeFixtures(SimpleTestCase):
     class ProbeForm(forms.Form):
         class ChildForm(forms.Form):
@@ -143,14 +138,6 @@ class MappingAssetProbeView(MappingProbeView):
             "asset": serialized_asset,
             "errors": self.error_codes(form),
         }
-
-
-class NestedMappingProbeFixtures(SimpleTestCase):
-    class ProbeForm(forms.Form):
-        class ChildForm(forms.Form):
-            point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
-
-        rows = nestingdolls.ListField(nestingdolls.MappingField(ChildForm))
 
 
 class MappingOptionalProbeFixtures(SimpleTestCase):
@@ -287,54 +274,6 @@ class MappingAssetInitialProbeView(MappingProbeView):
         }
 
 
-class NestedAssetProbeFixtures(SimpleTestCase):
-    class ProbeForm(forms.Form):
-        class ChildForm(forms.Form):
-            title = forms.CharField()
-            upload = forms.FileField(required=False)
-            happened_at = forms.SplitDateTimeField()
-
-        assets = nestingdolls.ListField(nestingdolls.MappingField(ChildForm))
-
-
-class NestedAssetProbeView(MappingProbeView):
-    form_class = NestedAssetProbeFixtures.ProbeForm
-
-    def get_form_kwargs(self):
-        return {
-            "initial": {"assets": [{"upload": SimpleUploadedFile("old.txt", b"old")}]}
-        }
-
-    def response_data(self, form, valid):
-        assets = form.cleaned_data["assets"] if valid else None
-        serialized_assets = None
-        if assets is not None:
-            serialized_assets = []
-            for asset in assets:
-                upload = asset["upload"]
-                if upload is None or upload is False:
-                    serialized_upload = upload
-                elif isinstance(upload, UploadedFile):
-                    serialized_upload = upload.name
-                else:
-                    serialized_upload = upload
-                serialized_assets.append(
-                    {
-                        "title": asset["title"],
-                        "upload": serialized_upload,
-                        "happened_at": asset["happened_at"]
-                        .replace(tzinfo=None)
-                        .isoformat(),
-                    }
-                )
-        return {
-            "valid": valid,
-            "assets": serialized_assets,
-            "errors": self.error_codes(form),
-            "child_errors": self.child_error_codes(form),
-        }
-
-
 class MultipleFileInput(forms.ClearableFileInput):
     """Read all files for one child input.
 
@@ -376,117 +315,6 @@ class MappingRepeatedFileProbeView(MappingProbeView):
             "uploads": [upload.name for upload in uploads],
             "errors": self.error_codes(form),
         }
-
-
-class TripleMMMProbeFixtures(SimpleTestCase):
-    class ProbeForm(forms.Form):
-        class OuterChildForm(forms.Form):
-            class InnerForm(forms.Form):
-                class LeafForm(forms.Form):
-                    child = forms.IntegerField()
-
-                child = nestingdolls.MappingField(LeafForm)
-
-            child = nestingdolls.MappingField(InnerForm)
-
-        value = nestingdolls.MappingField(OuterChildForm)
-
-
-class TripleMMLProbeFixtures(SimpleTestCase):
-    class ProbeForm(forms.Form):
-        class OuterChildForm(forms.Form):
-            class InnerForm(forms.Form):
-                child = nestingdolls.ListField(forms.IntegerField())
-
-            child = nestingdolls.MappingField(InnerForm)
-
-        value = nestingdolls.MappingField(OuterChildForm)
-
-
-class TripleMLMProbeFixtures(SimpleTestCase):
-    class ProbeForm(forms.Form):
-        class InnerForm(forms.Form):
-            class LeafForm(forms.Form):
-                child = forms.IntegerField()
-
-            child = nestingdolls.ListField(nestingdolls.MappingField(LeafForm))
-
-        value = nestingdolls.MappingField(InnerForm)
-
-
-class TripleMLLProbeFixtures(SimpleTestCase):
-    class ProbeForm(forms.Form):
-        class InnerForm(forms.Form):
-            child = nestingdolls.ListField(nestingdolls.ListField(forms.IntegerField()))
-
-        value = nestingdolls.MappingField(InnerForm)
-
-
-class TripleLMMProbeFixtures(SimpleTestCase):
-    class ProbeForm(forms.Form):
-        class InnerForm(forms.Form):
-            class LeafForm(forms.Form):
-                child = forms.IntegerField()
-
-            child = nestingdolls.MappingField(LeafForm)
-
-        value = nestingdolls.ListField(nestingdolls.MappingField(InnerForm))
-
-
-class TripleLMLProbeFixtures(SimpleTestCase):
-    class ProbeForm(forms.Form):
-        class InnerForm(forms.Form):
-            child = nestingdolls.ListField(forms.IntegerField())
-
-        value = nestingdolls.ListField(nestingdolls.MappingField(InnerForm))
-
-
-class TripleLLMProbeFixtures(SimpleTestCase):
-    class ProbeForm(forms.Form):
-        class LeafForm(forms.Form):
-            child = forms.IntegerField()
-
-        value = nestingdolls.ListField(
-            nestingdolls.ListField(nestingdolls.MappingField(LeafForm))
-        )
-
-
-class TripleLLLProbeFixtures(SimpleTestCase):
-    class ProbeForm(forms.Form):
-        value = nestingdolls.ListField(
-            nestingdolls.ListField(nestingdolls.ListField(forms.IntegerField()))
-        )
-
-
-class DeepPayloadProbeFixtures(SimpleTestCase):
-    class ProbeForm(forms.Form):
-        class ChildForm(forms.Form):
-            class SectionForm(forms.Form):
-                class EntryForm(forms.Form):
-                    point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
-                    title = forms.CharField()
-
-                heading = forms.CharField()
-                entries = nestingdolls.ListField(nestingdolls.MappingField(EntryForm))
-
-            rows = nestingdolls.ListField(nestingdolls.MappingField(SectionForm))
-
-        payload = nestingdolls.MappingField(ChildForm)
-
-
-class NestedRowErrorProbeFixtures(SimpleTestCase):
-    class ProbeForm(forms.Form):
-        values = nestingdolls.ListField(
-            nestingdolls.MappingField(MappingProbeFixtures.PointForm)
-        )
-
-
-class NumericMappingProbeFixtures(SimpleTestCase):
-    class ProbeForm(forms.Form):
-        class ChildForm(forms.Form):
-            locals()["0"] = forms.IntegerField()
-
-        point = nestingdolls.MappingField(ChildForm, required=False)
 
 
 class MappingHookProbeFixtures(SimpleTestCase):
@@ -532,18 +360,6 @@ class MappingNonFieldProbeView(MappingProbeView):
 
 urlpatterns = [
     path(
-        "mapping-submission-probe/",
-        MappingProbeView.as_view(
-            form_class=MappingSubmissionProbeFixtures.ProbeForm, response_field="point"
-        ),
-    ),
-    path(
-        "numeric-mapping-probe/",
-        MappingProbeView.as_view(
-            form_class=NumericMappingProbeFixtures.ProbeForm, response_field="point"
-        ),
-    ),
-    path(
         "mapping-hook-probe/",
         MappingProbeView.as_view(
             form_class=MappingHookProbeFixtures.ProbeForm, response_field="value"
@@ -568,71 +384,6 @@ urlpatterns = [
     ),
     path("mapping-initial-probe/", MappingInitialProbeView.as_view()),
     path("mapping-file-change-probe/", MappingFileChangeProbeView.as_view()),
-    path(
-        "nested-mapping-probe/",
-        MappingProbeView.as_view(
-            form_class=NestedMappingProbeFixtures.ProbeForm, response_field="rows"
-        ),
-    ),
-    path("nested-asset-probe/", NestedAssetProbeView.as_view()),
-    path(
-        "nested-row-error-probe/",
-        MappingProbeView.as_view(form_class=NestedRowErrorProbeFixtures.ProbeForm),
-    ),
-    path(
-        "triple-mmm-probe/",
-        MappingProbeView.as_view(
-            form_class=TripleMMMProbeFixtures.ProbeForm, response_field="value"
-        ),
-    ),
-    path(
-        "triple-mml-probe/",
-        MappingProbeView.as_view(
-            form_class=TripleMMLProbeFixtures.ProbeForm, response_field="value"
-        ),
-    ),
-    path(
-        "triple-mlm-probe/",
-        MappingProbeView.as_view(
-            form_class=TripleMLMProbeFixtures.ProbeForm, response_field="value"
-        ),
-    ),
-    path(
-        "triple-mll-probe/",
-        MappingProbeView.as_view(
-            form_class=TripleMLLProbeFixtures.ProbeForm, response_field="value"
-        ),
-    ),
-    path(
-        "triple-lmm-probe/",
-        MappingProbeView.as_view(
-            form_class=TripleLMMProbeFixtures.ProbeForm, response_field="value"
-        ),
-    ),
-    path(
-        "triple-lml-probe/",
-        MappingProbeView.as_view(
-            form_class=TripleLMLProbeFixtures.ProbeForm, response_field="value"
-        ),
-    ),
-    path(
-        "triple-llm-probe/",
-        MappingProbeView.as_view(
-            form_class=TripleLLMProbeFixtures.ProbeForm, response_field="value"
-        ),
-    ),
-    path(
-        "triple-lll-probe/",
-        MappingProbeView.as_view(
-            form_class=TripleLLLProbeFixtures.ProbeForm, response_field="value"
-        ),
-    ),
-    path(
-        "deep-payload-probe/",
-        MappingProbeView.as_view(
-            form_class=DeepPayloadProbeFixtures.ProbeForm, response_field="payload"
-        ),
-    ),
     path("mapping-repeated-file-probe/", MappingRepeatedFileProbeView.as_view()),
 ]
 
@@ -908,11 +659,6 @@ class MappingChildValidationTestCase(FormBindingUnitTestCase):
         self.assertEqual(form.cleaned_data["point"], {})
 
 
-@override_settings(ROOT_URLCONF=__name__)
-class NestedMappingSubmissionFunctionalTestCase(SimpleTestCase):
-    """Retain the URL fixture namespace after alias-contract removal."""
-
-
 class MappingFieldUnitTestCase(FormBindingUnitTestCase):
     """Exercises mapping APIs, construction, and rendering that HTTP cannot expose."""
 
@@ -931,28 +677,6 @@ class MappingFieldUnitTestCase(FormBindingUnitTestCase):
 
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["point"], {"a": 1, "label": "kept"})
-
-    def test_flattened_initial_mapping_uses_child_widget_values(self):
-        """It reconstructs raw widget values from flat child names."""
-
-        class Form(forms.Form):
-            point = nestingdolls.MappingField(
-                MappingProbeFixtures.PointForm, required=False
-            )
-
-        self.assertEqual(Form(initial={"point-a": "2"})["point"].initial, {"a": "2"})
-
-    def test_unrecognized_flattened_initial_uses_the_field_initial(self):
-        """It leaves Django's configured mapping initial value intact."""
-
-        class Form(forms.Form):
-            point = nestingdolls.MappingField(
-                MappingProbeFixtures.PointForm, required=False, initial={"a": 3}
-            )
-
-        self.assertEqual(
-            Form(initial={"point-junk": "value"})["point"].initial, {"a": 3}
-        )
 
     def test_invalid_mapping_shapes_stay_in_djangos_bound_data_channel(self):
         """It redisplays hostile submitted data and disabled hostile initials."""

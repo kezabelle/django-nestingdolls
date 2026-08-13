@@ -19,8 +19,8 @@ Every command below is a `make` target. Run `make help` for the list.
 
 # Python checks
 
-- `make test` runs `test_composite`, `test_listfield`, `test_dictfield`, and
-  `test_patches`.
+- `make test` runs `test_composite`, `test_dataclassfield`, `test_listfield`,
+  `test_dictfield`, `test_hostile`, `test_namedtuplefield`, and `test_patches`.
 - `make mypy` type-checks `demo.py` and the whole `nestingdolls` package under
   the settings in `mypy_settings.py`, which exists only for `django-stubs`; no
   test imports it.
@@ -64,16 +64,17 @@ to this package.
   the outer sequence; nested sequences reuse it. Do not open it in a
   mapping, `clean()`, a shared composite base class, or a field-tree walk.
 - Call `take(count)` at the earliest point a submitted row count turns into
-  a built list of rows. That point is `SequenceWidget.read_input`, where a
-  `TOTAL_FORMS` value becomes `data_rows`/`file_rows`, not the extraction
-  step that reads that list afterward. A widget that waits until extraction
-  to call `take()` has already paid to build every row a forged
-  `TOTAL_FORMS` asked for, once for every sibling row that reaches it.
-  `take(count)` returns only rows that fit. Cleaning reports
+  built rows. Two points qualify: `RowFormSet.total_form_count`, where a
+  `TOTAL_FORMS` value becomes the number of row forms Django builds, and the
+  direct-value clip in `SequenceWidget.value_from_datadict`, where a Python
+  list under the field's own name becomes rows. A step that waits until
+  after row construction to call `take()` has already paid to build every
+  row a forged `TOTAL_FORMS` asked for, once for every sibling row that
+  reaches it. `take(count)` returns only rows that fit. Cleaning reports
   `too_many_forms` for the complete bound submission when extraction ran
   out; rendering shows only the prefix that fits. Exact use succeeds.
-- A step that reads an already-built row list, such as `_value_from_input`
-  reading `read_input`'s `data_rows`, must not call `take()` on that count
+- A step that reads an already-built row list, such as a bound field
+  reading its cached formset's forms, must not call `take()` on that count
   again. It inherits the reservation. A double `take()` on the same rows
   halves the effective budget and can reject a submission that should pass.
 - `Limits.submission_max` is `max(absolute_max, DATA_UPLOAD_MAX_NUMBER_FIELDS)`. The key limit covers populated rows and `absolute_max` covers empty rows. Read the setting for each submission.
@@ -88,19 +89,19 @@ to this package.
 
 A request can hold a few nested `TOTAL_FORMS` keys that ask for 2,000 empty rows at each sequence level. Django limits parser keys, files, bytes, and one formset level; it cannot count that recursive row product. Two outer rows with three inner rows spend `2 + 6 = 8` rows. Three outer rows with 900 inner rows spend `3 + 2700 = 2703`, so the default 2,000-row cap rejects the complete submission.
 
-`SetField.Match` counts the members that one comparison looks at with
-`members_left`, which is a plain integer. `members_to_check()` counts them as
-it yields them, so no caller can read a member without paying for it. Keep this
-separate from `SubmissionBudget`. The two share only the idea of a limit, and
-`Match` needs none of the shared-budget behaviour. A comparison must not fail
-because an earlier extraction built rows. When `members_left` reaches
-zero, the field reports a change, which causes one more save.
+No submission key is ever copied or parsed into a narrowed input. A subform
+or row formset binds straight to the raw request data with a Django prefix,
+so a forged key such as `values-99999999` is never read: Django builds rows
+`0` through `total_form_count`, which is `min(TOTAL_FORMS, absolute_max)`,
+and each row form reads only its own exact keys. With no copy step, there is
+no per-key memory to protect and no index grammar to enforce.
 
-`SequenceWidget.Keys` discards bad keys before they use memory. It discards a
-row index that is not below `absolute_max`. It also discards a digit run that
-is longer than `max_index_digits`, which is 7. `Keys.__post_init__` refuses an
-`absolute_max` of 10000000 or more, because such a field has rows that no key
-can name.
+`SetField.has_changed` is linear and conservative. It pairs each converted
+row with the member it hashes to, then lets the child field compare that one
+pair. A row that pairs with no member reports a change unless the child says
+the row is blank. There is no pairwise scan of rows against members, so no
+comparison budget exists, and a comparison never fails because an earlier
+extraction built rows. Ambiguity reports a change, which costs one more save.
 
 Django applies its four settings to a request only. Python data and decoded
 JSON do not go through the request parser. The limits of this package still

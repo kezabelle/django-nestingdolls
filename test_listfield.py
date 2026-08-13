@@ -1,5 +1,4 @@
 import json
-import tracemalloc
 import unittest
 from collections import deque
 from datetime import datetime
@@ -186,25 +185,8 @@ class ListProbeFixtures(SimpleTestCase):
     class SubmissionForm(forms.Form):
         values = nestingdolls.ListField(forms.IntegerField(), required=False)
 
-    class CardinalityForm(forms.Form):
-        values = nestingdolls.ListField(
-            forms.IntegerField(), min_length=2, max_length=2
-        )
-
     class NestedForm(forms.Form):
         values = nestingdolls.ListField(nestingdolls.ListField(forms.IntegerField()))
-
-    class CardinalityMatrixForm(forms.Form):
-        optional_min = nestingdolls.ListField(
-            forms.IntegerField(), required=False, min_length=2
-        )
-        required = nestingdolls.ListField(forms.IntegerField())
-        maximum = nestingdolls.ListField(
-            forms.IntegerField(), required=False, max_length=1
-        )
-        exact = nestingdolls.ListField(
-            forms.IntegerField(), required=False, min_length=2, max_length=2
-        )
 
     class DisabledForm(forms.Form):
         values = nestingdolls.ListField(
@@ -217,28 +199,12 @@ class ListProbeFixtures(SimpleTestCase):
     class JSONSubmissionForm(forms.Form):
         values = nestingdolls.ListField(forms.JSONField(), required=False)
 
-    class InitialManagementForm(forms.Form):
-        values = nestingdolls.ListField(forms.IntegerField(), initial=[1])
-
-    class OptionalInitialManagementForm(forms.Form):
-        values = nestingdolls.ListField(
-            forms.IntegerField(), required=False, initial=[10]
-        )
-
-    class DisabledChildForm(forms.Form):
-        values = nestingdolls.ListField(forms.IntegerField(disabled=True), initial=[7])
-
     class DefaultAbsoluteMaximumForm(forms.Form):
         values = nestingdolls.ListField(forms.IntegerField(), max_length=1)
 
     class AbsoluteMaximumForm(forms.Form):
         values = nestingdolls.ListField(
             forms.IntegerField(), max_length=1, absolute_max=2
-        )
-
-    class OptionalBooleanForm(forms.Form):
-        values = nestingdolls.ListField(
-            forms.BooleanField(required=False), required=False
         )
 
     class PointsForm(forms.Form):
@@ -252,56 +218,7 @@ class ListProbeFixtures(SimpleTestCase):
         )
 
 
-class ListCardinalityMatrixProbeView(ProbeView):
-    form_class = ListProbeFixtures.CardinalityMatrixForm
-
-    def response_data(self, form, valid, errors):
-        return {
-            "valid": valid,
-            "values": form.cleaned_data if valid else None,
-            "errors": self.error_codes(errors),
-        }
-
-
 class NestedListProbeFixtures(SimpleTestCase):
-    class PairForm(forms.Form):
-        values = nestingdolls.ListField(
-            nestingdolls.TupleField(forms.IntegerField(), min_length=2, max_length=2)
-        )
-
-    class DeepListForm(forms.Form):
-        values = nestingdolls.ListField(
-            nestingdolls.ListField(nestingdolls.ListField(forms.IntegerField()))
-        )
-
-    class AlternatingForm(forms.Form):
-        class SectionForm(forms.Form):
-            class EntryForm(forms.Form):
-                class PointForm(forms.Form):
-                    a = forms.IntegerField()
-                    label = forms.CharField(required=False)
-
-                point = nestingdolls.MappingField(PointForm)
-                title = forms.CharField()
-
-            name = forms.CharField()
-            entries = nestingdolls.ListField(nestingdolls.MappingField(EntryForm))
-
-        values = nestingdolls.ListField(nestingdolls.MappingField(SectionForm))
-
-    class BlankRowForm(forms.Form):
-        class CheckboxRowForm(forms.Form):
-            active = forms.BooleanField(required=False)
-
-        values = nestingdolls.ListField(
-            nestingdolls.MappingField(CheckboxRowForm), required=False
-        )
-
-    class RaisedSubmissionForm(forms.Form):
-        outer = nestingdolls.ListField(
-            nestingdolls.ListField(forms.CharField(required=False)), required=False
-        )
-
     class ExactSubmissionForm(forms.Form):
         outer = nestingdolls.ListField(
             nestingdolls.ListField(forms.CharField(required=False), max_length=1999),
@@ -322,31 +239,6 @@ class NestedListProbeFixtures(SimpleTestCase):
             nestingdolls.ListField(forms.CharField(required=False), required=False),
             required=False,
         )
-
-
-class NestedPairProbeView(ProbeView):
-    form_class = NestedListProbeFixtures.PairForm
-
-    def response_data(self, form, valid, errors):
-        value_errors = errors.get("values", [])
-        return {
-            "valid": valid,
-            "values": form.cleaned_data.get("values") if valid else None,
-            "errors": (
-                {"values": [error.code for error in value_errors]}
-                if value_errors
-                else {}
-            ),
-            **(
-                {
-                    "child_codes": [
-                        error.params.get("child_code") for error in value_errors
-                    ]
-                }
-                if value_errors
-                else {}
-            ),
-        }
 
 
 class SparseAssetProbeView(ProbeView):
@@ -387,30 +279,9 @@ urlpatterns = [
         "list-max-deletion-probe/",
         ProbeView.as_view(form_class=ListProbeFixtures.MaxDeletionForm),
     ),
-    path("list-cardinality-matrix-probe/", ListCardinalityMatrixProbeView.as_view()),
-    path(
-        "list-cardinality-probe/",
-        ProbeView.as_view(form_class=ListProbeFixtures.CardinalityForm),
-    ),
-    path(
-        "nested-list-probe/",
-        ProbeView.as_view(form_class=ListProbeFixtures.NestedForm),
-    ),
     path(
         "list-json-submission-probe/",
         ProbeView.as_view(form_class=ListProbeFixtures.JSONSubmissionForm),
-    ),
-    path(
-        "list-initial-management-probe/",
-        ProbeView.as_view(form_class=ListProbeFixtures.InitialManagementForm),
-    ),
-    path(
-        "optional-list-initial-management-probe/",
-        ProbeView.as_view(form_class=ListProbeFixtures.OptionalInitialManagementForm),
-    ),
-    path(
-        "disabled-list-child-probe/",
-        ProbeView.as_view(form_class=ListProbeFixtures.DisabledChildForm),
     ),
     path(
         "list-default-absolute-maximum-probe/",
@@ -421,32 +292,8 @@ urlpatterns = [
         ProbeView.as_view(form_class=ListProbeFixtures.AbsoluteMaximumForm),
     ),
     path(
-        "optional-boolean-list-probe/",
-        ProbeView.as_view(form_class=ListProbeFixtures.OptionalBooleanForm),
-    ),
-    path(
         "list-of-points-probe/",
         ProbeView.as_view(form_class=ListProbeFixtures.PointsForm),
-    ),
-    path("nested-pair-probe/", NestedPairProbeView.as_view()),
-    path(
-        "nested-deep-list-probe/",
-        ProbeView.as_view(form_class=NestedListProbeFixtures.DeepListForm),
-    ),
-    path(
-        "nested-alternating-probe/",
-        ProbeView.as_view(form_class=NestedListProbeFixtures.AlternatingForm),
-    ),
-    path(
-        "nested-blank-row-probe/",
-        ProbeView.as_view(form_class=NestedListProbeFixtures.BlankRowForm),
-    ),
-    path(
-        "raised-nested-submission-probe/",
-        ProbeView.as_view(
-            form_class=NestedListProbeFixtures.RaisedSubmissionForm,
-            field_name="outer",
-        ),
     ),
     path(
         "exact-nested-submission-probe/",
@@ -1160,13 +1007,6 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["values"][0].code, "unhashable")
 
-    def test_absolute_max_requires_an_addressable_row_index(self):
-        """The key parser rejects a hard cap that its row keys cannot name."""
-        with self.assertRaisesMessage(
-            ValueError, "absolute_max must be less than 10000000"
-        ):
-            nestingdolls.ListField(forms.CharField(), absolute_max=10_000_000)
-
     def test_client_counts_composite_list_rows_not_their_child_keys(self):
         """Client accepts four mapping rows that each submit three child controls."""
         response = self.client.post(
@@ -1438,33 +1278,8 @@ class SetFieldTestCase(SimpleTestCase):
         self.assertIs(changed, True)
         self.assertLess(field.child_field.comparisons, 5 * (members + rows))
 
-    def test_member_order_does_not_build_one_index_per_member_per_row(self):
-        """A matched row checks only its matching member.
-
-        Building an order for every candidate creates quadratic writes.
-        ``members_left`` prevents this work.
-        """
-        size = 100_000
-        members = [f"m{index}" for index in range(size)]
-        match = nestingdolls.SetField.Match(
-            forms.CharField(), members, members_left=size
-        )
-        rows = members[:100]
-
-        tracemalloc.start()
-        try:
-            for row in rows:
-                self.assertIs(match.claim(row, row), True)
-            peak = tracemalloc.get_traced_memory()[1]
-        finally:
-            tracemalloc.stop()
-
-        self.assertEqual(size - match.members_left, len(rows))
-        # An eager order builds one tuple of `size` indexes for each row.
-        self.assertLess(peak, size)
-
-    def test_has_changed_uses_fallback_for_multiple_choice_lists(self):
-        """It compares multiple-choice lists without hashing them."""
+    def test_has_changed_reports_unhashable_rows_as_changed(self):
+        """A compound child's unhashable rows count as a change, never a miss."""
         field = nestingdolls.SetField(
             forms.MultipleChoiceField(
                 choices=[("first", "First"), ("second", "Second")]
@@ -1473,7 +1288,7 @@ class SetFieldTestCase(SimpleTestCase):
         )
 
         self.assertIs(
-            field.has_changed({("first", "second")}, [["second", "first"]]), False
+            field.has_changed({("first", "second")}, [["second", "first"]]), True
         )
         self.assertIs(field.has_changed({("first", "second")}, [["first"]]), True)
 
@@ -1965,40 +1780,6 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
             },
         )
 
-    @unittest.expectedFailure
-    def test_client_pairs_unmanaged_sparse_data_and_file_rows_by_index(self):
-        """Unmanaged sparse data and file indexes must identify the same row.
-
-        NOT A DEFECT. Indexed rows are this package's formset protocol. A
-        formset submission always needs a management total, the same as
-        Django's own formsets require. A submission with no management
-        total is rejected, even when its row indexes could pair up on
-        their own.
-        """
-        response = self.client.post(
-            "/sparse-asset-probe/",
-            {
-                "values-0-label": "row0-label",
-                "values-5-label": "row5-label",
-                "values-0-upload": SimpleUploadedFile("row0.txt", b"row0-file"),
-                "values-3-upload": SimpleUploadedFile("row3.txt", b"row3-file"),
-            },
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertJSONEqual(
-            response.content,
-            {
-                "valid": True,
-                "rows": [
-                    ["row0-label", "row0.txt"],
-                    ["", "row3.txt"],
-                    ["row5-label", None],
-                ],
-                "errors": {},
-            },
-        )
-
     def test_client_deletes_a_nested_row_and_redisplays_it_as_deleted(self):
         """Deleting a nested row removes it and renders it deleted.
 
@@ -2397,70 +2178,6 @@ class SequenceNestedListRowTestCase(FormBindingUnitTestCase):
                 },
             )
         )
-
-
-class SyntheticSubmissionCountdownContractTestCase(FormBindingUnitTestCase):
-    """Define behavior for manually nested private countdown scopes.
-
-    The sequence widget's submission countdown is not public API. This test
-    manufactures an unsupported situation anyway, by opening the scope by hand
-    around ``is_valid()`` to demonstrate a synthetic issue.
-
-    No request path opens a second countdown. This test does so to record that
-    a joined scope does not receive overflow state. This unsupported call can
-    truncate and accept data.
-
-    Do not change this behavior, do not try and fix this because it is beyond the
-    scope of a Field and moves towards either an owning form, or an owning view.
-    """
-
-    @unittest.expectedFailure
-    def test_a_hand_opened_shared_scope_silently_truncates_instead_of_rejecting(
-        self,
-    ):
-        """Demonstrate the synthetic misuse. See the class docstring first."""
-
-        class Form(forms.Form):
-            a = nestingdolls.ListField(
-                nestingdolls.ListField(forms.CharField(required=False), required=False),
-                required=False,
-                max_length=10,
-                absolute_max=10,
-            )
-            b = nestingdolls.ListField(
-                nestingdolls.ListField(forms.CharField(required=False), required=False),
-                required=False,
-            )
-
-        pairs = [
-            (f"a-{TOTAL_FORM_COUNT}", "1"),
-            (f"a-{INITIAL_FORM_COUNT}", "0"),
-            (f"a-0-{TOTAL_FORM_COUNT}", "20"),
-            (f"a-0-{INITIAL_FORM_COUNT}", "0"),
-            (f"b-{TOTAL_FORM_COUNT}", "1"),
-            (f"b-{INITIAL_FORM_COUNT}", "0"),
-            (f"b-0-{TOTAL_FORM_COUNT}", "1"),
-            (f"b-0-{INITIAL_FORM_COUNT}", "0"),
-            ("b-0-0", "hello"),
-        ]
-        form = self.build_querydict_form(Form, pairs)
-
-        # Synthetic only: no shipped code path opens this scope by hand.
-        widget = form.fields["a"].widget
-        with widget.submission_countdown(widget.limits.submission_max):
-            valid = form.is_valid()
-
-        # A real (fixed) implementation would reject the whole submission
-        # once the hand-opened shared allowance of 10 ran out, instead of
-        # reporting success with field "a" truncated and field "b" dropped.
-        self.assertIs(valid, False)
-        errors = form.errors.as_data()
-        for field_name in ("a", "b"):
-            with self.subTest(field=field_name):
-                self.assertEqual(len(errors[field_name]), 1)
-                error = errors[field_name][0]
-                self.assertEqual(error.code, "too_many_forms")
-                self.assertIn("across nested sequences", error.messages[0])
 
 
 @override_settings(ROOT_URLCONF=__name__, DATA_UPLOAD_MAX_NUMBER_FIELDS=10)

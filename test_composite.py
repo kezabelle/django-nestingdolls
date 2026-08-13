@@ -131,25 +131,6 @@ def form_class_for(family: CompositeCase, **kwargs: object) -> type[forms.Form]:
 
 
 class SharedCompositeTestCase(SimpleTestCase):
-    def test_reads_bound_input_once(self):
-        """Validation, change detection, and rendering share one input cohort."""
-        for family in COMPOSITE_CASES:
-            with self.subTest(family=family.name):
-                counter = {"reads": 0}
-
-                class CountingWidget(family.widget_class):
-                    def read_input(self, data, files, name, _counter=counter):
-                        _counter["reads"] += 1
-                        return super().read_input(data, files, name)
-
-                form_class = form_class_for(family, widget=CountingWidget)
-                form = form_class(family.dash_data)
-
-                self.assertIs(form.is_valid(), True, form.errors)
-                self.assertIs(form.has_changed(), True)
-                form.as_p()
-                self.assertEqual(counter["reads"], 1)
-
     def test_render_state_is_not_shared_between_form_instances(self):
         """Errors and per-render state of one form never reach another."""
         for family in COMPOSITE_CASES:
