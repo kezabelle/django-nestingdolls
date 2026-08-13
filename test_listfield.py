@@ -56,9 +56,25 @@ def tearDownModule():
 class FormBindingUnitTestCase(SimpleTestCase):
     """Binds forms directly when tests need form internals."""
 
-    def post_urlencoded_form(self, form_class, pairs, *, initial=None, prefix=None):
+    def build_querydict_form(self, form_class, pairs, *, initial=None, prefix=None):
+        """Bind form_class the way a browser <form> submit does: flat dash keys.
+
+        `pairs` is a dict of flat keys (e.g. {"values-0": "1"}) or an
+        already-encoded query string.
+        """
         body = pairs if isinstance(pairs, str) else urlencode(pairs, doseq=True)
         return form_class(QueryDict(body), initial=initial, prefix=prefix)
+
+    def build_direct_form(
+        self, form_class, field_name, value, *, initial=None, prefix=None
+    ):
+        """Bind form_class the way application code hands over a decoded value.
+
+        `value` is the Python value (list for ListField, dict for DictField)
+        exactly as JSON- or CSV-inflated data would supply it, under the
+        field's own name, with no flat row keys.
+        """
+        return form_class({field_name: value}, initial=initial, prefix=prefix)
 
 
 class SubmissionLimitProbeFixtures(SimpleTestCase):
@@ -474,47 +490,59 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertIsInstance(cleaned_data, self.collection_class)
         self.assertEqual(cleaned_data, self.collection_class(values))
 
-    def test_client_posts_direct_and_managed_dash_list_rows(self):
-        """Direct values and Django-managed dash rows are the accepted contracts."""
-        cases = (
-            ({"values": ["1", "2", "3"]}, [1, 2, 3]),
-            (
-                {
-                    "values-0": "1",
-                    "values-1": "2",
-                    "values-2": "3",
-                    f"values-{TOTAL_FORM_COUNT}": "3",
-                    f"values-{INITIAL_FORM_COUNT}": "0",
-                },
-                [1, 2, 3],
-            ),
+    def test_client_accepts_repeated_key_list_rows(self):
+        """A repeated exact-name key submits scalar list rows without management controls."""
+        response = self.client.post(
+            "/list-submission-probe/", {"values": ["1", "2", "3"]}
         )
-        for data, expected in cases:
-            with self.subTest(data=data):
-                response = self.client.post("/list-submission-probe/", data)
-                self.assertEqual(response.status_code, 200)
-                self.assertJSONEqual(
-                    response.content, {"valid": True, "values": expected, "errors": {}}
-                )
+        self.assertEqual(response.status_code, 200)
+        self.assertJSONEqual(
+            response.content, {"valid": True, "values": [1, 2, 3], "errors": {}}
+        )
 
-    def test_client_returns_cleaned_json_direct_and_managed_dash_rows(self):
-        """JSON rows retain the same direct and managed wire contracts."""
-        value = {"answer": 42, "nested": [1, 2]}
-        encoded = json.dumps(value)
-        for data in (
-            {"values": [encoded]},
+    def test_client_accepts_dash_row_list_rows(self):
+        """Django-managed dash rows submit the same scalar list."""
+        response = self.client.post(
+            "/list-submission-probe/",
             {
-                "values-0": encoded,
+                "values-0": "1",
+                "values-1": "2",
+                "values-2": "3",
+                f"values-{TOTAL_FORM_COUNT}": "3",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertJSONEqual(
+            response.content, {"valid": True, "values": [1, 2, 3], "errors": {}}
+        )
+
+    def test_client_accepts_a_repeated_key_json_row(self):
+        """A repeated exact-name key submits one JSON-encoded scalar row."""
+        value = {"answer": 42, "nested": [1, 2]}
+        response = self.client.post(
+            "/list-json-submission-probe/", {"values": [json.dumps(value)]}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertJSONEqual(
+            response.content, {"valid": True, "values": [value], "errors": {}}
+        )
+
+    def test_client_accepts_a_dash_row_json_row(self):
+        """A Django-managed dash row submits the same JSON-encoded scalar row."""
+        value = {"answer": 42, "nested": [1, 2]}
+        response = self.client.post(
+            "/list-json-submission-probe/",
+            {
+                "values-0": json.dumps(value),
                 f"values-{TOTAL_FORM_COUNT}": "1",
                 f"values-{INITIAL_FORM_COUNT}": "0",
             },
-        ):
-            with self.subTest(data=data):
-                response = self.client.post("/list-json-submission-probe/", data)
-                self.assertEqual(response.status_code, 200)
-                self.assertJSONEqual(
-                    response.content, {"valid": True, "values": [value], "errors": {}}
-                )
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertJSONEqual(
+            response.content, {"valid": True, "values": [value], "errors": {}}
+        )
 
     def test_json_child_change_detection_uses_cleaned_values(self):
         """Managed change detection compares JSON rows after normalization."""
@@ -617,7 +645,7 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         )
         for data, management_input in cases:
             with self.subTest(data=data):
-                form = self.post_urlencoded_form(Form, data, initial={"values": [1]})
+                form = self.build_querydict_form(Form, data, initial={"values": [1]})
                 self.assertIs(form.is_valid(), False)
                 self.assertInHTML(management_input, form.as_p())
 
@@ -674,7 +702,7 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
             values = nestingdolls.ListField(forms.IntegerField(), max_length=1)
 
         with self.subTest(case="added row over the maximum"):
-            form = self.post_urlencoded_form(
+            form = self.build_querydict_form(
                 MaximumForm, submitted, initial={"values": [1]}
             )
             self.assertIs(form.is_valid(), False)
@@ -692,7 +720,7 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
             values = nestingdolls.ListField(forms.IntegerField(), min_length=3)
 
         with self.subTest(case="rows below the minimum"):
-            form = self.post_urlencoded_form(
+            form = self.build_querydict_form(
                 MinimumForm, submitted, initial={"values": [1]}
             )
             self.assertIs(form.is_valid(), False)
@@ -706,7 +734,7 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
             values = nestingdolls.ListField(forms.IntegerField())
 
         with self.subTest(case="invalid original row beside a deleted added row"):
-            form = self.post_urlencoded_form(
+            form = self.build_querydict_form(
                 PlainForm,
                 submitted
                 + f"&values-0=bad&values-1=2&values-1-{DELETION_FIELD_NAME}=on",
@@ -2096,6 +2124,281 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertEqual(error.params["child_code"], "too_many_forms")
 
 
+class SequenceScalarRowTestCase(FormBindingUnitTestCase):
+    """A scalar row's own validation outcome is the same in either input style.
+
+    Cleaning a direct value already uses a fast path that reports each
+    row's own error correctly. Rendering an invalid redisplay once built
+    an unbound row formset and dropped that error silently instead of
+    showing it inline. These tests are the regression guard for that fix,
+    proven against both input styles.
+    """
+
+    def assertScalarRowError(self, form):
+        """Assert row 1 of a 3-row int list shows its own inline error."""
+        self.assertIs(form.is_valid(), False)
+        error = form.errors.as_data()["values"][0]
+        self.assertEqual(error.code, "item_invalid")
+        self.assertEqual(error.params["item"], 1)
+        html = form.as_p()
+        self.assertEqual(html.count("errorlist"), 1)
+        self.assertEqual(html.count('aria-invalid="true"'), 1)
+        self.assertIn('name="values-1" value="bad"', html)
+        self.assertIn('aria-describedby="id_values_1_error"', html)
+        self.assertInHTML("<li>Enter a whole number.</li>", html)
+
+    def assertScalarRowsValid(self, form):
+        """Assert a valid 3-row int list renders every row with no error markup."""
+        self.assertIs(form.is_valid(), True, form.errors)
+        html = form.as_p()
+        self.assertNotIn("errorlist", html)
+        for index, value in enumerate((1, 2, 3)):
+            self.assertIn(f'name="values-{index}" value="{value}"', html)
+
+    def test_scalar_row_error_via_direct_value(self):
+        """A bad row in a direct scalar list shows its own error, not silence."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        self.assertScalarRowError(self.build_direct_form(Form, "values", [1, "bad", 3]))
+
+    def test_scalar_row_error_via_querydict(self):
+        """A bad row in a dash-row scalar list shows its own error, not silence."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        self.assertScalarRowError(
+            self.build_querydict_form(
+                Form,
+                {
+                    f"values-{TOTAL_FORM_COUNT}": "3",
+                    f"values-{INITIAL_FORM_COUNT}": "3",
+                    "values-0": "1",
+                    "values-1": "bad",
+                    "values-2": "3",
+                },
+            )
+        )
+
+    def test_scalar_rows_valid_via_direct_value(self):
+        """A valid direct scalar list renders every row with no error markup."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        self.assertScalarRowsValid(self.build_direct_form(Form, "values", [1, 2, 3]))
+
+    def test_scalar_rows_valid_via_querydict(self):
+        """A valid dash-row scalar list renders every row with no error markup."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        self.assertScalarRowsValid(
+            self.build_querydict_form(
+                Form,
+                {
+                    f"values-{TOTAL_FORM_COUNT}": "3",
+                    f"values-{INITIAL_FORM_COUNT}": "3",
+                    "values-0": "1",
+                    "values-1": "2",
+                    "values-2": "3",
+                },
+            )
+        )
+
+
+class SequenceMappingRowTestCase(FormBindingUnitTestCase):
+    """A mapping row's own validation outcome is the same in either input style.
+
+    Same regression guard as ``SequenceScalarRowTestCase``, for a row
+    whose child is itself a ``DictField``, including the edge case where
+    a row carries no submitted keys at all yet must still validate as
+    real, present data rather than an untouched placeholder.
+    """
+
+    def assertMappingRowError(self, form):
+        """Assert row 1's missing required child shows its own inline error."""
+        self.assertIs(form.is_valid(), False)
+        error = form.errors.as_data()["a"][0]
+        self.assertEqual(error.code, "item_invalid")
+        self.assertEqual(error.params["item"], 1)
+        self.assertEqual(error.params["child_code"], "required")
+        html = form.as_p()
+        self.assertInHTML("<li>This field is required.</li>", html)
+        self.assertIn('name="a-0-b" value="2"', html)
+        self.assertIn('aria-describedby="id_a-1-b_error"', html)
+        self.assertIn('name="a-1-c" value="3"', html)
+
+    def assertMappingRowsValid(self, form):
+        """Assert a valid mapping row list cleans and renders every child."""
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(
+            form.cleaned_data["a"], [{"b": 2, "c": None}, {"b": None, "c": 3}]
+        )
+        html = form.as_p()
+        self.assertNotIn("errorlist", html)
+        self.assertIn('name="a-0-b" value="2"', html)
+        self.assertIn('name="a-1-c" value="3"', html)
+
+    def assertKeylessRowIsRequired(self, form):
+        """Assert an empty-dict/keyless row is real data, not skippable.
+
+        A direct list has no browser row keys to leave blank. Every entry
+        in the list is data the caller gave, even an empty mapping.
+        Cleaning already validates every row unconditionally; rendering
+        must not silently skip this row the way it skips an unfilled
+        extra formset row from a browser.
+        """
+        self.assertIs(form.is_valid(), False)
+        self.assertEqual(form.errors.as_data()["a"][0].code, "item_invalid")
+        self.assertInHTML("<li>This field is required.</li>", form.as_p())
+
+    def test_mapping_row_error_via_direct_value(self):
+        """A missing required child in a direct mapping row shows its error."""
+
+        class Row(forms.Form):
+            b = forms.IntegerField()
+            c = forms.IntegerField(required=False)
+
+        class Form(forms.Form):
+            a = nestingdolls.ListField(nestingdolls.DictField(Row))
+
+        self.assertMappingRowError(
+            self.build_direct_form(Form, "a", [{"b": 2}, {"c": 3}])
+        )
+
+    def test_mapping_row_error_via_querydict(self):
+        """A missing required child in a dash-row mapping row shows its error."""
+
+        class Row(forms.Form):
+            b = forms.IntegerField()
+            c = forms.IntegerField(required=False)
+
+        class Form(forms.Form):
+            a = nestingdolls.ListField(nestingdolls.DictField(Row))
+
+        self.assertMappingRowError(
+            self.build_querydict_form(
+                Form,
+                {
+                    f"a-{TOTAL_FORM_COUNT}": "2",
+                    f"a-{INITIAL_FORM_COUNT}": "2",
+                    "a-0-b": "2",
+                    "a-1-c": "3",
+                },
+            )
+        )
+
+    def test_mapping_rows_valid_via_direct_value(self):
+        """A valid direct mapping row list renders and cleans every child."""
+
+        class Row(forms.Form):
+            b = forms.IntegerField(required=False)
+            c = forms.IntegerField(required=False)
+
+        class Form(forms.Form):
+            a = nestingdolls.ListField(nestingdolls.DictField(Row))
+
+        self.assertMappingRowsValid(
+            self.build_direct_form(Form, "a", [{"b": 2}, {"c": 3}])
+        )
+
+    def test_mapping_rows_valid_via_querydict(self):
+        """A valid dash-row mapping row list renders and cleans every child."""
+
+        class Row(forms.Form):
+            b = forms.IntegerField(required=False)
+            c = forms.IntegerField(required=False)
+
+        class Form(forms.Form):
+            a = nestingdolls.ListField(nestingdolls.DictField(Row))
+
+        self.assertMappingRowsValid(
+            self.build_querydict_form(
+                Form,
+                {
+                    f"a-{TOTAL_FORM_COUNT}": "2",
+                    f"a-{INITIAL_FORM_COUNT}": "2",
+                    "a-0-b": "2",
+                    "a-1-c": "3",
+                },
+            )
+        )
+
+    def test_mapping_row_with_no_keys_via_direct_value(self):
+        """An empty-dict direct row is real data, not an untouched placeholder."""
+
+        class Row(forms.Form):
+            b = forms.IntegerField()
+
+        class Form(forms.Form):
+            a = nestingdolls.ListField(nestingdolls.DictField(Row))
+
+        self.assertKeylessRowIsRequired(self.build_direct_form(Form, "a", [{}]))
+
+    def test_mapping_row_with_no_keys_via_querydict(self):
+        """A declared row with no submitted keys is real data too, not skippable."""
+
+        class Row(forms.Form):
+            b = forms.IntegerField()
+
+        class Form(forms.Form):
+            a = nestingdolls.ListField(nestingdolls.DictField(Row))
+
+        self.assertKeylessRowIsRequired(
+            self.build_querydict_form(
+                Form, {f"a-{TOTAL_FORM_COUNT}": "1", f"a-{INITIAL_FORM_COUNT}": "1"}
+            )
+        )
+
+
+class SequenceNestedListRowTestCase(FormBindingUnitTestCase):
+    """A leaf two levels deep inside a nested list validates the same in either style.
+
+    Same regression guard as ``SequenceScalarRowTestCase``, one nesting
+    level deeper: a direct ``ListField(ListField(...))`` value's inner
+    row error must still render inline, not just clean correctly.
+    """
+
+    def assertNestedLeafError(self, form):
+        """Assert the bad leaf at outer row 0, inner row 1 shows its own error."""
+        self.assertIs(form.is_valid(), False)
+        html = form.as_p()
+        self.assertInHTML("<li>Enter a whole number.</li>", html)
+        self.assertIn('name="outer-0-1" value="bad"', html)
+
+    def test_nested_list_leaf_error_via_direct_value(self):
+        """A bad leaf two levels deep in a direct nested list still shows its error."""
+
+        class Form(forms.Form):
+            outer = nestingdolls.ListField(nestingdolls.ListField(forms.IntegerField()))
+
+        self.assertNestedLeafError(self.build_direct_form(Form, "outer", [[1, "bad"]]))
+
+    def test_nested_list_leaf_error_via_querydict(self):
+        """A bad leaf two levels deep in a dash-row nested list still shows its error."""
+
+        class Form(forms.Form):
+            outer = nestingdolls.ListField(nestingdolls.ListField(forms.IntegerField()))
+
+        self.assertNestedLeafError(
+            self.build_querydict_form(
+                Form,
+                {
+                    f"outer-{TOTAL_FORM_COUNT}": "1",
+                    f"outer-{INITIAL_FORM_COUNT}": "1",
+                    f"outer-0-{TOTAL_FORM_COUNT}": "2",
+                    f"outer-0-{INITIAL_FORM_COUNT}": "2",
+                    "outer-0-0": "1",
+                    "outer-0-1": "bad",
+                },
+            )
+        )
+
+
 class SyntheticSubmissionCountdownContractTestCase(FormBindingUnitTestCase):
     """Define behavior for manually nested private countdown scopes.
 
@@ -2140,7 +2443,7 @@ class SyntheticSubmissionCountdownContractTestCase(FormBindingUnitTestCase):
             (f"b-0-{INITIAL_FORM_COUNT}", "0"),
             ("b-0-0", "hello"),
         ]
-        form = self.post_urlencoded_form(Form, pairs)
+        form = self.build_querydict_form(Form, pairs)
 
         # Synthetic only: no shipped code path opens this scope by hand.
         widget = form.fields["a"].widget

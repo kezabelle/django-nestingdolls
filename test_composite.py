@@ -442,5 +442,39 @@ class SharedCompositeTestCase(SimpleTestCase):
                 self.assertIs(hasattr(nestingdolls, name), True, name)
 
 
+class SharedCompositeStyleParityTestCase(SimpleTestCase):
+    """A dash-key submission and a direct Python value both bind and clean.
+
+    Each ``CompositeCase`` already carries a dash-key fixture (``dash_data``)
+    and a direct-value fixture (``direct_data``/``direct_cleaned``). Neither
+    style is a fallback for the other: both must validate and clean on their
+    own terms, for both the sequence and the mapping family.
+    """
+
+    def test_sequence_dash_data_cleans_its_one_row(self):
+        family = COMPOSITE_CASES[0]
+        form = form_class_for(family)(family.dash_data)
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data[family.field_name], [1])
+
+    def test_sequence_direct_data_cleans_every_row(self):
+        family = COMPOSITE_CASES[0]
+        form = form_class_for(family)(family.direct_data)
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data[family.field_name], family.direct_cleaned)
+
+    def test_mapping_dash_data_cleans_its_one_child(self):
+        family = COMPOSITE_CASES[1]
+        form = form_class_for(family)(family.dash_data)
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data[family.field_name], {"a": 1, "label": ""})
+
+    def test_mapping_direct_data_cleans_every_child(self):
+        family = COMPOSITE_CASES[1]
+        form = form_class_for(family)(family.direct_data)
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data[family.field_name], family.direct_cleaned)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

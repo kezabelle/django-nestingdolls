@@ -205,6 +205,16 @@ class MappingField(CompositeField):
         """Build the cleaned output from the child form data."""
         return self.output(data)
 
+    def _compress_defaulted(self, data: dict[str, object]) -> object | None:
+        """Call ``self.output`` with every declared name defaulted, then filled by data.
+
+        ``NamedTupleField`` and ``DataclassField`` both build their output this
+        way: every declared name gets ``None`` unless ``data`` supplies it.
+        """
+        if not data:
+            return None
+        return self.output(**(dict.fromkeys(self.inferred_names) | data))
+
     def _clean_form(self, form: BaseForm) -> object:
         """Return the cleaned data of the child Form, or raise its errors.
 
@@ -393,12 +403,7 @@ class NamedTupleField(MappingField):
         return super().initial_value(as_dict() if callable(as_dict) else value)
 
     def compress(self, data: dict[str, object]) -> tuple[object, ...] | None:
-        if not data:
-            return None
-        return cast(
-            tuple[object, ...],
-            self.output(**(dict.fromkeys(self.inferred_names) | data)),
-        )
+        return cast(tuple[object, ...] | None, self._compress_defaulted(data))
 
 
 class DataclassField(MappingField):
@@ -481,9 +486,7 @@ class DataclassField(MappingField):
         return super().initial_value(value)
 
     def compress(self, data: dict[str, object]) -> object | None:
-        if not data:
-            return None
-        return self.output(**(dict.fromkeys(self.inferred_names) | data))
+        return self._compress_defaulted(data)
 
 
 class SequenceField(CompositeField):

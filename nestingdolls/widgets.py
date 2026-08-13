@@ -64,6 +64,17 @@ class CompositeWidget(Widget):
             """Copy input values from one key to another."""
             result.setlist(target, self.values_for(data, source))
 
+        def canonical(self, key: object, name: str) -> str | None:
+            """Return an accepted child key, or ``None``."""
+            child_key = self.child_key(key, name)
+            if child_key is None or not self._valid_child(child_key):
+                return None
+            return f"{name}-{child_key}"
+
+        def _valid_child(self, child_key: str) -> bool:
+            """Report whether one child key part is acceptable to this composite."""
+            raise NotImplementedError
+
     @dataclasses.dataclass(frozen=True, slots=True)
     class Input:
         """Hold the canonical data and file values of one submission."""
@@ -192,21 +203,13 @@ class MappingWidget(CompositeWidget):
             """Return the declared child names of the child Form."""
             return tuple(self.form_class().fields)
 
-        def canonical(self, key: object, name: str) -> str | None:
-            """Return a canonical declared-child key, or ``None``."""
-            child_key = self.child_key(key, name)
-            if child_key is None:
-                return None
-            key = f"{name}-{child_key}"
-            return (
-                key
-                if any(
-                    key == f"{name}-{child_name}"
-                    or key.startswith(f"{name}-{child_name}{separator}")
-                    for child_name in self.names
-                    for separator in ("_", "-")
-                )
-                else None
+        def _valid_child(self, child_key: str) -> bool:
+            """Report whether the child key names a declared field of the child Form."""
+            return any(
+                child_key == child_name
+                or child_key.startswith(f"{child_name}{separator}")
+                for child_name in self.names
+                for separator in ("_", "-")
             )
 
     keys: Keys
@@ -479,27 +482,23 @@ class SequenceWidget(CompositeWidget):
             if self.absolute_max >= 10**self.max_index_digits:
                 raise ValueError("absolute_max must be less than 10000000")
 
-        def canonical(self, key: object, name: str) -> str | None:
-            """Return an accepted management or row key unchanged."""
-            child_key = self.child_key(key, name)
-            if child_key is None:
-                return None
-            key = f"{name}-{child_key}"
+        def _valid_child(self, child_key: str) -> bool:
+            """Report whether the child key is a management key or an in-range row index."""
             if child_key in (
                 TOTAL_FORM_COUNT,
                 INITIAL_FORM_COUNT,
                 MIN_NUM_FORM_COUNT,
                 MAX_NUM_FORM_COUNT,
             ):
-                return key
+                return True
             end = 0
             while end < len(child_key) and "0" <= child_key[end] <= "9":
                 end += 1
                 if end > self.max_index_digits:
-                    return None
+                    return False
             if end == 0 or (end < len(child_key) and child_key[end] not in "-_"):
-                return None
-            return key if int(child_key[:end]) < self.absolute_max else None
+                return False
+            return int(child_key[:end]) < self.absolute_max
 
     @dataclasses.dataclass(slots=True)
     class submission_countdown:
@@ -652,6 +651,32 @@ class SequenceWidget(CompositeWidget):
         formset.sequence_widget = self
         return formset
 
+    def _direct_formset_rows(
+        self, values: Sequence[object], name: str
+    ) -> MultiValueDict[str, object]:
+        """Give each row of a direct value its own key.
+
+        A direct value is one Python list under this field's own name. It
+        carries no per-row browser keys. Build one key per row instead:
+        ``f"{name}-{index}"``. Every composite child already reads a
+        value under its own exact key as a direct value. A mapping or
+        scalar row therefore binds the normal way from this point on.
+
+        This lets the row formset bind for real, instead of staying
+        unbound with only initial rows. A bound row formset can carry
+        its own validation errors. An unbound row formset never can:
+        Django gives an unbound form empty errors, always, on purpose.
+        """
+        rows = MultiValueDict[str, object]()
+        for index, value in enumerate(values):
+            rows.setlist(f"{name}-{index}", [value])
+        total = str(len(values))
+        rows[f"{name}-{TOTAL_FORM_COUNT}"] = total
+        rows[f"{name}-{INITIAL_FORM_COUNT}"] = total
+        rows[f"{name}-{MIN_NUM_FORM_COUNT}"] = str(self.limits.min_length)
+        rows[f"{name}-{MAX_NUM_FORM_COUNT}"] = str(self.limits.max_length)
+        return rows
+
     def read_input(
         self,
         data: Mapping[str, object],
@@ -698,15 +723,6 @@ class SequenceWidget(CompositeWidget):
         ):
             input_data[f"{name}-{field_name}"] = str(value)
         return self.Input(input_data, input_files)
-
-    def value_from_datadict(
-        self,
-        data: Mapping[str, object],
-        files: Mapping[str, object],
-        name: str,
-    ) -> object:
-        """Read a whole sequence value or flattened browser rows once."""
-        return self.value_from_input(self.read_input(data, files, name), name)
 
     def value_from_input(self, input: CompositeWidget.Input, name: str) -> list[object]:
         """Extract a whole sequence value or flattened formset rows."""

@@ -294,13 +294,16 @@ class SequenceBoundField(CompositeBoundField):
         )
 
     @cached_property
+    def has_unflattened_value(self) -> bool:
+        """Report whether a direct value sits under this field's own exact key."""
+        input = self.input
+        return self.html_name in input.data or self.html_name in input.files
+
+    @cached_property
     def formset(self) -> BaseFormSet[Any]:
         """Return the cached, prefix-aware row formset for cleaning and rendering."""
         input = self.input
-        has_unflattened_value = (
-            self.html_name in input.data or self.html_name in input.files
-        )
-        initial_values = self.data if has_unflattened_value else self.initial
+        initial_values = self.data if self.has_unflattened_value else self.initial
         initial = self.field.widget._initial_formset_rows(initial_values)
         if (
             not initial
@@ -309,11 +312,30 @@ class SequenceBoundField(CompositeBoundField):
             and not self.is_bound_formset
         ):
             initial = [self.field.widget._empty_formset_row()]
+        data: MultiValueDict[str, object] | None
+        files: MultiValueDict[str, UploadedFile[Any]] | None
+        if (
+            self.has_unflattened_value
+            and self.form.is_bound
+            and not self.field.disabled
+        ):
+            # A direct value carries no browser row keys, so the row
+            # formset would otherwise stay unbound and could never show
+            # its own row errors: Django gives an unbound form empty
+            # errors, always, on purpose. Give each row its own key
+            # instead, so the formset binds for real.
+            data = self.field.widget._direct_formset_rows(self.data, self.html_name)
+            files = MultiValueDict()
+        else:
+            data = input.data if self.is_bound_formset else None
+            files = (
+                cast("MultiValueDict[str, UploadedFile[Any]]", input.files)
+                if self.is_bound_formset
+                else None
+            )
         formset = self.field.widget._new_formset(
-            data=input.data if self.is_bound_formset else None,
-            files=cast("MultiValueDict[str, UploadedFile[Any]]", input.files)
-            if self.is_bound_formset
-            else None,
+            data=data,
+            files=files,
             initial=initial,
             prefix=self.html_name,
             auto_id=cast(str, self.form.auto_id),
@@ -324,12 +346,8 @@ class SequenceBoundField(CompositeBoundField):
     @cached_property
     def data(self) -> list[object]:
         """Return a whole sequence value or formset row values."""
-        input = self.input
-        has_unflattened_value = (
-            self.html_name in input.data or self.html_name in input.files
-        )
-        if has_unflattened_value:
-            return self.field.widget.value_from_input(input, self.html_name)
+        if self.has_unflattened_value:
+            return self.field.widget.value_from_input(self.input, self.html_name)
         if not self.is_bound_formset:
             return []
         values: list[object] = []
@@ -385,13 +403,9 @@ class SequenceBoundField(CompositeBoundField):
 
     def _has_changed(self) -> bool:
         """Report whole-value edits and row-formset deletions."""
-        input = self.input
-        has_unflattened_value = (
-            self.html_name in input.data or self.html_name in input.files
-        )
         changed = (
             self.field.has_changed(self.initial, self.data)
-            if has_unflattened_value
+            if self.has_unflattened_value
             else super()._has_changed()
         )
         if changed or self.field.disabled:
