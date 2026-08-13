@@ -701,15 +701,19 @@ class SequenceField(CompositeField):
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
 
-        with self.widget.submission_countdown(self.limits.submission_max) as countdown:
-            formset = bound_field.formset
-            valid = formset.is_valid()
-        bound_field.submission_overflow = bool(countdown)
+        # Reserve rows once, at extraction, then clean what extraction
+        # produced. Reading this flag performs that extraction, so cleaning
+        # is never the step that discovers a forged row count: Django's own
+        # has_changed() already reaches extraction first on any form that
+        # permits empty values. A second scope here would find every row
+        # list already built and could only take rows twice.
         if bound_field.submission_overflow:
             raise TooManyFormsValidationError(
                 self.error_messages["submission_too_many_forms"],
                 num=self.limits.submission_max,
             )
+        formset = bound_field.formset
+        valid = formset.is_valid()
         if not valid:
             errors: list[ValidationError] = list(formset.non_form_errors().as_data())
             errors.extend(

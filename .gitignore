@@ -5,3 +5,10 @@ __pycache__
 .idea
 .coverage
 .env*
+dist/
+build/
+.venv
+.vscode
+.mypy_cache
+.ruff_cache
+.hypothesis

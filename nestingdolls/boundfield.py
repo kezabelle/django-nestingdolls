@@ -259,7 +259,7 @@ class SequenceBoundField(CompositeBoundField):
         super().__init__(form, field, name)
         if not isinstance(self.field, SequenceField):
             raise TypeError("field must be a SequenceField")
-        self.submission_overflow = False
+        self._submission_overflow = False
 
     @cached_property
     def is_bound_formset(self) -> bool:
@@ -331,7 +331,29 @@ class SequenceBoundField(CompositeBoundField):
             )
         if not self.is_bound_formset:
             return []
-        return [form["value"].data for form in self.formset.forms]
+        with self.field.widget.submission_countdown(
+            self.field.limits.submission_max
+        ) as countdown:
+            rows = [form["value"].data for form in self.formset.forms]
+        if countdown.owns_scope and countdown:
+            # Extraction ran out. Only the scope that owns the shared
+            # counter records it, so cleaning reports one error for the
+            # whole submission instead of one child item error per row.
+            self._submission_overflow = True
+        return rows
+
+    @property
+    def submission_overflow(self) -> bool:
+        """Report whether extracting this field's rows ran out of the budget.
+
+        Reading ``data`` is the step that reserves rows, so read it here.
+        Every caller therefore gets an answer about a finished extraction,
+        and no caller can clean or render rows that nothing reserved. The
+        read is cached, so asking twice costs nothing and reserves nothing
+        a second time.
+        """
+        _ = self.data
+        return self._submission_overflow
 
     def prepare_widget(self, widget: CompositeWidget) -> None:
         """Give the sequence widget the formset that owns row state."""

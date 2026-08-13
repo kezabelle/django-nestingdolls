@@ -4,10 +4,10 @@ RUFF := $(UV_RUN) ruff
 MYPY := $(UV_RUN) mypy
 NPM := npm --silent
 
-PYTHON_FILES := demo.py nestingdolls test_composite.py test_dataclassfield.py test_dictfield.py test_hostile.py test_listfield.py test_namedtuplefield.py test_patches.py mypy_settings.py
+PYTHON_FILES := demo.py nestingdolls pathological.py test_composite.py test_dataclassfield.py test_dictfield.py test_hostile.py test_listfield.py test_namedtuplefield.py test_patches.py mypy_settings.py
 COMPILED_JS := nestingdolls/static/nestingdolls/sequence.js
 
-.PHONY: js jsdrift tscheck jstest format formatcheck ruff rufffix mypy test check fix
+.PHONY: js jsdrift tscheck jstest format formatcheck ruff rufffix mypy test pathological distcheck check fix
 
 .DEFAULT_GOAL := help
 
@@ -52,8 +52,25 @@ mypy: ## Run mypy with strict checks.
 test: ## Run the Django test files.
 	$(PYTHON) -W error::DeprecationWarning -W error::PendingDeprecationWarning -m unittest test_composite test_dataclassfield test_listfield test_dictfield test_hostile test_namedtuplefield test_patches
 
+pathological: ## Measure what hostile nested submissions cost. Not part of check.
+	$(PYTHON) pathological.py $(ARGS)
+
+distcheck: ## Build both distributions from the tracked tree and check their metadata.
+	@tmp=$$(mktemp -d) ; \
+	status=0 ; \
+	git archive --format=tar $$(git write-tree) | tar -xf - -C $$tmp && \
+	uv build --out-dir $$tmp/dist $$tmp >$$tmp/build.log 2>&1 && \
+	$(UV_RUN) twine check --strict $$tmp/dist/* && \
+	tar -tzf $$tmp/dist/*.tar.gz | grep -q '/LICENSE$$' || status=1 ; \
+	if [ $$status -ne 0 ]; then \
+		cat $$tmp/build.log ; \
+		echo "packaging metadata incomplete: the tracked tree does not build a publishable distribution."; \
+	fi ; \
+	rm -rf $$tmp ; \
+	exit $$status
+
 check: ## Run every fast check. Writes nothing, so CI can gate on it.
-check: tscheck jsdrift jstest ruff formatcheck test mypy
+check: tscheck jsdrift jstest ruff formatcheck test distcheck mypy
 
 fix: ## Apply the formatter and the lint auto-fixes.
 fix: rufffix format

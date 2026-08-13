@@ -69,9 +69,15 @@ class HostileProbeView(View):
     field_name = "values"
     show_html = False
     form_kwargs = None
+    # Django itself calls has_changed() before _clean_fields() whenever a form
+    # is empty_permitted, so change detection is a real entry point into row
+    # extraction and not only an application's own call.
+    change_detection_first = False
 
     def post(self, request):
         form = self.form_class(request.POST, request.FILES, **(self.form_kwargs or {}))
+        if self.change_detection_first:
+            form.has_changed()
         valid = form.is_valid()
         stored = form.errors.as_data()
         data = {
@@ -301,6 +307,21 @@ urlpatterns = [
         HostileProbeView.as_view(
             form_class=SequenceHostileFixtures.NestedTextListForm,
             show_html=True,
+        ),
+    ),
+    path(
+        "hostile-changed-first-nested-list/",
+        HostileProbeView.as_view(
+            form_class=SequenceHostileFixtures.NestedTextListForm,
+            change_detection_first=True,
+            show_html=True,
+        ),
+    ),
+    path(
+        "hostile-empty-permitted-nested-list/",
+        HostileProbeView.as_view(
+            form_class=SequenceHostileFixtures.NestedTextListForm,
+            form_kwargs={"empty_permitted": True, "use_required_attribute": False},
         ),
     ),
     path(
@@ -1163,6 +1184,140 @@ class HostileCleanCostTestCase(HostileClientTestCase):
             f"a 14-key, three-level submission asking for 8000 rows took "
             f"{elapsed:.3f}s to correctly reject",
         )
+
+    def _count_rows_built(self):
+        """Count row forms built while the returned counter is in scope.
+
+        Wall-clock budgets catch a runaway cost but not a small regression.
+        This counts the exact work an attacker's ``TOTAL_FORMS`` keys buy:
+        one call per row form Django constructs, at every nesting level.
+        """
+        built = []
+        formset_class = nestingdolls.SequenceWidget.RowFormSet
+        original = formset_class._construct_form
+
+        def counting(inner_self, index, **kwargs):
+            built.append(index)
+            return original(inner_self, index, **kwargs)
+
+        formset_class._construct_form = counting
+        self.addCleanup(setattr, formset_class, "_construct_form", original)
+        return built
+
+    def test_client_cannot_bypass_the_shared_budget_with_change_detection(self):
+        """Change detection reserves rows from the same budget cleaning uses.
+
+        ``Form.has_changed()`` extracts every row before any field is cleaned,
+        and Django itself calls it from ``full_clean()``. A submission that
+        arrives through change detection first must reach the same rejection,
+        for the same work, as one that reaches cleaning first.
+        """
+        payload = self._amplified_sequence_payload(
+            "values", outer_total=20, inner_total=2000
+        )
+        self.assertEqual(len(payload), 42)
+
+        built = self._count_rows_built()
+        response = self.client.post("/hostile-changed-first-nested-list/", payload)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIs(body["valid"], False)
+        self.assertEqual(body["errors"], {"values": ["too_many_forms"]})
+        # Extraction and the error render each hold one budget, so the whole
+        # request stays a small constant multiple of submission_max instead
+        # of the 40000 rows these 42 keys asked for.
+        self.assertLessEqual(
+            len(built),
+            4000,
+            f"42 keys claiming 40000 rows built {len(built)} row forms once "
+            "change detection ran before cleaning -- every nesting level got "
+            "a fresh budget instead of sharing one",
+        )
+
+    def test_client_cannot_bypass_the_shared_budget_with_empty_permitted(self):
+        """An ``empty_permitted`` form shares the budget too.
+
+        ``BaseForm.full_clean`` calls ``has_changed()`` itself for such a form,
+        so this path needs no unusual application code at all.
+        """
+        payload = self._amplified_sequence_payload(
+            "values", outer_total=20, inner_total=2000
+        )
+
+        built = self._count_rows_built()
+        response = self.client.post("/hostile-empty-permitted-nested-list/", payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertLessEqual(
+            len(built),
+            4000,
+            f"an empty_permitted form built {len(built)} row forms from 42 "
+            "keys claiming 40000 rows",
+        )
+
+    def test_client_sees_a_reported_rejection_not_a_silent_truncation(self):
+        """A clipped submission is rejected, not quietly cut down to size.
+
+        Extraction records that the budget ran out. Cleaning reads the already
+        clipped formset, so it cannot rediscover the overflow itself and must
+        honour what extraction recorded. Otherwise the user's oversized
+        submission would appear to save with rows missing.
+        """
+        payload = self._amplified_sequence_payload(
+            "values", outer_total=20, inner_total=2000
+        )
+        payload["values-0-0"] = "real content"
+
+        response = self.client.post("/hostile-empty-permitted-nested-list/", payload)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIs(body["valid"], False)
+        self.assertEqual(body["errors"], {"values": ["too_many_forms"]})
+
+    def test_client_keeps_exact_budget_use_valid_after_change_detection(self):
+        """Spending the budget exactly still succeeds on the extraction path.
+
+        The shared budget must bound hostile multiplication without rejecting a
+        submission that fits.
+        """
+        payload = self._amplified_sequence_payload(
+            "values", outer_total=1, inner_total=1999
+        )
+
+        response = self.client.post("/hostile-changed-first-nested-list/", payload)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIs(body["valid"], True, body["errors"])
+
+    def test_client_keeps_a_legitimate_submission_whole_after_change_detection(self):
+        """Change detection must not consume the rows cleaning needs.
+
+        A budget spent twice on the same rows would halve it and could reject or
+        truncate an ordinary submission.
+        """
+        payload = self._amplified_sequence_payload(
+            "values", outer_total=2, inner_total=3
+        )
+        for outer in range(2):
+            for inner in range(3):
+                payload[f"values-{outer}-{inner}"] = f"r{outer}c{inner}"
+
+        built = self._count_rows_built()
+        response = self.client.post("/hostile-changed-first-nested-list/", payload)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIs(body["valid"], True, body["errors"])
+        self.assertEqual(
+            body["value"],
+            [["r0c0", "r0c1", "r0c2"], ["r1c0", "r1c1", "r1c2"]],
+        )
+        # Two outer rows and three inner rows each: the request builds the
+        # rows it was sent, and change detection does not double the work.
+        self.assertLessEqual(len(built), 16, len(built))
 
 
 @override_settings(ROOT_URLCONF=__name__)

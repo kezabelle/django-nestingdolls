@@ -3,7 +3,8 @@
 Every command below is a `make` target. Run `make help` for the list.
 
 - `make check` runs everything and writes nothing, so it is also the CI gate:
-  `tscheck`, `jsdrift`, `jstest`, `ruff`, `formatcheck`, `test`, `mypy`.
+  `tscheck`, `jsdrift`, `jstest`, `ruff`, `formatcheck`, `test`, `distcheck`,
+  `mypy`.
 - `make fix` applies the lint auto-fixes and the formatter. `check` never does.
 
 # TypeScript
@@ -26,6 +27,11 @@ Every command below is a `make` target. Run `make help` for the list.
   test imports it.
 - `make ruff` and `make formatcheck` cover the maintained Python files listed in
   the Makefile's `PYTHON_FILES`.
+- `make distcheck` builds both distributions from the tracked tree in a
+  temporary directory and runs `twine check --strict` on them, then confirms
+  the sdist carries `LICENSE`. It reads `git write-tree`, not the working
+  tree, so a build input that is present on disk but never `git add`ed fails
+  the gate instead of shipping an artifact with no README or no license text.
 
 # Input limits
 
@@ -62,12 +68,46 @@ to this package.
   parsing, extraction, or rendering. It starts one context-local counter at
   the outer sequence; nested sequences reuse it. Do not open it in a
   mapping, `clean()`, a shared composite base class, or a field-tree walk.
+  A site needs the scope only if it does one of two things: spend budget, or
+  drive the lazy recursion that builds a nested level. Building a row form
+  does not build the rows inside it. Those appear only when something reads
+  or renders that row's value, so the scope must stay open across the read,
+  and the reader is the site that must hold it. That gives exactly five
+  sites, and any sixth is a duplicate. Three spend: `RowFormSet.
+  total_form_count` (a submitted `TOTAL_FORMS`), `SequenceWidget.
+  value_from_datadict` (a whole Python list, and it drives extraction),
+  and `SequenceField.prepare_value` (server initial rows, and it drives
+  preparation). Two only drive: `SequenceWidget.get_context` for a render
+  and `SequenceBoundField.data` for an extraction.
+  Everything else inherits. Cleaning and change detection both reach rows
+  through `SequenceBoundField.data`, so `SequenceField._clean_bound_field`
+  reads `bound_field.submission_overflow`, which performs that one
+  extraction, instead of opening a scope of its own. A second scope there
+  would find every row list already built and could only take rows twice.
+  Only the scope that owns the shared counter (`owns_scope`) records
+  overflow, so one oversized submission reports one `too_many_forms` error,
+  not one child item error per row.
+  That list is closed, and a sixth site is not a harmless addition. Only the
+  owning scope reports, so a scope opened anywhere above a sequence takes
+  ownership away from `SequenceBoundField.data` and silences the report.
+  Rows past the budget are then dropped from a submission that still cleans
+  as valid. A sequence configured for 50 rows, extracted under an outer
+  scope of 20, keeps 20 rows, raises nothing, and loses the other 10. The
+  first scope entered also fixes the budget for every sequence beneath it,
+  so an outer scope built from anything other than that sequence's own
+  `limits.submission_max` silently replaces the limit the application
+  chose. This is why the scope does not belong in `CompositeBoundField`: a
+  mapping reaches its children through a child `Form` and a sequence reaches
+  its rows through a `BaseFormSet`, so the shared base has no row-building
+  path to wrap, and it has no `absolute_max` from which to derive a budget.
 - Call `take(count)` at the earliest point a submitted row count turns into
-  built rows. Two points qualify: `RowFormSet.total_form_count`, where a
-  `TOTAL_FORMS` value becomes the number of row forms Django builds, and the
-  whole-value clip in `SequenceWidget.value_from_datadict`, where a Python
-  list under the field's own name becomes rows. A step that waits until
-  after row construction to call `take()` has already paid to build every
+  built rows. Two points qualify for a submitted count:
+  `RowFormSet.total_form_count`, where a `TOTAL_FORMS` value becomes the
+  number of row forms Django builds, and the whole-value clip in
+  `SequenceWidget.value_from_datadict`, where a Python list under the field's
+  own name becomes rows. `SequenceField.prepare_value` also takes, but for
+  server-provided initial rows rather than a submission. A step that waits
+  until after row construction to call `take()` has already paid to build every
   row a forged `TOTAL_FORMS` asked for, once for every sibling row that
   reaches it. `take(count)` returns only rows that fit. Cleaning reports
   `too_many_forms` for the complete bound submission when extraction ran

@@ -420,6 +420,21 @@ class SequenceWidget(CompositeWidget):
             """Report whether this outer scope exceeded its shared allowance."""
             return self.ran_out
 
+        @property
+        def owns_scope(self) -> bool:
+            """Report whether this scope started the shared counter.
+
+            Only the outermost scope of one extraction owns the counter.
+            A nested scope found the shared context already open, so it
+            must not report the shared overflow as its own field's
+            overflow. The outer field reports it once for the whole
+            submission.
+
+            ``__exit__`` resets the token but does not clear it, so this
+            stays readable after the ``with`` block ends.
+            """
+            return self.token is not None
+
         def take(self, count: int) -> int:
             """Reserve the rows that fit in the active shared allowance.
 
@@ -600,28 +615,33 @@ class SequenceWidget(CompositeWidget):
         Row keys outrank a value under the field's own exact name, so a
         forged exact-name key cannot replace submitted rows. Without row
         keys, a whole value wins over management keys alone.
+
+        One scope covers both ways out. The whole-value branch spends the
+        budget on a Python list; the formset branch spends it on rows, and
+        keeps it open while each row's value is read, because reading a
+        row is what builds the next level down.
         """
-        has_rows = self.has_row_keys(data, name) or self.has_row_keys(files, name)
-        if not has_rows:
-            whole_values = _getlist(data, name) or _getlist(files, name)
-            if whole_values:
-                values = (
-                    whole_values[0]
-                    if len(whole_values) == 1 and isinstance(whole_values[0], list)
-                    else whole_values
-                )
-                with self.submission_countdown(self.limits.submission_max) as countdown:
+        with self.submission_countdown(self.limits.submission_max) as countdown:
+            has_rows = self.has_row_keys(data, name) or self.has_row_keys(files, name)
+            if not has_rows:
+                whole_values = _getlist(data, name) or _getlist(files, name)
+                if whole_values:
+                    values = (
+                        whole_values[0]
+                        if len(whole_values) == 1 and isinstance(whole_values[0], list)
+                        else whole_values
+                    )
                     return values[: countdown.take(len(values))]
-            if not self.has_management_keys(data, name) and not (
-                self.has_management_keys(files, name)
-            ):
-                return []
-        formset = self.new_formset(
-            data=data,
-            files=cast("MultiValueDict[str, UploadedFile[Any]]", files),
-            prefix=name,
-        )
-        return [form["value"].data for form in formset.forms]
+                if not self.has_management_keys(data, name) and not (
+                    self.has_management_keys(files, name)
+                ):
+                    return []
+            formset = self.new_formset(
+                data=data,
+                files=cast("MultiValueDict[str, UploadedFile[Any]]", files),
+                prefix=name,
+            )
+            return [form["value"].data for form in formset.forms]
 
     def initial_rows(self, value: Sequence[object] | None) -> list[dict[str, object]]:
         """Adapt public sequence values to the concrete row form's initial data."""
