@@ -43,6 +43,11 @@ than trusting the figures:
     cp pathological.py pyproject.toml uv.lock /tmp/before/
     cd /tmp/before && BENCH_ABORT=6 uv run --group dev python pathological.py
 
+The timing figures have their own "before", the commit preceding the one that
+removed the per-key work described under "What was reduced, and what is left".
+Rebuild it the same way. Row counts and verdicts are identical across that
+change, so only the seconds column moves.
+
 What the recorded run showed
 ----------------------------
 Thirteen cases, all inside their row bound. Before the fix, four were. The other
@@ -50,10 +55,10 @@ nine reach rows through change detection, an ``empty_permitted`` form, a render,
 a hidden initial, or a mapping, and every one of them was still building rows
 when the abort timer killed it, at 6s and again at 20s.
 
-    a claim 498x wider  ->  rows built x1.0,  wall time x13.1
+    a claim 498x wider  ->  rows built x1.0,  wall time x3.0
 
 Rows built stayed flat at one budget per entry point. A 998-key claim for 996,498
-rows was answered with 2,000 rows in about 0.39s, and the same claim spread over
+rows was answered with 2,000 rows in about 0.08s, and the same claim spread over
 three or five levels cost no more, because levels share one budget instead of
 each getting a fresh one. Peak allocation stayed between 5 and 71 MB.
 
@@ -67,13 +72,13 @@ bounded in all three.
 Two costs remain. Both are ceilings rather than amplification, because a request
 cannot raise either bound:
 
-- About 0.39s for the widest single-field case, against 0.03s for a 4-key claim
-  asking for the same number of rows. Rows built are identical, so the whole
-  difference is per-key work. See the next section.
-- About 2.4s and 16,000 rows for a form with eight sibling nested sequence
+- About 0.08s for the widest single-field case, against 0.03s for a 4-key claim
+  asking for the same number of rows. Rows built are identical, so what is left
+  of the difference is per-key work. See the next section.
+- About 0.61s and 16,000 rows for a form with eight sibling nested sequence
   fields, which is budget x fields x entry points. The field count is fixed by
   the form's author, the same position Django takes for ``absolute_max`` per
-  formset. Quote this number, not the 0.39s, as the per-request ceiling.
+  formset. Quote this number, not the 0.08s, as the per-request ceiling.
 
 Two ways this script had already misled its own author, both fixed here, both
 worth re-checking if the numbers ever look surprising. Measuring peak allocation
@@ -103,65 +108,112 @@ client and the view on top and tells you nothing. The contrast pair is the whole
 method: both build the same 2,000 rows, so whatever separates their profiles is
 per-key cost, and per-key cost is all that is left to win.
 
-On the recorded run this pointed at 2.7 million ``str.startswith`` calls, in two
-functions that answer a question about one prefix by scanning every submitted
-key:
+On the recorded run no function in this package appears in the top ten of
+either contrast profile, and ``str.startswith`` is down from 2.7 million calls
+to about 2,000. What is left in both is Django's own per-row form construction:
+``copy.deepcopy`` of ``base_fields`` in ``BaseForm.__init__`` and the
+``Field.__deepcopy__`` chain under it, about 0.41s of the 1.16s profiled
+``8 sibling`` request.
 
-- ``SequenceWidget.RowFormSet.row_carries_submitted_value``, once per row.
-- ``SequenceWidget.has_row_keys``, once per nested field per level.
+That is per-row cost, not per-key cost, so the contrast pair no longer
+separates it: both cases build 2,000 rows and both pay it. It is bounded by the
+row budget, which is what bounds rows built. Do not try to flatten it by
+sharing fields across rows. ``get_context`` writes to a management field's
+widget attributes, ``_row_context`` assigns each row's ``render_state``, and
+``configure`` writes to the widget; sharing widgets between rows is the
+cross-request contamination ``MappingWidget.__deepcopy__`` exists to prevent.
 
-Both are O(rows x keys), bounded by the row budget and by
-``DATA_UPLOAD_MAX_NUMBER_FIELDS``. Confirm that shape before acting on it: it
-shows up as a very large ``ncalls`` on ``startswith``, and as a ``tottime`` that
-grows with the key count while ``built`` in the table does not move.
+What was reduced, and what is left
+----------------------------------
+The per-key work above is gone. Both functions now do one pass over the keys
+where they did one pass per row, and the wall-time amplification fell from
+x13.1 to x3.0 without moving a single ``built`` figure or verdict.
 
-If you decide to reduce it
---------------------------
-The shape of the work is one pass over the keys per extraction instead of one
-pass per row. None of what follows is verified. It is where to start looking.
+``row_carries_submitted_value`` is a set lookup against
+``RowFormSet.rows_with_submitted_values``, which indexes the row prefixes
+carrying a non-blank value in one pass over the keys. The lifetime is the
+formset, which is constructed per extraction with its own ``data`` and
+``files``, so no new machinery was needed and the budget did not change. The
+two homes ruled out before are still wrong, and still worth recording as
+wrong: not the widget, which is built once and reused for every request, so an
+index cached there serves one user another user's POST; and not a module-level
+cache keyed by ``id(source)``, because an identity is reused once the first
+mapping is collected and entries would collide silently.
 
-Nothing in this section is a rule, including the parts that sound like one. This
-script exists to work out whether the current design is the right one, so what it
-measures is exactly the kind of evidence that should be able to overturn that
-design. ``AGENTS.md`` records how the row budget works today, not how it has to
-work. If something measured here justifies changing that, change it there in the
-same commit with the measurement as the reason, so the code and the written
-invariant never drift apart.
+``has_row_keys``'s repeats came from ``SequenceBoundField.has_whole_value`` and
+``is_bound_formset``, one bound field per row. Both are ``cached_property``,
+which is why the caching already there did not help. Both now answer in O(1)
+for a submission carrying management keys and no exact-name key, by testing the
+cheap predicate first: ``is_bound_formset`` tries the four management keys
+before scanning for a row key, and ``has_whole_value`` tries the field's own
+exact key before asking whether row keys outrank it. Neither reordering changes
+an answer, because both predicates are side-effect free.
 
-The lifetime of such an index is the real problem. Two candidate homes are simply
-wrong, for reasons that have nothing to do with policy:
+A submission that sends a value under each row's own exact name still pays the
+scan, because then the exact-key test passes. That path is bounded by the row
+budget and by ``DATA_UPLOAD_MAX_NUMBER_FIELDS``, and it buys fewer rows in
+exchange: a 998-key version of it was measured at 0.09s against 0.31s before,
+building the same 2,000 rows. That shape is what pays for the shape of
+``has_row_keys``: a plain loop rather than a generator expression, and slice
+comparisons rather than ``startswith`` and an index. Measured together on it,
+those two are worth about 6%. Both keep the prefix length in a local, which is
+the whole reason a slice is cheaper than a call here.
 
-- Not on the widget. A field's widget is built once and reused for every request,
-  so an index cached there serves one user another user's POST.
-- Not in a module-level cache keyed by ``id(source)``. An identity is reused once
-  the first mapping is collected, so entries would collide silently.
+``submission_countdown`` was not touched and did not need to be. The judgment
+call this section used to set up -- whether to widen the countdown scope to hold
+an index -- did not have to be made, so nothing was traded away. It still holds
+one integer, and that is still the only thing between a forged ``TOTAL_FORMS``
+and unbounded work. Keep it that way.
 
-The countdown scope is the interesting case, and it is a judgment call rather
-than a wrong answer. Today it holds one integer, which is why it can be read and
-believed in a single sitting, and it is the only thing between a forged
-``TOTAL_FORMS`` and unbounded work. Widening it trades that away, and a mistake
-in a primitive of that kind is a vulnerability rather than a slowdown. Weigh that
-against the 0.39s it might save. If the trade is worth making, the thing to argue
-is why the wider version is still small enough to audit in one sitting.
+The behavior to watch is unchanged, and ``row_carries_submitted_value``'s own
+docstring is still where it is written down: a rendered row always sends its
+delete key and always sends blank values, so only a non-blank value counts as
+real content. ``empty_permitted`` correctness rests on that distinction. The
+index preserves it by excluding each row's own delete key and nothing else, so
+a nested row's delete key, ``values-3-0-DELETE``, still counts as content for
+row ``values-3`` exactly as the scan did. Verify with ``make test`` and this
+script, then re-record the numbers above.
 
-``row_carries_submitted_value`` looks tractable without that trade, because it is
-already a method on ``RowFormSet``, and a formset is constructed per extraction
-with its own ``data`` and ``files``. A ``cached_property`` there holding the row
-prefixes that carry a non-blank value would cost one pass over the keys per
-formset, and each row would then do a set lookup. The lifetime is correct with no
-new machinery and no change to the budget.
+Slice comparisons, not startswith
+---------------------------------
+A loop that tests a prefix against every submitted key is the shape this whole
+file is about, so its per-key cost is worth stating concretely. Hold the prefix
+length in a local and compare a slice. Do not call ``startswith``:
 
-``has_row_keys`` is harder, being a widget method over an arbitrary mapping. Its
-callers are the ones with a usable lifetime: ``is_bound_formset`` and
-``has_whole_value`` are already cached per bound field. Find out which caller
-drives the repeats before touching the function itself.
+    start = len(prefix)
+    if key[:start] == prefix and "0" <= key[start : start + 1] <= "9":
 
-The behavior to watch is described in ``row_carries_submitted_value``'s own
-docstring: a rendered row always sends its delete key and always sends blank
-values, so only a non-blank value counts as real content. ``empty_permitted``
-correctness rests on that distinction, and an index that flattens it will pass a
-quick read and fail ``test_hostile``. Verify with ``make test`` and this script,
-then re-record the numbers above.
+``str.startswith`` accepts ``(prefix, start, end)``, so it is ``METH_VARARGS``
+and every call builds an argument tuple. ``key[:start]`` compiles to a
+``BINARY_SLICE`` opcode: no method lookup, no tuple. The throwaway string comes
+off pymalloc's free list and is released immediately, so the allocation the
+slice appears to add does not show up as churn. Measured over the 998-key
+payload of ``2 levels, 498x2000 spread``, slicing wins in every profile:
+
+    prefix matches almost no key (the hot call)   58.5us -> 48.3us   x1.21
+    prefix matches every key                       0.43us ->  0.39us  x1.11
+    the full rows_with_submitted_values pass       192us  -> 174us    x1.10
+
+Neither slice needs a length guard. A key shorter than the prefix yields a
+shorter string, which cannot equal it. A key that ends at the prefix yields
+``""``, which sorts below ``"0"``.
+
+This applies where the length is already in hand and the loop reads every key:
+``SequenceWidget.has_row_keys`` and ``RowFormSet.rows_with_submitted_values``.
+``MappingWidget._accepts_key`` still calls ``removeprefix``; it measured at or
+below 0.002s here, so it is not worth the same treatment on this evidence.
+
+One rearrangement that looks like a further win is not one. Testing the cheap
+digit character before the prefix, to skip ``startswith`` calls, measured x0.61:
+it avoids only 202 of 998 calls and pays a slice plus two comparisons on all
+998. Do not do it.
+
+Finally, a trap specific to this script. ``cProfile`` counts ``startswith`` as a
+call and charges its own per-call overhead to it, while a slice is an opcode and
+is invisible. Replacing one with the other therefore improves a profile by more
+than it improves the request, and removes the ``ncalls`` line that made the
+remaining prefix tests easy to find. Believe wall time, not the disappearance of
+a ``startswith`` row.
 """
 
 import contextlib

@@ -346,6 +346,52 @@ class SequenceWidget(CompositeWidget):
                 form.empty_permitted = False
             return form
 
+        @cached_property
+        def rows_with_submitted_values(self) -> set[str]:
+            """Index the row prefixes whose keys carry a non-blank value.
+
+            One pass over the submitted keys answers every row of this
+            formset. Asking each row to scan the keys itself is
+            ``O(rows x keys)``, and a forged ``TOTAL_FORMS`` key buys that
+            product more cheaply than it buys anything else.
+
+            Derive each key's row from this formset's own prefix: the
+            segment after it, up to the next ``-``. ``values-3``,
+            ``values-3-0`` and ``values-3-TOTAL_FORMS`` all belong to row
+            ``values-3``; ``values-31`` does not. A key that yields no real
+            row prefix, such as ``values-TOTAL_FORMS``, lands in the set
+            under its own name and is never looked up.
+
+            Compare a slice rather than calling ``startswith``: the prefix
+            length is already in hand, and ``str.startswith`` builds an
+            argument tuple on every call where a slice comparison builds
+            none. A key shorter than the prefix yields a shorter string,
+            which cannot equal it, so the slice needs no length guard.
+            """
+            prefix = f"{self.prefix}-"
+            start = len(prefix)
+            found: set[str] = set()
+            for source in (self.data, self.files):
+                for key in source:
+                    if not isinstance(key, str) or key[:start] != prefix:
+                        continue
+                    end = key.find("-", start)
+                    if end < 0:
+                        row = key
+                    else:
+                        row = key[:end]
+                        if key[end + 1 :] == DELETION_FIELD_NAME:
+                            # The row's own delete key. A rendered row
+                            # always sends it, so it shows no content.
+                            continue
+                    if row in found:
+                        continue
+                    for value in _getlist(source, key):
+                        if value is not None and value != "":
+                            found.add(row)
+                            break
+            return found
+
         def row_carries_submitted_value(self, prefix: str | None) -> bool:
             """Report whether the browser sent a non-blank value for this row.
 
@@ -358,23 +404,12 @@ class SequenceWidget(CompositeWidget):
             either. Only a non-blank value shows that the user put real
             data in this row. ``Form.has_changed()`` must not skip a row
             with real data.
+
+            One pass over the keys builds the index that answers this, so
+            a row costs one set lookup. See
+            ``rows_with_submitted_values``.
             """
-            delete_key = f"{prefix}-{DELETION_FIELD_NAME}"
-            for source in (self.data, self.files):
-                for key in source:
-                    if not isinstance(key, str):
-                        continue
-                    is_row_key = key == prefix or key.startswith(f"{prefix}-")
-                    is_delete_key = key == delete_key
-                    if not is_row_key or is_delete_key:
-                        continue
-                    values = _getlist(source, key)
-                    has_non_blank_value = any(
-                        value not in (None, "") for value in values
-                    )
-                    if has_non_blank_value:
-                        return True
-            return False
+            return prefix in self.rows_with_submitted_values
 
         def total_form_count(self) -> int:
             if hasattr(self, "submission_total_form_count"):
@@ -590,19 +625,34 @@ class SequenceWidget(CompositeWidget):
         return "0" <= child_key[0] <= "9"
 
     def has_row_keys(self, source: Mapping[str, object], name: str) -> bool:
-        """Report whether one source holds any per-row prefixed key."""
+        """Report whether one source holds any per-row prefixed key.
+
+        A plain loop, not a generator expression: this reads every key of
+        a submission, so one frame resume per key is real cost. Two slice
+        comparisons for the same reason, rather than ``startswith`` and an
+        index: the prefix length is already in hand, and ``str.startswith``
+        builds an argument tuple on every call where a slice builds none.
+        Neither slice needs a length guard. A key shorter than the prefix
+        yields a shorter string, which cannot equal it, and a key that ends
+        at the prefix yields ``""``, which sorts below ``"0"``.
+        """
         prefix = f"{name}-"
-        return any(
-            isinstance(key, str)
-            and len(key) > len(prefix)
-            and key.startswith(prefix)
-            and "0" <= key[len(prefix)] <= "9"
-            for key in source
-        )
+        start = len(prefix)
+        for key in source:
+            if (
+                isinstance(key, str)
+                and key[:start] == prefix
+                and "0" <= key[start : start + 1] <= "9"
+            ):
+                return True
+        return False
 
     def has_management_keys(self, source: Mapping[str, object], name: str) -> bool:
         """Report whether one source holds any formset management key."""
-        return any(f"{name}-{field_name}" in source for field_name in _MANAGEMENT_NAMES)
+        for field_name in _MANAGEMENT_NAMES:
+            if f"{name}-{field_name}" in source:
+                return True
+        return False
 
     def value_from_datadict(
         self,

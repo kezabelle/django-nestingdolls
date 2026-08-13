@@ -263,15 +263,21 @@ class SequenceBoundField(CompositeBoundField):
 
     @cached_property
     def is_bound_formset(self) -> bool:
-        """Report whether the browser submission binds the row formset."""
+        """Report whether the browser submission binds the row formset.
+
+        Test the management keys before the row keys. Either one binds the
+        formset, so the answer is the same, but a management-key test is
+        four lookups while a row-key test reads every submitted key.
+        """
         if not self.form.is_bound or self.field.disabled or self.has_whole_value:
             return False
         widget = self.field.widget
-        return any(
-            widget.has_row_keys(source, self.html_name)
-            or widget.has_management_keys(source, self.html_name)
-            for source in (self.form.data, self.form.files)
-        )
+        for source in (self.form.data, self.form.files):
+            if widget.has_management_keys(
+                source, self.html_name
+            ) or widget.has_row_keys(source, self.html_name):
+                return True
+        return False
 
     @cached_property
     def has_whole_value(self) -> bool:
@@ -279,13 +285,19 @@ class SequenceBoundField(CompositeBoundField):
 
         Submitted row keys outrank the exact key, so a forged exact-name
         key cannot replace real rows.
+
+        Test the exact key first. With no exact key there is nothing for
+        row keys to outrank, and a row-key test reads every submitted key
+        while this one is a single lookup.
         """
-        widget = self.field.widget
-        if widget.has_row_keys(self.form.data, self.html_name) or (
-            widget.has_row_keys(self.form.files, self.html_name)
-        ):
+        name = self.html_name
+        if name not in self.form.data and name not in self.form.files:
             return False
-        return self.html_name in self.form.data or self.html_name in self.form.files
+        widget = self.field.widget
+        return not (
+            widget.has_row_keys(self.form.data, name)
+            or widget.has_row_keys(self.form.files, name)
+        )
 
     @cached_property
     def formset(self) -> BaseFormSet[Any]:

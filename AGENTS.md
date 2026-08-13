@@ -145,3 +145,25 @@ extraction built rows. Ambiguity reports a change, which costs one more save.
 Django applies its four settings to a request only. Python data and decoded
 JSON do not go through the request parser. The limits of this package still
 apply to them.
+
+# Key scans
+
+A loop that tests a prefix against every submitted key can run once per bound
+row, so its per-key cost is load-bearing. `pathological.py` measures it and its
+docstring records the numbers; the rules it produced:
+
+- Hold the prefix length in a local and compare a slice, `key[:n] == prefix`,
+  rather than calling `key.startswith(prefix)`. `str.startswith` accepts
+  `(prefix, start, end)`, so it is `METH_VARARGS` and every call builds an
+  argument tuple; `key[:n]` is a `BINARY_SLICE` opcode and builds none. Worth
+  1.1x to 1.2x. No length guard is needed: a key shorter than the prefix
+  yields a shorter string, which cannot equal it.
+- Write the loop out instead of putting a generator expression in `any()`. One
+  frame resume per key is real cost when the loop reads every key.
+- Do not reorder a cheap character test ahead of the prefix compare to skip
+  calls. Measured at 0.61x: it skips 202 of 998 calls and pays a slice on all
+  998.
+
+`cProfile` counts `startswith` as a call and charges per-call overhead to it,
+while a slice is an opcode and is invisible. Swapping one for the other flatters
+a profile more than it speeds up a request. Believe wall time.
