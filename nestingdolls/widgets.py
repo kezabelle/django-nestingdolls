@@ -165,16 +165,16 @@ class MappingWidget(CompositeWidget):
         )
 
     def has_child_keys(self, source: Mapping[str, object], name: str) -> bool:
-        """Report whether one channel holds any declared child key."""
+        """Report whether one source holds any declared child key."""
         return any(key != name and self._accepts_key(key, name) for key in source)
 
-    def direct_data(
+    def _data_from_whole_value(
         self, value: Mapping[str, object], name: str
     ) -> MultiValueDict[str, object]:
-        """Give each member of a direct mapping value its own child key.
+        """Give each member of a whole mapping value its own child key.
 
         Every composite child already reads a value under its own exact key
-        as a direct value, so one expansion makes a direct submission bind
+        as a whole value, so one expansion makes a whole-value submission bind
         exactly like a browser submission. ``getlist`` semantics survive, so
         repeated values still reach child widgets that consume all of them.
         """
@@ -184,19 +184,19 @@ class MappingWidget(CompositeWidget):
                 expanded.setlist(f"{name}-{child_name}", _getlist(value, child_name))
         return expanded
 
-    def bound_channels(
+    def expand_whole_values(
         self,
         data: Mapping[str, object],
         files: Mapping[str, object],
         name: str,
     ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        """Return both channels with a direct mapping value expanded to child keys."""
+        """Return the data and the files with whole values expanded to child keys."""
         data_value = data.get(name) if name in data else None
         if isinstance(data_value, Mapping):
-            data = self.direct_data(data_value, name)
+            data = self._data_from_whole_value(data_value, name)
         files_value = files.get(name) if name in files else None
         if isinstance(files_value, Mapping):
-            files = self.direct_data(files_value, name)
+            files = self._data_from_whole_value(files_value, name)
         return data, files
 
     def value_from_datadict(
@@ -205,8 +205,8 @@ class MappingWidget(CompositeWidget):
         files: Mapping[str, object],
         name: str,
     ) -> object:
-        """Extract child values, or return an unreadable direct value as it is."""
-        data, files = self.bound_channels(data, files, name)
+        """Extract child values, or return an unreadable whole value as it is."""
+        data, files = self.expand_whole_values(data, files, name)
         data_submitted = self.has_child_keys(data, name)
         if not data_submitted and name in data:
             # A scalar under the exact name has no children to distribute.
@@ -338,15 +338,15 @@ class SequenceWidget(CompositeWidget):
         """Build rows with the owning sequence widget's shared budget."""
 
         sequence_widget: SequenceWidget
-        _submission_total_form_count: int
+        submission_total_form_count: int
 
         def _construct_form(self, index: int, **kwargs: object) -> BaseForm:
             form = cast(BaseForm, super()._construct_form(index, **kwargs))  # type: ignore[misc]
-            if form.empty_permitted and self._row_carries_submitted_value(form.prefix):
+            if form.empty_permitted and self.row_carries_submitted_value(form.prefix):
                 form.empty_permitted = False
             return form
 
-        def _row_carries_submitted_value(self, prefix: str | None) -> bool:
+        def row_carries_submitted_value(self, prefix: str | None) -> bool:
             """Report whether the browser sent a non-blank value for this row.
 
             Check keys under the row's own prefix. Skip the row's own
@@ -377,14 +377,14 @@ class SequenceWidget(CompositeWidget):
             return False
 
         def total_form_count(self) -> int:
-            if hasattr(self, "_submission_total_form_count"):
-                return self._submission_total_form_count
+            if hasattr(self, "submission_total_form_count"):
+                return self.submission_total_form_count
             total = super().total_form_count()
             with self.sequence_widget.submission_countdown(
                 self.sequence_widget.limits.submission_max
             ) as countdown:
                 allowed = countdown.take(total)
-            self._submission_total_form_count = allowed
+            self.submission_total_form_count = allowed
             return allowed
 
     @dataclasses.dataclass(slots=True)
@@ -406,19 +406,19 @@ class SequenceWidget(CompositeWidget):
         stored flag is not needed.
         """
 
-        _current: ClassVar[ContextVar[int | None]] = ContextVar(
+        remaining: ClassVar[ContextVar[int | None]] = ContextVar(
             "nestingdolls_submission_countdown", default=None
         )
 
         count: int
-        _ran_out: bool = False
-        _token: Token[int | None] | None = dataclasses.field(
+        ran_out: bool = False
+        token: Token[int | None] | None = dataclasses.field(
             default=None, init=False, repr=False
         )
 
         def __bool__(self) -> bool:
             """Report whether this outer scope exceeded its shared allowance."""
-            return self._ran_out
+            return self.ran_out
 
         def take(self, count: int) -> int:
             """Reserve the rows that fit in the active shared allowance.
@@ -428,16 +428,16 @@ class SequenceWidget(CompositeWidget):
             Clamp the return value at zero: a caller must never build a
             negative number of rows.
             """
-            remaining = self._current.get()
-            assert remaining is not None, "submission_countdown must be active"
-            allowed = max(0, min(count, remaining))
-            self._current.set(remaining - count)
+            left = self.remaining.get()
+            assert left is not None, "submission_countdown must be active"
+            allowed = max(0, min(count, left))
+            self.remaining.set(left - count)
             return allowed
 
         def __enter__(self) -> Self:
             """Start the counter at the outer sequence and reuse it inside rows."""
-            if self._current.get() is None:
-                self._token = self._current.set(self.count)
+            if self.remaining.get() is None:
+                self.token = self.remaining.set(self.count)
             return self
 
         def __exit__(
@@ -471,11 +471,11 @@ class SequenceWidget(CompositeWidget):
             value to put back. A reset with a token it did not receive
             would damage the owning scope's context.
             """
-            remaining = self._current.get()
-            assert remaining is not None, "submission_countdown must be active"
-            self._ran_out = remaining < 0
-            if self._token is not None:
-                self._current.reset(self._token)
+            left = self.remaining.get()
+            assert left is not None, "submission_countdown must be active"
+            self.ran_out = left < 0
+            if self.token is not None:
+                self.remaining.reset(self.token)
 
     @dataclasses.dataclass(frozen=True, slots=True)
     class RenderState(CompositeWidget.RenderState):
@@ -537,15 +537,15 @@ class SequenceWidget(CompositeWidget):
         formset.sequence_widget = self
         return formset
 
-    def direct_rows(
+    def data_from_whole_value(
         self, values: Sequence[object], name: str
     ) -> MultiValueDict[str, object]:
-        """Give each row of a direct value its own key.
+        """Give each row of a whole value its own key.
 
-        A direct value is one Python list under this field's own name. It
-        carries no per-row browser keys. Build one key per row instead:
+        A whole value is one Python list under this field's own name. It
+        carries no per-row prefixed keys. Build one key per row instead:
         ``f"{name}-{index}"``. Every composite child already reads a
-        value under its own exact key as a direct value. A mapping or
+        value under its own exact key as a whole value. A mapping or
         scalar row therefore binds the normal way from this point on.
 
         This lets the row formset bind for real, instead of staying
@@ -575,7 +575,7 @@ class SequenceWidget(CompositeWidget):
         return "0" <= child_key[0] <= "9"
 
     def has_row_keys(self, source: Mapping[str, object], name: str) -> bool:
-        """Report whether one channel holds any per-row browser key."""
+        """Report whether one source holds any per-row prefixed key."""
         prefix = f"{name}-"
         return any(
             isinstance(key, str)
@@ -586,7 +586,7 @@ class SequenceWidget(CompositeWidget):
         )
 
     def has_management_keys(self, source: Mapping[str, object], name: str) -> bool:
-        """Report whether one channel holds any formset management key."""
+        """Report whether one source holds any formset management key."""
         return any(f"{name}-{field_name}" in source for field_name in _MANAGEMENT_NAMES)
 
     def value_from_datadict(
@@ -595,20 +595,20 @@ class SequenceWidget(CompositeWidget):
         files: Mapping[str, object],
         name: str,
     ) -> list[object]:
-        """Extract a whole direct value or bound formset rows.
+        """Extract a whole value or bound formset rows.
 
         Row keys outrank a value under the field's own exact name, so a
         forged exact-name key cannot replace submitted rows. Without row
-        keys, a direct value wins over management keys alone.
+        keys, a whole value wins over management keys alone.
         """
         has_rows = self.has_row_keys(data, name) or self.has_row_keys(files, name)
         if not has_rows:
-            direct_values = _getlist(data, name) or _getlist(files, name)
-            if direct_values:
+            whole_values = _getlist(data, name) or _getlist(files, name)
+            if whole_values:
                 values = (
-                    direct_values[0]
-                    if len(direct_values) == 1 and isinstance(direct_values[0], list)
-                    else direct_values
+                    whole_values[0]
+                    if len(whole_values) == 1 and isinstance(whole_values[0], list)
+                    else whole_values
                 )
                 with self.submission_countdown(self.limits.submission_max) as countdown:
                     return values[: countdown.take(len(values))]
@@ -720,11 +720,7 @@ class SequenceWidget(CompositeWidget):
         if self.child_field.disabled:
             child_attrs["disabled"] = True
         child = form["value"]
-        child_widget = (
-            child.field.hidden_widget()
-            if self.input_type == "hidden"
-            else child.field.widget
-        )
+        child_widget = self._child_widget(child.field)
         if isinstance(child, CompositeBoundField):
             child.prepare_widget(cast(CompositeWidget, child_widget))
         child_value = (

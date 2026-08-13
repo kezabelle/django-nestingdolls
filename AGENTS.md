@@ -65,7 +65,7 @@ to this package.
 - Call `take(count)` at the earliest point a submitted row count turns into
   built rows. Two points qualify: `RowFormSet.total_form_count`, where a
   `TOTAL_FORMS` value becomes the number of row forms Django builds, and the
-  direct-value clip in `SequenceWidget.value_from_datadict`, where a Python
+  whole-value clip in `SequenceWidget.value_from_datadict`, where a Python
   list under the field's own name becomes rows. A step that waits until
   after row construction to call `take()` has already paid to build every
   row a forged `TOTAL_FORMS` asked for, once for every sibling row that

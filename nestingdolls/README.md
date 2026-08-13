@@ -44,7 +44,7 @@ assert form.cleaned_data == {"point": {"x": 1, "y": 2}}
 ### Field-specific behavior
 
 If the input contains an exact mapping, the exact mapping has priority over
-flat field names.
+prefixed field names.
 
 The child form runs its normal `clean_<field>()` methods and its `clean()`
 method. The widget displays the child form inside the parent field. A
@@ -160,13 +160,13 @@ required rules.
 
 ### Input forms
 
-Both fields accept direct input. Give `DictField` a mapping. Give `ListField`
+Both fields accept a whole value. Give `DictField` a mapping. Give `ListField`
 a list.
 
-Both fields also accept flat input names. Use a child name for `DictField`.
+Both fields also accept prefixed input names. Use a child name for `DictField`.
 Use a numeric row index for `ListField`, joined to the field name with a
-dash: `point-x` or `values-0`. This dash style works for form data, and it
-works in nested fields. Initial values use nested Python shapes only.
+dash: `point-x` or `values-0`. These prefixed names work for form data, and they
+work in nested fields. Initial values use nested Python shapes only.
 
 ### Nested fields
 

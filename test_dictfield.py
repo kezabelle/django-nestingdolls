@@ -80,25 +80,25 @@ class MappingProbeView(View):
 
 
 class FormBindingUnitTestCase(SimpleTestCase):
-    """Provides a focused home for direct form and field assertions."""
+    """Provides a focused home for in-process form and field assertions."""
 
     def build_querydict_form(self, form_class, pairs, *, initial=None, prefix=None):
-        """Bind form_class the way a browser <form> submit does: flat dash keys.
+        """Bind form_class the way a browser <form> submit does: prefixed keys.
 
-        `pairs` is a dict of flat keys (e.g. {"point-a": "1"}) or an
+        `pairs` is a dict of prefixed keys (e.g. {"point-a": "1"}) or an
         already-encoded query string.
         """
         body = pairs if isinstance(pairs, str) else urlencode(pairs, doseq=True)
         return form_class(QueryDict(body), initial=initial, prefix=prefix)
 
-    def build_direct_form(
+    def build_whole_value_form(
         self, form_class, field_name, value, *, initial=None, prefix=None
     ):
         """Bind form_class the way application code hands over a decoded value.
 
         `value` is the Python value (list for ListField, dict for DictField)
         exactly as JSON- or CSV-inflated data would supply it, under the
-        field's own name, with no flat row keys.
+        field's own name, with no prefixed row keys.
         """
         return form_class({field_name: value}, initial=initial, prefix=prefix)
 
@@ -541,13 +541,13 @@ class MappingSubmissionFunctionalTestCase(SimpleTestCase):
 class MappingChildValidationTestCase(FormBindingUnitTestCase):
     """A mapping child's own validation outcome is the same in either input style.
 
-    ``MappingSubmissionFunctionalTestCase`` proves this over HTTP. A direct
+    ``MappingSubmissionFunctionalTestCase`` proves this over HTTP. A whole
     Python value never reaches the request parser, so its counterpart binds
     ``Form(data=...)`` in-process instead of posting to a view.
     """
 
-    def test_required_mapping_omission_is_required_via_direct_value(self):
-        """A required mapping with no direct value reports 'required'."""
+    def test_required_mapping_omission_is_required_via_whole_value(self):
+        """A required mapping with no whole value reports 'required'."""
 
         class PointForm(forms.Form):
             a = forms.IntegerField()
@@ -562,7 +562,7 @@ class MappingChildValidationTestCase(FormBindingUnitTestCase):
         self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["required_point"][0].code, "required")
 
-    def test_partial_optional_mapping_child_is_item_invalid_via_direct_value(self):
+    def test_partial_optional_mapping_child_is_item_invalid_via_whole_value(self):
         """An optional mapping present with a missing required child is item_invalid."""
 
         class PointForm(forms.Form):
@@ -582,8 +582,8 @@ class MappingChildValidationTestCase(FormBindingUnitTestCase):
             form.errors.as_data()["optional_point"][0].code, "item_invalid"
         )
 
-    def test_child_clean_hooks_and_validator_codes_apply_via_direct_value(self):
-        """Direct data still reaches child clean hooks and an outer validator."""
+    def test_child_clean_hooks_and_validator_codes_apply_via_whole_value(self):
+        """Whole-value data still reaches child clean hooks and an outer validator."""
 
         class ChildForm(forms.Form):
             a = forms.IntegerField()
@@ -599,7 +599,7 @@ class MappingChildValidationTestCase(FormBindingUnitTestCase):
         class HookForm(forms.Form):
             value = nestingdolls.MappingField(ChildForm)
 
-        hook_form = self.build_direct_form(HookForm, "value", {"a": 2})
+        hook_form = self.build_whole_value_form(HookForm, "value", {"a": 2})
         self.assertIs(hook_form.is_valid(), True, hook_form.errors)
         self.assertEqual(hook_form.cleaned_data["value"], {"a": 3, "double": 6})
 
@@ -616,11 +616,11 @@ class MappingChildValidationTestCase(FormBindingUnitTestCase):
                 PointForm, required=False, validators=[reject_two]
             )
 
-        validated_form = self.build_direct_form(ValidatedForm, "point", {"a": 2})
+        validated_form = self.build_whole_value_form(ValidatedForm, "point", {"a": 2})
         self.assertIs(validated_form.is_valid(), False)
         self.assertEqual(validated_form.errors.as_data()["point"][0].code, "no_two")
 
-    def test_non_field_child_error_code_survives_via_direct_value(self):
+    def test_non_field_child_error_code_survives_via_whole_value(self):
         """A child non-field error keeps its own code at the mapping boundary."""
 
         class ChildForm(forms.Form):
@@ -635,7 +635,7 @@ class MappingChildValidationTestCase(FormBindingUnitTestCase):
         class Form(forms.Form):
             value = nestingdolls.MappingField(ChildForm)
 
-        form = self.build_direct_form(Form, "value", {"a": 2})
+        form = self.build_whole_value_form(Form, "value", {"a": 2})
 
         self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["value"][0].code, "item_invalid")
@@ -643,7 +643,7 @@ class MappingChildValidationTestCase(FormBindingUnitTestCase):
             form.errors.as_data()["value"][0].params["child_code"], "unavailable"
         )
 
-    def test_optional_mapping_omission_cleans_to_an_empty_dict_via_direct_value(self):
+    def test_optional_mapping_omission_cleans_to_an_empty_dict_via_whole_value(self):
         """An omitted optional mapping cleans to {} the same as an HTTP omission."""
 
         class PointForm(forms.Form):
@@ -678,7 +678,7 @@ class MappingFieldUnitTestCase(FormBindingUnitTestCase):
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["point"], {"a": 1, "label": "kept"})
 
-    def test_invalid_mapping_shapes_stay_in_djangos_bound_data_channel(self):
+    def test_invalid_mapping_shapes_stay_in_djangos_bound_data_path(self):
         """It redisplays hostile submitted data and disabled hostile initials."""
         enabled = nestingdolls.MappingField(
             MappingProbeFixtures.PointForm, required=False
@@ -978,10 +978,10 @@ class DictFieldRenderingTestCase(SimpleTestCase):
 
 
 class MappingDeveloperInputUnitTestCase(FormBindingUnitTestCase):
-    """Exercises Python-only nested values and direct field APIs."""
+    """Exercises Python-only nested values and field APIs called without a form."""
 
-    def test_direct_child_values_reach_the_child_field_unchanged(self):
-        """Direct mapping input keeps repeated, JSON, compound, and file values."""
+    def test_whole_value_children_reach_the_child_field_unchanged(self):
+        """Whole mapping input keeps repeated, JSON, compound, and file values."""
 
         class TagsForm(forms.Form):
             tags = forms.MultipleChoiceField(
@@ -998,7 +998,7 @@ class MappingDeveloperInputUnitTestCase(FormBindingUnitTestCase):
         self.assertIs(repeated.is_valid(), True, repeated.errors)
         self.assertEqual(repeated.cleaned_data["point"], {"tags": ["one", "two"]})
 
-        # A direct list stays one JSON value instead of becoming repeated input.
+        # A nested list stays one JSON value instead of becoming repeated input.
         class JSONChildForm(forms.Form):
             payload = forms.JSONField()
 
@@ -1009,12 +1009,12 @@ class MappingDeveloperInputUnitTestCase(FormBindingUnitTestCase):
         self.assertIs(encoded.is_valid(), True, encoded.errors)
         self.assertEqual(encoded.cleaned_data["value"]["payload"], [1, {"answer": 42}])
 
-        # Direct cleaning hands already-extracted compound and file values over.
+        # A clean() call hands already-extracted compound and file values over.
         class CompoundForm(forms.Form):
             happened_at = forms.SplitDateTimeField()
             upload = forms.FileField()
 
-        upload = SimpleUploadedFile("direct.txt", b"direct")
+        upload = SimpleUploadedFile("upload.txt", b"upload")
         cleaned = nestingdolls.MappingField(CompoundForm).clean(
             {"happened_at": ["2026-08-01", "10:30:00"], "upload": upload}
         )
@@ -1031,7 +1031,7 @@ class MappingNestedSequenceChildTestCase(FormBindingUnitTestCase):
     Same regression guard as ``test_listfield.py``'s
     ``SequenceScalarRowTestCase``, for a sequence nested one level inside
     a mapping: the nested list's own row error must still render inline
-    when the whole mapping is bound to a direct Python value.
+    when the mapping binds to one whole Python value.
     """
 
     def assertNestedSequenceChildError(self, form):
@@ -1052,8 +1052,8 @@ class MappingNestedSequenceChildTestCase(FormBindingUnitTestCase):
         for index, value in enumerate((1, 2, 3)):
             self.assertIn(f'name="point-tags-{index}" value="{value}"', html)
 
-    def test_nested_sequence_child_error_via_direct_value(self):
-        """A bad row in a mapping's direct nested list shows its own error."""
+    def test_nested_sequence_child_error_via_whole_value(self):
+        """A bad row in a mapping's whole-value nested list shows its own error."""
 
         class ChildForm(forms.Form):
             tags = nestingdolls.ListField(forms.IntegerField())
@@ -1062,11 +1062,11 @@ class MappingNestedSequenceChildTestCase(FormBindingUnitTestCase):
             point = nestingdolls.DictField(ChildForm)
 
         self.assertNestedSequenceChildError(
-            self.build_direct_form(Form, "point", {"tags": [1, "bad", 3]})
+            self.build_whole_value_form(Form, "point", {"tags": [1, "bad", 3]})
         )
 
     def test_nested_sequence_child_error_via_querydict(self):
-        """A bad row in a mapping's dash-row nested list shows its own error."""
+        """A bad row in a mapping's prefixed-row nested list shows its own error."""
 
         class ChildForm(forms.Form):
             tags = nestingdolls.ListField(forms.IntegerField())
@@ -1087,8 +1087,8 @@ class MappingNestedSequenceChildTestCase(FormBindingUnitTestCase):
             )
         )
 
-    def test_nested_sequence_child_valid_via_direct_value(self):
-        """A valid direct nested list renders every row with no error markup."""
+    def test_nested_sequence_child_valid_via_whole_value(self):
+        """A valid whole-value nested list renders every row with no error markup."""
 
         class ChildForm(forms.Form):
             tags = nestingdolls.ListField(forms.IntegerField())
@@ -1097,11 +1097,11 @@ class MappingNestedSequenceChildTestCase(FormBindingUnitTestCase):
             point = nestingdolls.DictField(ChildForm)
 
         self.assertNestedSequenceChildValid(
-            self.build_direct_form(Form, "point", {"tags": [1, 2, 3]})
+            self.build_whole_value_form(Form, "point", {"tags": [1, 2, 3]})
         )
 
     def test_nested_sequence_child_valid_via_querydict(self):
-        """A valid dash-row nested list renders every row with no error markup."""
+        """A valid prefixed-row nested list renders every row with no error markup."""
 
         class ChildForm(forms.Form):
             tags = nestingdolls.ListField(forms.IntegerField())
@@ -1152,7 +1152,7 @@ class MappingSequenceOfRecordsTestCase(FormBindingUnitTestCase):
         self.assertIn('name="payload-records-0-name" value="ok"', html)
         self.assertIn('name="payload-records-1-name" value="ok2"', html)
 
-    def test_records_leaf_error_via_direct_value(self):
+    def test_records_leaf_error_via_whole_value(self):
         """A CSV- or JSON-shaped list of row mappings shows a bad leaf inline."""
 
         class RowForm(forms.Form):
@@ -1165,13 +1165,13 @@ class MappingSequenceOfRecordsTestCase(FormBindingUnitTestCase):
             payload = nestingdolls.DictField(PayloadForm)
 
         self.assertRecordsLeafError(
-            self.build_direct_form(
+            self.build_whole_value_form(
                 Form, "payload", {"records": [{"name": "ok"}, {"name": ""}]}
             )
         )
 
     def test_records_leaf_error_via_querydict(self):
-        """A CSV- or JSON-shaped list of row mappings shows a bad leaf inline, dash-row style."""
+        """A CSV- or JSON-shaped list of row mappings shows a bad leaf inline, prefixed-row style."""
 
         class RowForm(forms.Form):
             name = forms.CharField()
@@ -1194,7 +1194,7 @@ class MappingSequenceOfRecordsTestCase(FormBindingUnitTestCase):
             )
         )
 
-    def test_records_all_valid_via_direct_value(self):
+    def test_records_all_valid_via_whole_value(self):
         """A valid CSV- or JSON-shaped record list cleans and renders every row."""
 
         class RowForm(forms.Form):
@@ -1207,13 +1207,13 @@ class MappingSequenceOfRecordsTestCase(FormBindingUnitTestCase):
             payload = nestingdolls.DictField(PayloadForm)
 
         self.assertRecordsAllValid(
-            self.build_direct_form(
+            self.build_whole_value_form(
                 Form, "payload", {"records": [{"name": "ok"}, {"name": "ok2"}]}
             )
         )
 
     def test_records_all_valid_via_querydict(self):
-        """A valid dash-row CSV- or JSON-shaped record list cleans and renders every row."""
+        """A valid prefixed-row CSV- or JSON-shaped record list cleans and renders every row."""
 
         class RowForm(forms.Form):
             name = forms.CharField()
@@ -1239,7 +1239,7 @@ class MappingSequenceOfRecordsTestCase(FormBindingUnitTestCase):
 
 class DictFieldRegressionTestCase(SimpleTestCase):
     def test_hostile_initials_and_payloads_stay_renderable_errors(self):
-        """Malformed initials and payloads stay in Django's error channel."""
+        """Malformed initials and payloads stay ordinary Django form errors."""
 
         class Form(forms.Form):
             point = nestingdolls.MappingField(

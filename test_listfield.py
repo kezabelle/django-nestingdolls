@@ -56,22 +56,22 @@ class FormBindingUnitTestCase(SimpleTestCase):
     """Binds forms directly when tests need form internals."""
 
     def build_querydict_form(self, form_class, pairs, *, initial=None, prefix=None):
-        """Bind form_class the way a browser <form> submit does: flat dash keys.
+        """Bind form_class the way a browser <form> submit does: prefixed keys.
 
-        `pairs` is a dict of flat keys (e.g. {"values-0": "1"}) or an
+        `pairs` is a dict of prefixed keys (e.g. {"values-0": "1"}) or an
         already-encoded query string.
         """
         body = pairs if isinstance(pairs, str) else urlencode(pairs, doseq=True)
         return form_class(QueryDict(body), initial=initial, prefix=prefix)
 
-    def build_direct_form(
+    def build_whole_value_form(
         self, form_class, field_name, value, *, initial=None, prefix=None
     ):
         """Bind form_class the way application code hands over a decoded value.
 
         `value` is the Python value (list for ListField, dict for DictField)
         exactly as JSON- or CSV-inflated data would supply it, under the
-        field's own name, with no flat row keys.
+        field's own name, with no prefixed row keys.
         """
         return form_class({field_name: value}, initial=initial, prefix=prefix)
 
@@ -347,8 +347,8 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
             response.content, {"valid": True, "values": [1, 2, 3], "errors": {}}
         )
 
-    def test_client_accepts_dash_row_list_rows(self):
-        """Django-managed dash rows submit the same scalar list."""
+    def test_client_accepts_prefixed_row_list_rows(self):
+        """Django-managed prefixed rows submit the same scalar list."""
         response = self.client.post(
             "/list-submission-probe/",
             {
@@ -375,8 +375,8 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
             response.content, {"valid": True, "values": [value], "errors": {}}
         )
 
-    def test_client_accepts_a_dash_row_json_row(self):
-        """A Django-managed dash row submits the same JSON-encoded scalar row."""
+    def test_client_accepts_a_prefixed_row_json_row(self):
+        """A Django-managed prefixed row submits the same JSON-encoded scalar row."""
         value = {"answer": 42, "nested": [1, 2]}
         response = self.client.post(
             "/list-json-submission-probe/",
@@ -437,7 +437,7 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         )
 
     def test_exact_name_scalar_rendering_normalizes_bound_and_initial_values(self):
-        """Direct rendering exposes the scalar row as one indexed input."""
+        """Whole-value rendering exposes the scalar row as one indexed input."""
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
@@ -451,7 +451,7 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertEqual(unbound["values"].value(), [1])
 
     def test_client_returns_management_errors_for_missing_list_controls(self):
-        """Every dash-indexed request requires Django's two management controls."""
+        """Every prefixed-row request requires Django's two management controls."""
         for query in (
             "values-TOTAL_FORMS=1&values-0=1",
             "values-INITIAL_FORMS=0&values-0=1",
@@ -670,7 +670,7 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         )
 
     def test_disabled_list_units_preserve_child_and_change_detection_behavior(self):
-        """Direct field checks cover disabled child and change-detection internals."""
+        """Field-level checks cover disabled child and change-detection internals."""
 
         class ChildForm(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(disabled=True))
@@ -804,7 +804,7 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         )
 
     def test_item_error_markup_stays_inline_and_out_of_the_field_error_list(self):
-        """Direct rendering keeps each list item error beside its input."""
+        """In-process rendering keeps each list item error beside its input."""
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
@@ -1207,8 +1207,8 @@ class SetFieldTestCase(SimpleTestCase):
         )
         self.assertIs(parent.has_changed([frozenset({1, 2})], [["2", "1", "1"]]), False)
 
-    def test_oversized_direct_payload_short_circuits_set_comparison(self):
-        """It stops set comparison immediately for oversized direct lists."""
+    def test_oversized_whole_value_payload_short_circuits_set_comparison(self):
+        """It stops set comparison immediately for oversized whole values."""
 
         class UnreachableField(forms.IntegerField):
             def has_changed(self, initial, data):
@@ -1691,7 +1691,7 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertEqual([len(rows) for rows in payload["values"]], [1999])
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
-    def test_direct_nested_values_keep_only_per_level_row_limits(self):
+    def test_nested_whole_values_keep_only_per_level_row_limits(self):
         """A developer-supplied nested value bypasses request counting but each list caps itself."""
 
         class Form(forms.Form):
@@ -1711,8 +1711,8 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertEqual(form.cleaned_data["outer"], [list(range(10))])
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
-    def test_direct_nested_values_reject_an_oversized_child_list(self):
-        """A direct nested value still gets the child list's user-visible hard-cap error."""
+    def test_nested_whole_values_reject_an_oversized_child_list(self):
+        """A nested whole value still gets the child list's user-visible hard-cap error."""
 
         class Form(forms.Form):
             outer = nestingdolls.ListField(
@@ -1869,10 +1869,10 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertEqual(CountingWidget.key_visits, extraction_visits)
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
-    def test_direct_clean_of_nested_values_pays_each_level_cap(self):
-        """Direct nested cleaning uses each level's own cap.
+    def test_field_clean_of_nested_values_pays_each_level_cap(self):
+        """Nested ``clean()`` calls use each level's own cap.
 
-        Direct ``clean()`` has no request keys. It does not open the shared
+        A ``clean()`` call has no request keys. It does not open the shared
         countdown, but each level still applies ``absolute_max``.
         """
 
@@ -1912,7 +1912,7 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
 class SequenceScalarRowTestCase(FormBindingUnitTestCase):
     """A scalar row's own validation outcome is the same in either input style.
 
-    Cleaning a direct value already uses a fast path that reports each
+    Cleaning a whole value already uses a fast path that reports each
     row's own error correctly. Rendering an invalid redisplay once built
     an unbound row formset and dropped that error silently instead of
     showing it inline. These tests are the regression guard for that fix,
@@ -1940,16 +1940,18 @@ class SequenceScalarRowTestCase(FormBindingUnitTestCase):
         for index, value in enumerate((1, 2, 3)):
             self.assertIn(f'name="values-{index}" value="{value}"', html)
 
-    def test_scalar_row_error_via_direct_value(self):
-        """A bad row in a direct scalar list shows its own error, not silence."""
+    def test_scalar_row_error_via_whole_value(self):
+        """A bad row in a whole-value scalar list shows its own error, not silence."""
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
-        self.assertScalarRowError(self.build_direct_form(Form, "values", [1, "bad", 3]))
+        self.assertScalarRowError(
+            self.build_whole_value_form(Form, "values", [1, "bad", 3])
+        )
 
     def test_scalar_row_error_via_querydict(self):
-        """A bad row in a dash-row scalar list shows its own error, not silence."""
+        """A bad row in a prefixed-row scalar list shows its own error, not silence."""
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
@@ -1967,16 +1969,18 @@ class SequenceScalarRowTestCase(FormBindingUnitTestCase):
             )
         )
 
-    def test_scalar_rows_valid_via_direct_value(self):
-        """A valid direct scalar list renders every row with no error markup."""
+    def test_scalar_rows_valid_via_whole_value(self):
+        """A valid whole-value scalar list renders every row with no error markup."""
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
-        self.assertScalarRowsValid(self.build_direct_form(Form, "values", [1, 2, 3]))
+        self.assertScalarRowsValid(
+            self.build_whole_value_form(Form, "values", [1, 2, 3])
+        )
 
     def test_scalar_rows_valid_via_querydict(self):
-        """A valid dash-row scalar list renders every row with no error markup."""
+        """A valid prefixed-row scalar list renders every row with no error markup."""
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
@@ -2031,7 +2035,7 @@ class SequenceMappingRowTestCase(FormBindingUnitTestCase):
     def assertKeylessRowIsRequired(self, form):
         """Assert an empty-dict/keyless row is real data, not skippable.
 
-        A direct list has no browser row keys to leave blank. Every entry
+        A whole-value list has no prefixed row keys to leave blank. Every entry
         in the list is data the caller gave, even an empty mapping.
         Cleaning already validates every row unconditionally; rendering
         must not silently skip this row the way it skips an unfilled
@@ -2041,8 +2045,8 @@ class SequenceMappingRowTestCase(FormBindingUnitTestCase):
         self.assertEqual(form.errors.as_data()["a"][0].code, "item_invalid")
         self.assertInHTML("<li>This field is required.</li>", form.as_p())
 
-    def test_mapping_row_error_via_direct_value(self):
-        """A missing required child in a direct mapping row shows its error."""
+    def test_mapping_row_error_via_whole_value(self):
+        """A missing required child in a whole-value mapping row shows its error."""
 
         class Row(forms.Form):
             b = forms.IntegerField()
@@ -2052,11 +2056,11 @@ class SequenceMappingRowTestCase(FormBindingUnitTestCase):
             a = nestingdolls.ListField(nestingdolls.DictField(Row))
 
         self.assertMappingRowError(
-            self.build_direct_form(Form, "a", [{"b": 2}, {"c": 3}])
+            self.build_whole_value_form(Form, "a", [{"b": 2}, {"c": 3}])
         )
 
     def test_mapping_row_error_via_querydict(self):
-        """A missing required child in a dash-row mapping row shows its error."""
+        """A missing required child in a prefixed-row mapping row shows its error."""
 
         class Row(forms.Form):
             b = forms.IntegerField()
@@ -2077,8 +2081,8 @@ class SequenceMappingRowTestCase(FormBindingUnitTestCase):
             )
         )
 
-    def test_mapping_rows_valid_via_direct_value(self):
-        """A valid direct mapping row list renders and cleans every child."""
+    def test_mapping_rows_valid_via_whole_value(self):
+        """A valid whole-value mapping row list renders and cleans every child."""
 
         class Row(forms.Form):
             b = forms.IntegerField(required=False)
@@ -2088,11 +2092,11 @@ class SequenceMappingRowTestCase(FormBindingUnitTestCase):
             a = nestingdolls.ListField(nestingdolls.DictField(Row))
 
         self.assertMappingRowsValid(
-            self.build_direct_form(Form, "a", [{"b": 2}, {"c": 3}])
+            self.build_whole_value_form(Form, "a", [{"b": 2}, {"c": 3}])
         )
 
     def test_mapping_rows_valid_via_querydict(self):
-        """A valid dash-row mapping row list renders and cleans every child."""
+        """A valid prefixed-row mapping row list renders and cleans every child."""
 
         class Row(forms.Form):
             b = forms.IntegerField(required=False)
@@ -2113,8 +2117,8 @@ class SequenceMappingRowTestCase(FormBindingUnitTestCase):
             )
         )
 
-    def test_mapping_row_with_no_keys_via_direct_value(self):
-        """An empty-dict direct row is real data, not an untouched placeholder."""
+    def test_mapping_row_with_no_keys_via_whole_value(self):
+        """An empty-dict whole-value row is real data, not an untouched placeholder."""
 
         class Row(forms.Form):
             b = forms.IntegerField()
@@ -2122,7 +2126,7 @@ class SequenceMappingRowTestCase(FormBindingUnitTestCase):
         class Form(forms.Form):
             a = nestingdolls.ListField(nestingdolls.DictField(Row))
 
-        self.assertKeylessRowIsRequired(self.build_direct_form(Form, "a", [{}]))
+        self.assertKeylessRowIsRequired(self.build_whole_value_form(Form, "a", [{}]))
 
     def test_mapping_row_with_no_keys_via_querydict(self):
         """A declared row with no submitted keys is real data too, not skippable."""
@@ -2144,7 +2148,7 @@ class SequenceNestedListRowTestCase(FormBindingUnitTestCase):
     """A leaf two levels deep inside a nested list validates the same in either style.
 
     Same regression guard as ``SequenceScalarRowTestCase``, one nesting
-    level deeper: a direct ``ListField(ListField(...))`` value's inner
+    level deeper: a whole ``ListField(ListField(...))`` value's inner
     row error must still render inline, not just clean correctly.
     """
 
@@ -2155,16 +2159,18 @@ class SequenceNestedListRowTestCase(FormBindingUnitTestCase):
         self.assertInHTML("<li>Enter a whole number.</li>", html)
         self.assertIn('name="outer-0-1" value="bad"', html)
 
-    def test_nested_list_leaf_error_via_direct_value(self):
-        """A bad leaf two levels deep in a direct nested list still shows its error."""
+    def test_nested_list_leaf_error_via_whole_value(self):
+        """A bad leaf two levels deep in a whole-value nested list still shows its error."""
 
         class Form(forms.Form):
             outer = nestingdolls.ListField(nestingdolls.ListField(forms.IntegerField()))
 
-        self.assertNestedLeafError(self.build_direct_form(Form, "outer", [[1, "bad"]]))
+        self.assertNestedLeafError(
+            self.build_whole_value_form(Form, "outer", [[1, "bad"]])
+        )
 
     def test_nested_list_leaf_error_via_querydict(self):
-        """A bad leaf two levels deep in a dash-row nested list still shows its error."""
+        """A bad leaf two levels deep in a prefixed-row nested list still shows its error."""
 
         class Form(forms.Form):
             outer = nestingdolls.ListField(nestingdolls.ListField(forms.IntegerField()))

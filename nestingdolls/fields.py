@@ -20,7 +20,7 @@ from django.utils.translation import ngettext_lazy
 from nestingdolls.boundfield import (
     MappingBoundField,
     SequenceBoundField,
-    _ValueBoundField,
+    ValueBoundField,
 )
 from nestingdolls.errors import (
     InvalidInitialValueError,
@@ -89,7 +89,7 @@ class MappingField(CompositeField):
     bound_field_class: type[MappingBoundField] = MappingBoundField
 
     @cached_property
-    def inferred_names(self) -> tuple[str, ...]:
+    def _declared_field_names(self) -> tuple[str, ...]:
         """Return the form's declared field names."""
         return tuple(
             cast(Mapping[str, Field], self.form_class.base_fields)  # type: ignore[attr-defined]
@@ -207,17 +207,17 @@ class MappingField(CompositeField):
         """Build the cleaned output from the child form data."""
         return self.output(data)
 
-    def _compress_defaulted(self, data: dict[str, object]) -> object | None:
-        """Call ``self.output`` with every declared name defaulted, then filled by data.
+    def _compress_with_defaults(self, data: dict[str, object]) -> object | None:
+        """Call ``self.output`` with every declared name filled from ``data``.
 
         ``NamedTupleField`` and ``DataclassField`` both build their output this
         way: every declared name gets ``None`` unless ``data`` supplies it.
         """
         if not data:
             return None
-        return self.output(**(dict.fromkeys(self.inferred_names) | data))
+        return self.output(**(dict.fromkeys(self._declared_field_names) | data))
 
-    def _clean_form(self, form: BaseForm) -> object:
+    def _clean_child_form(self, form: BaseForm) -> object:
         """Return the cleaned data of the child Form, or raise its errors.
 
         Django keeps the leaf messages of a composite error only, so this
@@ -241,17 +241,17 @@ class MappingField(CompositeField):
     def clean(self, value: object) -> object:
         """Clean a mapping of values that a caller collected.
 
-        The child Form gets ``_ValueBoundField``, because this input holds
+        The child Form gets ``ValueBoundField``, because this input holds
         Python values under child names and no prefixed input names. The shared
         budget protects nested sequence rows that bypass Django request parsing.
         """
         value = self.to_python(value)
         if not value:
             return self.compress(cast(dict[str, object], super().clean(value)))
-        return self._clean_form(
+        return self._clean_child_form(
             self.form_class(
                 data=value,
-                bound_field_class=_ValueBoundField,
+                bound_field_class=ValueBoundField,
             )
         )
 
@@ -267,7 +267,7 @@ class MappingField(CompositeField):
             return super()._clean_bound_field(bound_field)  # type: ignore[misc]
         if not bound_field.is_bound_subform:
             return super()._clean_bound_field(bound_field)  # type: ignore[misc]
-        return self._clean_form(bound_field.subform)
+        return self._clean_child_form(bound_field.subform)
 
     def bound_data(self, data: object, initial: object) -> object:
         """Bind submitted members with their matching initial values."""
@@ -282,7 +282,7 @@ class MappingField(CompositeField):
             }
         except (InvalidInitialValueError, ValidationError):
             # BoundField.value() calls this method during a render of an
-            # invalid form. Keep forged input in the normal Django channel, so
+            # invalid form. Keep forged input in Django's normal redisplay path, so
             # that the user sees what the browser sent.
             return super().bound_data(data, initial)
 
@@ -339,8 +339,8 @@ class NamedTupleField(MappingField):
                 type[tuple[object, ...]],
                 namedtuple(
                     f"{self.form_class.__name__}Value",
-                    self.inferred_names,
-                    defaults=(None,) * len(self.inferred_names),
+                    self._declared_field_names,
+                    defaults=(None,) * len(self._declared_field_names),
                 ),
             )
         if not (
@@ -364,7 +364,7 @@ class NamedTupleField(MappingField):
         return super().initial_value(as_dict() if callable(as_dict) else value)
 
     def compress(self, data: dict[str, object]) -> tuple[object, ...] | None:
-        return cast(tuple[object, ...] | None, self._compress_defaulted(data))
+        return cast(tuple[object, ...] | None, self._compress_with_defaults(data))
 
 
 class DataclassField(MappingField):
@@ -381,7 +381,7 @@ class DataclassField(MappingField):
                     f"{self.form_class.__name__}Value",
                     [
                         (name, object, dataclasses.field(default=None))
-                        for name in self.inferred_names
+                        for name in self._declared_field_names
                     ],
                 ),
             )
@@ -406,7 +406,7 @@ class DataclassField(MappingField):
         return super().initial_value(value)
 
     def compress(self, data: dict[str, object]) -> object | None:
-        return self._compress_defaulted(data)
+        return self._compress_with_defaults(data)
 
 
 class SequenceField(CompositeField):
@@ -467,19 +467,6 @@ class SequenceField(CompositeField):
                 raise ValueError(
                     "'absolute_max' must be greater or equal to 'max_length'."
                 )
-
-        @classmethod
-        def build(
-            cls, min_length: int, max_length: int, absolute_max: int | None
-        ) -> Self:
-            """Build limits and use Django's default hard row cap.
-
-            When no cap is given, Django formsets use
-            ``max_length + DEFAULT_MAX_NUM``.
-            """
-            if absolute_max is None:
-                absolute_max = max_length + DEFAULT_MAX_NUM
-            return cls(min_length, max_length, absolute_max)
 
         @property
         def submission_max(self) -> int:
@@ -552,7 +539,11 @@ class SequenceField(CompositeField):
             raise ImproperlyConfigured(
                 "child_field argument for SequenceField must be a forms.Field instance"
             )
-        self.limits = self.Limits.build(min_length, max_length, absolute_max)
+        if absolute_max is None:
+            # Django formsets use max_num + DEFAULT_MAX_NUM as the default
+            # absolute_max. Use the same default here.
+            absolute_max = max_length + DEFAULT_MAX_NUM
+        self.limits = self.Limits(min_length, max_length, absolute_max)
         if required and max_length == 0:
             # A required field must always be able to show at least one row,
             # so a user can give a value. With max_length=0 it never can.
@@ -698,7 +689,7 @@ class SequenceField(CompositeField):
                 Collection[object],
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
-        if bound_field.has_direct_value:
+        if bound_field.has_whole_value:
             return self._clean_values(bound_field.data, bound_field.initial)
         if not bound_field.is_bound_formset:
             if isinstance(self.child_field, FileField) and bound_field.initial:

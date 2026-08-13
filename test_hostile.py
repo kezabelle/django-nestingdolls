@@ -693,7 +693,7 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
     """Send one extra key that is spelled like a nested composite child."""
 
     def test_client_keeps_inner_rows_beside_a_forged_row_name_key(self):
-        """A direct row key cannot replace unambiguous inner row keys."""
+        """A forged row-name key cannot replace unambiguous inner row keys."""
         control = self.client.post(
             "/hostile-nested-text-list/",
             {
@@ -755,7 +755,7 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
         self.assertEqual(response.json()["value"], [[1, 2]])
 
     def test_client_keeps_the_leaf_of_a_nested_mapping_beside_a_forged_key(self):
-        """A direct mapping key cannot replace an unambiguous nested leaf."""
+        """A forged mapping key cannot replace an unambiguous nested leaf."""
         control = self.post_raw(
             "/hostile-triple-mapping/",
             (("value", "forged"), ("value-child-leaf", "1")),
@@ -782,8 +782,8 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["value"], {"child": {"leaf": 1}})
 
-    def test_client_keeps_flat_list_rows_beside_a_forged_field_name_key(self):
-        """A direct field-name key cannot replace unambiguous flat row keys."""
+    def test_client_keeps_prefixed_list_rows_beside_a_forged_field_name_key(self):
+        """A forged field-name key cannot replace unambiguous prefixed row keys."""
         control = self.client.post(
             "/hostile-integer-list/",
             {
@@ -808,8 +808,8 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["value"], [1, 2])
 
-    def test_client_ignores_a_forged_file_upload_beside_flat_list_rows(self):
-        """A forged file upload under the field name cannot replace flat row keys."""
+    def test_client_ignores_a_forged_file_upload_beside_prefixed_list_rows(self):
+        """A forged file upload under the field name cannot replace prefixed row keys."""
         response = self.client.post(
             "/hostile-integer-list/",
             {
@@ -823,8 +823,10 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["value"], [1, 2])
 
-    def test_client_keeps_flat_mapping_children_beside_a_forged_field_name_key(self):
-        """A direct field-name key cannot replace unambiguous flat mapping children."""
+    def test_client_keeps_prefixed_mapping_children_beside_a_forged_field_name_key(
+        self,
+    ):
+        """A forged field-name key cannot replace unambiguous prefixed mapping children."""
         control = self.post_raw(
             "/hostile-plain-mapping/",
             (("value-a", "1"), ("value-label", "kept")),

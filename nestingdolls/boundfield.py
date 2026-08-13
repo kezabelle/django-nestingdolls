@@ -28,11 +28,6 @@ class CompositeBoundField(BoundField):
 
     field: CompositeField
 
-    @property
-    def _all_errors(self) -> ErrorList:
-        """Return every error recorded for this field, child item errors included."""
-        return super().errors
-
     @cached_property
     def errors(self) -> ErrorList:
         """Return only errors owned by the outer composite field.
@@ -40,9 +35,10 @@ class CompositeBoundField(BoundField):
         An item error belongs to one child. The subform or the row renders
         that error next to the input that caused it. This method removes
         child item errors from the outer field, so the user does not see
-        the same problem twice.
+        the same problem twice. ``super().errors`` holds every recorded
+        error, child item errors included.
         """
-        errors = self._all_errors
+        errors = super().errors
         if not errors:
             return errors
         stored = errors.as_data()
@@ -120,7 +116,7 @@ class CompositeBoundField(BoundField):
         return self.field.has_changed(initial, self.data)
 
 
-class _ValueBoundField(BoundField):
+class ValueBoundField(BoundField):
     """Read one child value that the mapping field extracted already.
 
     ``MappingField.clean()`` builds the child Form from a dict of Python
@@ -167,23 +163,6 @@ class MappingBoundField(CompositeBoundField):
             return value
 
     @cached_property
-    def direct_value(self) -> object | None:
-        """Return the value submitted under this field's own exact key."""
-        if self.html_name in self.form.data:
-            return self.form.data.get(self.html_name)
-        if self.html_name in self.form.files:
-            return self.form.files.get(self.html_name)
-        return None
-
-    @cached_property
-    def has_wire_keys(self) -> bool:
-        """Report whether the browser sent prefixed child keys."""
-        widget = self.field.widget
-        return widget.has_child_keys(self.form.data, self.html_name) or (
-            widget.has_child_keys(self.form.files, self.html_name)
-        )
-
-    @cached_property
     def is_bound_subform(self) -> bool:
         """Report whether the child Form must bind the data and the files.
 
@@ -200,14 +179,23 @@ class MappingBoundField(CompositeBoundField):
             return False
         if self.field.disabled:
             return False
-        if self.has_wire_keys:
+        widget = self.field.widget
+        if widget.has_child_keys(self.form.data, self.html_name) or (
+            widget.has_child_keys(self.form.files, self.html_name)
+        ):
             return True
-        if self.direct_value is not None:
-            return isinstance(self.direct_value, Mapping)
+        # A whole value is the value under this field's own exact key.
+        whole_value = None
+        if self.html_name in self.form.data:
+            whole_value = self.form.data.get(self.html_name)
+        elif self.html_name in self.form.files:
+            whole_value = self.form.files.get(self.html_name)
+        if whole_value is not None:
+            return isinstance(whole_value, Mapping)
         return (
             isinstance(self.initial, dict)
             and bool(self.initial)
-            and self.field.widget.needs_multipart_form
+            and widget.needs_multipart_form
         )
 
     @cached_property
@@ -215,7 +203,7 @@ class MappingBoundField(CompositeBoundField):
         """Return the child Form for the clean step and for the render."""
         is_bound = self.is_bound_subform
         initial = self.initial
-        data, files = self.field.widget.bound_channels(
+        data, files = self.field.widget.expand_whole_values(
             self.form.data, self.form.files, self.html_name
         )
         subform = self.field.form_class(
@@ -276,7 +264,7 @@ class SequenceBoundField(CompositeBoundField):
     @cached_property
     def is_bound_formset(self) -> bool:
         """Report whether the browser submission binds the row formset."""
-        if not self.form.is_bound or self.field.disabled or self.has_direct_value:
+        if not self.form.is_bound or self.field.disabled or self.has_whole_value:
             return False
         widget = self.field.widget
         return any(
@@ -286,8 +274,8 @@ class SequenceBoundField(CompositeBoundField):
         )
 
     @cached_property
-    def has_direct_value(self) -> bool:
-        """Report whether a direct value sits under this field's own exact key.
+    def has_whole_value(self) -> bool:
+        """Report whether a whole value sits under this field's own exact key.
 
         Submitted row keys outrank the exact key, so a forged exact-name
         key cannot replace real rows.
@@ -302,7 +290,7 @@ class SequenceBoundField(CompositeBoundField):
     @cached_property
     def formset(self) -> BaseFormSet[Any]:
         """Return the cached, prefix-aware row formset for cleaning and rendering."""
-        initial_values = self.data if self.has_direct_value else self.initial
+        initial_values = self.data if self.has_whole_value else self.initial
         initial = self.field.widget.initial_rows(initial_values)
         if (
             not initial
@@ -313,13 +301,13 @@ class SequenceBoundField(CompositeBoundField):
             initial = [self.field.widget.empty_initial_row()]
         data: Mapping[str, object] | None
         files: MultiValueDict[str, UploadedFile[Any]] | None
-        if self.has_direct_value and self.form.is_bound and not self.field.disabled:
-            # A direct value carries no browser row keys, so the row
+        if self.has_whole_value and self.form.is_bound and not self.field.disabled:
+            # A whole value carries no prefixed row keys, so the row
             # formset would otherwise stay unbound and could never show
             # its own row errors: Django gives an unbound form empty
             # errors, always, on purpose. Give each row its own key
             # instead, so the formset binds for real.
-            data = self.field.widget.direct_rows(self.data, self.html_name)
+            data = self.field.widget.data_from_whole_value(self.data, self.html_name)
             files = MultiValueDict()
         else:
             data = self.form.data if self.is_bound_formset else None
@@ -337,7 +325,7 @@ class SequenceBoundField(CompositeBoundField):
     @cached_property
     def data(self) -> list[object]:
         """Return a whole sequence value or formset row values."""
-        if self.has_direct_value:
+        if self.has_whole_value:
             return self.field.widget.value_from_datadict(
                 self.form.data, self.form.files, self.html_name
             )
@@ -383,7 +371,7 @@ class SequenceBoundField(CompositeBoundField):
         """Report whole-value edits and row-formset deletions."""
         changed = (
             self.field.has_changed(self.initial, self.data)
-            if self.has_direct_value
+            if self.has_whole_value
             else super()._has_changed()
         )
         if changed or self.field.disabled:

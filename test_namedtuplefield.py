@@ -69,7 +69,7 @@ class NamedTupleFieldConstructionTestCase(SimpleTestCase):
 
 class NamedTupleFieldCleaningTestCase(SimpleTestCase):
     def test_clean_builds_the_namedtuple_output(self):
-        """Direct Python-value cleaning returns one output instance."""
+        """Cleaning a whole Python value returns one output instance."""
         field = nestingdolls.NamedTupleField(PointForm, output=Point)
         self.assertIs(field.output, Point)
 
@@ -116,7 +116,7 @@ class NamedTupleFieldCleaningTestCase(SimpleTestCase):
     def test_validators_receive_the_compressed_namedtuple(self):
         """A user validator gets the namedtuple, not the raw child-form dict.
 
-        This is what makes the ``_clean_form`` compress-before-validate
+        This is what makes the ``_clean_child_form`` compress-before-validate
         ordering in step 1 load-bearing rather than cosmetic.
         """
         seen = []

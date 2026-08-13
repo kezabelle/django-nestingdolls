@@ -62,17 +62,17 @@ class CompositeCase:
     widget_class: type[nestingdolls.CompositeWidget]
     bound_field_class: type
     make_field: Callable[..., forms.Field]
-    # A submission with one valid child in Django's dash grammar.
-    dash_data: dict[str, str]
+    # A submission with one valid child in Django's prefixed-key grammar.
+    prefixed_data: dict[str, str]
     # The same submission in a repeated-key mapping, plus a forged exact key.
     forged_query: str
-    # A direct Python value a programmer would pass, and its cleaned form.
-    direct_data: dict[str, object]
-    direct_cleaned: object
+    # A whole value a programmer would pass as Python data, and its cleaned form.
+    whole_data: dict[str, object]
+    whole_cleaned: object
     # A submission whose only child is invalid.
     invalid_data: dict[str, str]
     invalid_message: str
-    # An initial equal to ``dash_data`` once the child field converts it.
+    # An initial equal to ``prefixed_data`` once the child field converts it.
     unchanged_initial: object
 
 
@@ -85,7 +85,7 @@ COMPOSITE_CASES = (
         make_field=lambda **kwargs: nestingdolls.ListField(
             forms.IntegerField(), **kwargs
         ),
-        dash_data={
+        prefixed_data={
             "values-0": "1",
             f"values-{TOTAL_FORM_COUNT}": "1",
             f"values-{INITIAL_FORM_COUNT}": "0",
@@ -94,8 +94,8 @@ COMPOSITE_CASES = (
             "values=forged&values-0=1&values-1=2&"
             f"values-{TOTAL_FORM_COUNT}=2&values-{INITIAL_FORM_COUNT}=0"
         ),
-        direct_data={"values": ["3", "4"]},
-        direct_cleaned=[3, 4],
+        whole_data={"values": ["3", "4"]},
+        whole_cleaned=[3, 4],
         invalid_data={
             "values-0": "bad",
             f"values-{TOTAL_FORM_COUNT}": "1",
@@ -110,10 +110,10 @@ COMPOSITE_CASES = (
         widget_class=nestingdolls.MappingWidget,
         bound_field_class=nestingdolls.MappingBoundField,
         make_field=lambda **kwargs: nestingdolls.DictField(PointForm, **kwargs),
-        dash_data={"point-a": "1"},
+        prefixed_data={"point-a": "1"},
         forged_query="point=forged&point-a=1&point-label=kept",
-        direct_data={"point": {"a": "3", "label": "direct"}},
-        direct_cleaned={"a": 3, "label": "direct"},
+        whole_data={"point": {"a": "3", "label": "whole"}},
+        whole_cleaned={"a": 3, "label": "whole"},
         invalid_data={"point-a": "bad"},
         invalid_message="Enter a whole number.",
         unchanged_initial={"a": 1},
@@ -160,12 +160,12 @@ class SharedCompositeTestCase(SimpleTestCase):
                 # The child field converts "1" to 1.
                 # Comparing the raw strings would report a change.
                 unchanged = form_class(
-                    family.dash_data,
+                    family.prefixed_data,
                     initial={family.field_name: family.unchanged_initial},
                 )
                 changed = form_class(
-                    family.dash_data,
-                    initial={family.field_name: family.direct_cleaned},
+                    family.prefixed_data,
+                    initial={family.field_name: family.whole_cleaned},
                 )
 
                 self.assertIs(unchanged.has_changed(), False)
@@ -195,7 +195,7 @@ class SharedCompositeTestCase(SimpleTestCase):
         """The outer field hides child errors.
 
         The row or subform renders each error beside its input. Showing it again at
-        the outer field would duplicate it. ``_all_errors`` retains the unfiltered
+        the outer field would duplicate it. ``form.errors`` keeps the unfiltered
         errors for row and subform rendering.
         """
         for family in COMPOSITE_CASES:
@@ -206,7 +206,9 @@ class SharedCompositeTestCase(SimpleTestCase):
                 bound_field = form[family.field_name]
 
                 self.assertEqual(list(bound_field.errors), [])
-                self.assertIn(family.invalid_message, list(bound_field._all_errors))
+                self.assertIn(
+                    family.invalid_message, list(form.errors[family.field_name])
+                )
                 # A cached_property: a template touching it twice must not
                 # rebuild the list.
                 self.assertIs(bound_field.errors, bound_field.errors)
@@ -235,14 +237,14 @@ class SharedCompositeTestCase(SimpleTestCase):
                     ["First outer.", "Second outer."],
                 )
 
-    def test_direct_values_do_not_depend_on_mapping_type(self):
-        """A direct composite value works in ordinary and repeated-key mappings."""
+    def test_whole_values_do_not_depend_on_mapping_type(self):
+        """A whole composite value works in ordinary and repeated-key mappings."""
         for family in COMPOSITE_CASES:
             form_class = form_class_for(family, required=False)
             inputs = (
-                family.direct_data,
+                family.whole_data,
                 MultiValueDict(
-                    {key: [value] for key, value in family.direct_data.items()}
+                    {key: [value] for key, value in family.whole_data.items()}
                 ),
             )
             for data in inputs:
@@ -251,10 +253,10 @@ class SharedCompositeTestCase(SimpleTestCase):
 
                     self.assertIs(form.is_valid(), True, form.errors)
                     self.assertEqual(
-                        form.cleaned_data[family.field_name], family.direct_cleaned
+                        form.cleaned_data[family.field_name], family.whole_cleaned
                     )
 
-    def test_mapping_accepts_declared_dash_children_only(self):
+    def test_mapping_accepts_declared_prefixed_children_only(self):
         """Dot, bracket, and undeclared mapping keys cannot enter a child form."""
 
         class Form(forms.Form):
@@ -314,7 +316,7 @@ class SharedCompositeTestCase(SimpleTestCase):
                 self.assertIn(family.invalid_message, form.as_p())
 
     def test_bound_field_rejects_a_foreign_field(self):
-        """Direct misuse raises even when asserts are stripped."""
+        """Misuse raises even when asserts are stripped."""
         for family in COMPOSITE_CASES:
             with (
                 self.subTest(family=family.name),
@@ -424,37 +426,37 @@ class SharedCompositeTestCase(SimpleTestCase):
 
 
 class SharedCompositeStyleParityTestCase(SimpleTestCase):
-    """A dash-key submission and a direct Python value both bind and clean.
+    """A prefixed-key submission and a whole Python value both bind and clean.
 
-    Each ``CompositeCase`` already carries a dash-key fixture (``dash_data``)
-    and a direct-value fixture (``direct_data``/``direct_cleaned``). Neither
+    Each ``CompositeCase`` already carries a prefixed-key fixture (``prefixed_data``)
+    and a whole-value fixture (``whole_data``/``whole_cleaned``). Neither
     style is a fallback for the other: both must validate and clean on their
     own terms, for both the sequence and the mapping family.
     """
 
-    def test_sequence_dash_data_cleans_its_one_row(self):
+    def test_sequence_prefixed_data_cleans_its_one_row(self):
         family = COMPOSITE_CASES[0]
-        form = form_class_for(family)(family.dash_data)
+        form = form_class_for(family)(family.prefixed_data)
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data[family.field_name], [1])
 
-    def test_sequence_direct_data_cleans_every_row(self):
+    def test_sequence_whole_data_cleans_every_row(self):
         family = COMPOSITE_CASES[0]
-        form = form_class_for(family)(family.direct_data)
+        form = form_class_for(family)(family.whole_data)
         self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data[family.field_name], family.direct_cleaned)
+        self.assertEqual(form.cleaned_data[family.field_name], family.whole_cleaned)
 
-    def test_mapping_dash_data_cleans_its_one_child(self):
+    def test_mapping_prefixed_data_cleans_its_one_child(self):
         family = COMPOSITE_CASES[1]
-        form = form_class_for(family)(family.dash_data)
+        form = form_class_for(family)(family.prefixed_data)
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data[family.field_name], {"a": 1, "label": ""})
 
-    def test_mapping_direct_data_cleans_every_child(self):
+    def test_mapping_whole_data_cleans_every_child(self):
         family = COMPOSITE_CASES[1]
-        form = form_class_for(family)(family.direct_data)
+        form = form_class_for(family)(family.whole_data)
         self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data[family.field_name], family.direct_cleaned)
+        self.assertEqual(form.cleaned_data[family.field_name], family.whole_cleaned)
 
 
 if __name__ == "__main__":  # pragma: no cover

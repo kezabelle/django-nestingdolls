@@ -39,8 +39,8 @@ normal Django behavior and uses JavaScript only for progressive enhancement.
 
 ### Input handling
 
-- Preserve direct and dash input forms.
-- Preserve direct-value priority over flat input names.
+- Preserve whole-value and prefixed input forms.
+- Preserve whole-value priority over prefixed input names.
 - Preserve all input forms through mapping and sequence nesting.
 - Do not copy or canonicalize submission keys. A subform or row formset binds
   to the raw request data with a Django prefix and reads only its own keys.
@@ -125,5 +125,5 @@ docstrings.
 - The countdown's budget belongs to one field's own nested tree. It does not reach a sibling field, whether that sibling sits directly on the same form or inside one mapping's child form. Django gives each formset on a page its own `absolute_max` too, with no cap shared across formsets (`django.forms.formsets.BaseFormSet.total_form_count`). The number of sequence fields on a form is fixed by the form's author, not by a submitted request, so this field follows the same precedent: do not add cross-field or cross-form sharing to work around it.
 - `SequenceWidget.submission_countdown` owns only recursive sequence row multiplication. Keep it in `widgets.py`; mappings and shared composite classes must not import, start, inspect, or extend it.
 - Use its normal `__enter__`/`__exit__` lifecycle around sequence parsing, extraction, and rendering. Its context holds only remaining rows and an overflow flag. Do not add marker values, field objects, lazy cap expansion, or a separate `scope()` API.
-- Reserve rows at the point a submitted count turns into built rows. Two points qualify: `RowFormSet.total_form_count`, where a `TOTAL_FORMS` value becomes the number of row forms Django builds, and the direct-value clip in `SequenceWidget.value_from_datadict`. A row nested inside an active countdown reserves from the same shared budget, so a total that is legal on its own at every level still cannot multiply across sibling rows. A later step that reads an already-built row list, such as a bound field reading its cached formset's forms, must not call `take()` on that count again. It inherits the reservation. Leave a comment that says so.
-- Never put the limit in overridable field `clean()` methods. Bound extraction records overflow; bound cleaning reports `too_many_forms`; rendering clips. Direct Python or decoded JSON callers own their input size and depth limits.
+- Reserve rows at the point a submitted count turns into built rows. Two points qualify: `RowFormSet.total_form_count`, where a `TOTAL_FORMS` value becomes the number of row forms Django builds, and the whole-value clip in `SequenceWidget.value_from_datadict`. A row nested inside an active countdown reserves from the same shared budget, so a total that is legal on its own at every level still cannot multiply across sibling rows. A later step that reads an already-built row list, such as a bound field reading its cached formset's forms, must not call `take()` on that count again. It inherits the reservation. Leave a comment that says so.
+- Never put the limit in overridable field `clean()` methods. Bound extraction records overflow; bound cleaning reports `too_many_forms`; rendering clips. Python and decoded JSON callers own their input size and depth limits.
