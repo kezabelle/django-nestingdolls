@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+__version__ = "1.0.0"
+
 from .boundfield import MappingBoundField, SequenceBoundField
 from .errors import (
     InvalidInitialValueError,
@@ -48,4 +50,5 @@ __all__ = [
     "Subform",
     "TooManyFormsValidationError",
     "TupleField",
+    "__version__",
 ]
