@@ -9,8 +9,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import unittest
-from collections.abc import Callable
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import django
 from django import forms
@@ -23,6 +22,9 @@ from django.test.utils import setup_test_environment, teardown_test_environment
 from django.utils.datastructures import MultiValueDict
 
 import nestingdolls
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 if not settings.configured:
     settings.configure(

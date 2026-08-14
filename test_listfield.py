@@ -942,9 +942,11 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
             normalized_keys = 0
 
             def read_input(self, data, files, name):
-                input = super().read_input(data, files, name)
-                CountingWidget.normalized_keys += len(input.data) + len(input.files)
-                return input
+                form_input = super().read_input(data, files, name)
+                CountingWidget.normalized_keys += len(form_input.data) + len(
+                    form_input.files
+                )
+                return form_input
 
         class Form(forms.Form):
             values = nestingdolls.ListField(

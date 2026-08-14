@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-nesting-dolls"
-version = "0.1.0"
+version = "1.0.0"
 description = "Composite Django form fields for nested mappings and sequences."
 readme = "README.md"
 license = "BSD-3-Clause"
@@ -62,8 +62,44 @@ nestingdolls = [
 [tool.mypy]
 plugins = ["mypy_django_plugin.main"]
 strict = true
+disallow_any_unimported = true
+strict_bytes = true
+strict_equality_for_none = true
+warn_unreachable = true
 warn_unused_configs = true
 enable_error_code = ["ignore-without-code"]
 
 [tool.django-stubs]
 django_settings_module = "mypy_settings"
+
+[tool.ruff]
+required-version = ">=0.16.2"
+target-version = "py312"
+
+[tool.ruff.lint]
+future-annotations = true
+select = ["ALL"]
+ignore = [
+    "COM812", # Conflicts with the formatter.
+    "CPY001", # Copyright notices require a project-wide legal policy.
+    "D105", # Magic-method behavior is documented by the containing type.
+    "D107", # Constructor behavior is documented by the containing type.
+    "D203", # Incompatible with D211.
+    "D213", # Incompatible with D212.
+    "E501", # The formatter is the authority on line length.
+    "EM101", # Django validation errors conventionally use literal messages.
+    "SIM110", # An explicit key scan is measurably faster; see AGENTS.md.
+    "TRY003", # Django validation errors conventionally carry their message at the raise site.
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The WSGI demo configures Django before importing its optional debug toolbar.
+"demo.py" = ["D", "E402", "S106", "T201"]
+# django-stubs reads this configuration module; it has no public runtime API.
+"mypy_settings.py" = ["D"]
+"nestingdolls/fields.py" = ["PLR0913"] # Django Field-compatible constructors.
+"nestingdolls/widgets.py" = ["PLR0913"] # Formset construction mirrors Django's API.
+# The benchmark intentionally prints results and instruments a Django private method.
+"pathological.py" = ["ANN", "D", "N", "PLR2004", "SLF001", "T201"]
+# unittest conventions conflict with pytest-only rules and make test-only annotations/docs redundant.
+"test_*.py" = ["ANN", "ARG", "D", "FBT003", "N", "PLR2004", "PT", "S101", "SLF001", "T201"]

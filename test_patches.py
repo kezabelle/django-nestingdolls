@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import wraps
+from typing import TYPE_CHECKING
 
 import django
 from django import forms
@@ -14,6 +14,9 @@ from django.test import SimpleTestCase, override_settings
 
 import nestingdolls
 from nestingdolls.patches import FormLayout, install_form_rendering_patch
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 if not settings.configured:
     settings.configure(

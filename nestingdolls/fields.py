@@ -1,3 +1,5 @@
+"""Django fields that clean nested mappings and variable-length collections."""
+
 from __future__ import annotations
 
 import copy
@@ -5,12 +7,11 @@ import dataclasses
 from collections import namedtuple
 from collections.abc import Callable, Collection, Mapping, Sequence
 from itertools import islice
-from typing import Any, Self, cast
+from typing import TYPE_CHECKING, Self, cast
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.forms import BaseForm, BaseFormSet, Field
-from django.forms.boundfield import BoundField
 from django.forms.fields import FileField
 from django.forms.formsets import DEFAULT_MAX_NUM, DEFAULT_MIN_NUM
 from django.utils.functional import Promise, cached_property
@@ -30,6 +31,9 @@ from nestingdolls.errors import (
     TooManyFormsValidationError,
 )
 from nestingdolls.widgets import CompositeWidget, MappingWidget, SequenceWidget
+
+if TYPE_CHECKING:
+    from django.forms.boundfield import BoundField
 
 __all__ = [
     "DataclassField",
@@ -92,7 +96,7 @@ class MappingField(CompositeField):
     def _declared_field_names(self) -> tuple[str, ...]:
         """Return the form's declared field names."""
         return tuple(
-            cast(Mapping[str, Field], self.form_class.base_fields)  # type: ignore[attr-defined]
+            cast("Mapping[str, Field]", self.form_class.base_fields)  # type: ignore[attr-defined]
         )
 
     output: Callable[..., object]
@@ -195,7 +199,7 @@ class MappingField(CompositeField):
     def from_hidden_initial(self, value: object, /) -> object:
         """Convert each member back from its hidden initial value."""
         # to_python() gives a mapping of members here, or raises for other input.
-        members = cast(dict[str, object], super().from_hidden_initial(value))
+        members = cast("dict[str, object]", super().from_hidden_initial(value))
         for name, child_field in self.widget.fields.items():
             if name in members:
                 members[name] = self._child_from_hidden_initial(
@@ -247,7 +251,7 @@ class MappingField(CompositeField):
         """
         value = self.to_python(value)
         if not value:
-            return self.compress(cast(dict[str, object], super().clean(value)))
+            return self.compress(cast("dict[str, object]", super().clean(value)))
         return self._clean_child_form(
             self.form_class(
                 data=value,
@@ -262,7 +266,8 @@ class MappingField(CompositeField):
         missing or scalar submission has no bound subform, so the base field
         reports the ordinary "invalid" or "required" error.
         """
-        assert isinstance(bound_field, MappingBoundField), "for mypy"
+        if not isinstance(bound_field, MappingBoundField):
+            raise TypeError("bound field must be a MappingBoundField")
         if self.disabled:
             return super()._clean_bound_field(bound_field)  # type: ignore[misc]
         if not bound_field.is_bound_subform:
@@ -335,9 +340,10 @@ class NamedTupleField(MappingField):
     ) -> Callable[..., object]:
         """Return the named tuple class that builds cleaned output."""
         if output is None:
+            # A runtime field list cannot be expressed through typing.NamedTuple.
             return cast(
-                type[tuple[object, ...]],
-                namedtuple(
+                "type[tuple[object, ...]]",
+                namedtuple(  # noqa: PYI024
                     f"{self.form_class.__name__}Value",
                     self._declared_field_names,
                     defaults=(None,) * len(self._declared_field_names),
@@ -352,7 +358,7 @@ class NamedTupleField(MappingField):
                 "output argument for NamedTupleField must be a named tuple class"
             )
         if frozenset(self.widget.fields) != frozenset(
-            cast(tuple[str, ...], output._fields)
+            cast("tuple[str, ...]", output._fields)
         ):
             raise ImproperlyConfigured(
                 "form_class fields must match output._fields exactly"
@@ -360,11 +366,13 @@ class NamedTupleField(MappingField):
         return output
 
     def initial_value(self, value: object) -> dict[str, object]:
+        """Normalize a named tuple initial value into named child values."""
         as_dict = getattr(value, "_asdict", None)
         return super().initial_value(as_dict() if callable(as_dict) else value)
 
     def compress(self, data: dict[str, object]) -> tuple[object, ...] | None:
-        return cast(tuple[object, ...] | None, self._compress_with_defaults(data))
+        """Build a named tuple from cleaned child values."""
+        return cast("tuple[object, ...] | None", self._compress_with_defaults(data))
 
 
 class DataclassField(MappingField):
@@ -376,7 +384,7 @@ class DataclassField(MappingField):
         """Return the dataclass that builds cleaned output."""
         if output is None:
             return cast(
-                type[object],
+                "type[object]",
                 dataclasses.make_dataclass(
                     f"{self.form_class.__name__}Value",
                     [
@@ -390,7 +398,7 @@ class DataclassField(MappingField):
                 "output argument for DataclassField must be a dataclass"
             )
         if frozenset(self.widget.fields) != frozenset(
-            field.name for field in dataclasses.fields(cast(Any, output))
+            field.name for field in dataclasses.fields(output)
         ):
             raise ImproperlyConfigured(
                 "form_class fields must match output fields exactly"
@@ -398,14 +406,16 @@ class DataclassField(MappingField):
         return output
 
     def initial_value(self, value: object) -> dict[str, object]:
+        """Normalize a dataclass initial value into named child values."""
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
             value = {
                 field.name: getattr(value, field.name)
-                for field in dataclasses.fields(cast(Any, value))
+                for field in dataclasses.fields(value)
             }
         return super().initial_value(value)
 
     def compress(self, data: dict[str, object]) -> object | None:
+        """Build a dataclass from cleaned child values."""
         return self._compress_with_defaults(data)
 
 
@@ -642,7 +652,7 @@ class SequenceField(CompositeField):
     def from_hidden_initial(self, value: object, /) -> object:
         """Convert each row back from its hidden initial value."""
         # to_python() gives a list of rows here, or raises for other input.
-        rows = cast(list[object], super().from_hidden_initial(value))
+        rows = cast("list[object]", super().from_hidden_initial(value))
         return [self._child_from_hidden_initial(self.child_field, row) for row in rows]
 
     def _clean_values(
@@ -683,10 +693,11 @@ class SequenceField(CompositeField):
 
     def _clean_bound_field(self, bound_field: BoundField) -> Collection[object]:
         """Clean browser submissions through Django's real row formset."""
-        assert isinstance(bound_field, SequenceBoundField), "for mypy"
+        if not isinstance(bound_field, SequenceBoundField):
+            raise TypeError("bound field must be a SequenceBoundField")
         if self.disabled:
             return cast(
-                Collection[object],
+                "Collection[object]",
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
         if bound_field.has_whole_value:
@@ -697,7 +708,7 @@ class SequenceField(CompositeField):
                     [None] * len(bound_field.initial), bound_field.initial
                 )
             return cast(
-                Collection[object],
+                "Collection[object]",
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
 
@@ -780,7 +791,7 @@ class SequenceField(CompositeField):
         for index, value in enumerate(data):
             initial_value = initial[index] if index < len(initial) else None
             try:
-                value = self.child_field.bound_data(value, initial_value)
+                value = self.child_field.bound_data(value, initial_value)  # noqa: PLW2901
             except (InvalidInitialValueError, ValidationError):
                 # BoundField.value() calls this method during a render. A
                 # composite child can refuse a bad row here, for example a
@@ -789,7 +800,7 @@ class SequenceField(CompositeField):
                 # value of an enabled field again, so this method falls
                 # back to the base behavior. prepare_value() does the
                 # same.
-                value = super().bound_data(value, initial_value)
+                value = super().bound_data(value, initial_value)  # noqa: PLW2901
             values.append(value)
         return values
 
@@ -806,18 +817,18 @@ class SequenceField(CompositeField):
             values = []
             for row in rows:
                 try:
-                    row = self.child_field.prepare_value(row)
+                    row = self.child_field.prepare_value(row)  # noqa: PLW2901
                 except (InvalidInitialValueError, ValidationError):
                     # Same render-time fallback as bound_data(). A composite
                     # child can refuse a bad row, for example a nested
                     # MappingField row given as a scalar. Show the row the
                     # way Django does, instead of raising an error
                     # mid-render.
-                    row = super().prepare_value(row)
+                    row = super().prepare_value(row)  # noqa: PLW2901
                 values.append(row)
             return values
 
-    def has_changed(self, initial: object, data: object) -> bool:
+    def has_changed(self, initial: object, data: object) -> bool:  # noqa: C901, PLR0911
         """Compare submitted rows using child-field change semantics."""
         if self.disabled:
             return False
@@ -883,7 +894,7 @@ class SetField(SequenceField):
                 self.error_messages["unhashable"], code="unhashable"
             ) from error
 
-    def has_changed(self, initial: object, data: object) -> bool:
+    def has_changed(self, initial: object, data: object) -> bool:  # noqa: PLR0911
         """Compare set members; anything ambiguous counts as a change.
 
         Pair each row with the member its converted value hashes to, then

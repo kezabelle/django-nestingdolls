@@ -1,3 +1,5 @@
+"""Validation errors that preserve where composite child validation failed."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Self
@@ -6,8 +8,6 @@ from django.core.exceptions import ValidationError
 
 if TYPE_CHECKING:
     from django.utils.functional import _StrPromise as StrPromise
-else:
-    from django.utils.functional import Promise as StrPromise
 
 __all__ = [
     "InvalidInitialValueError",

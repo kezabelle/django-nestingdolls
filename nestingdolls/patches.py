@@ -12,12 +12,14 @@ from __future__ import annotations
 from contextvars import ContextVar
 from enum import StrEnum
 from functools import wraps
-from typing import Any, Self, cast
+from typing import TYPE_CHECKING, Self, cast
 
 from django.forms.forms import BaseForm
-from django.forms.renderers import BaseRenderer
-from django.forms.utils import RenderableMixin
-from django.utils.safestring import SafeString
+
+if TYPE_CHECKING:
+    from django.forms.renderers import BaseRenderer
+    from django.forms.utils import RenderableMixin
+    from django.utils.safestring import SafeString
 
 active_form_layout: ContextVar[FormLayout | None] = ContextVar(
     "active_form_layout",
@@ -90,7 +92,6 @@ def install_form_rendering_patch() -> None:
     the unpatched function. So this patch replaces all three names with
     the wrapper.
     """
-
     # ready() can run more than one time in one process. Patch one time only.
     if bool(getattr(BaseForm, "nestingdolls_render_patch_installed", False)):
         return
@@ -104,7 +105,7 @@ def install_form_rendering_patch() -> None:
     def render_with_form_layout(
         self: RenderableMixin,
         template_name: str | None = None,
-        context: dict[str, Any] | None = None,
+        context: dict[str, object] | None = None,
         renderer: BaseRenderer | type[BaseRenderer] | None = None,
     ) -> SafeString:
         """Record the layout of this render, then call the original method."""
@@ -114,7 +115,7 @@ def install_form_rendering_patch() -> None:
         # with None, and still render a named Django layout.
         # BaseForm.template_name is the renderer's form_template_name. A
         # renderer can change that name.
-        form = cast(BaseForm, self)
+        form = cast("BaseForm", self)
         layout = FormLayout.from_template_name(template_name or form.template_name)
         # The template name is not one of Django's four. Keep the layout of the
         # render around this one, because a custom template can hold a form of

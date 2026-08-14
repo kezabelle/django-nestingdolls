@@ -526,10 +526,7 @@ def measure(client, case):
         elapsed = time.perf_counter() - start
         body = response.json()
         codes = sorted({code for codes in body["errors"].values() for code in codes})
-        if codes:
-            outcome = ",".join(codes)
-        else:
-            outcome = "valid" if body["valid"] else "invalid"
+        outcome = ",".join(codes) if codes else "valid" if body["valid"] else "invalid"
     except Aborted:
         elapsed = time.perf_counter() - start
         outcome = f">{ABORT_SECONDS:.0f}s ABORTED"
@@ -641,7 +638,7 @@ def report(results, baseline):
     return failures
 
 
-def _abort_case(signum, frame):
+def _abort_case(_signum, _frame):
     """Stop a case that has run far past its bound."""
     raise Aborted
 

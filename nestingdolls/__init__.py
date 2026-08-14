@@ -1,3 +1,5 @@
+"""Public composite fields, bound fields, widgets, and validation errors."""
+
 from __future__ import annotations
 
 from .boundfield import MappingBoundField, SequenceBoundField

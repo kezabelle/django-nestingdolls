@@ -1,23 +1,26 @@
+"""Bound-field implementations for composite mapping and sequence values."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime, time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from django.core.exceptions import ValidationError
-from django.core.files.uploadedfile import UploadedFile
-from django.forms import BaseForm, BaseFormSet, Field
 from django.forms.boundfield import BoundField
-from django.forms.utils import ErrorList
-from django.forms.widgets import Widget
 from django.utils.datastructures import MultiValueDict
 from django.utils.functional import cached_property
-from django.utils.safestring import SafeString
 
 from nestingdolls.errors import InvalidInitialValueError, ItemValidationError
 from nestingdolls.widgets import CompositeWidget, MappingWidget, SequenceWidget
 
 if TYPE_CHECKING:
+    from django.core.files.uploadedfile import UploadedFile
+    from django.forms import BaseForm, BaseFormSet, Field
+    from django.forms.utils import ErrorList
+    from django.forms.widgets import Widget
+    from django.utils.safestring import SafeString
+
     from nestingdolls.fields import CompositeField, MappingField, SequenceField
 
 __all__ = ["MappingBoundField", "SequenceBoundField"]
@@ -66,7 +69,7 @@ class CompositeBoundField(BoundField):
         self,
         widget: Widget | None = None,
         attrs: dict[str, str | bool] | None = None,
-        only_initial: bool = False,
+        only_initial: bool = False,  # noqa: FBT001, FBT002
     ) -> SafeString:
         """Give the widget the submitted state, then let Django render it."""
         widget = widget or self.field.widget
@@ -103,7 +106,7 @@ class CompositeBoundField(BoundField):
         if self.field.disabled:
             return False
         if not self.field.show_hidden_initial:
-            return cast(bool, super()._has_changed())  # type: ignore[misc]
+            return cast("bool", super()._has_changed())  # type: ignore[misc]
         widget = self.field.hidden_widget()
         try:
             initial = self.field.from_hidden_initial(
@@ -145,7 +148,7 @@ class MappingBoundField(CompositeBoundField):
     field: MappingField
 
     def __init__(self, form: BaseForm, field: Field, name: str) -> None:
-        from nestingdolls.fields import MappingField
+        from nestingdolls.fields import MappingField  # noqa: PLC0415
 
         super().__init__(form, field, name)
         if not isinstance(self.field, MappingField):
@@ -208,7 +211,7 @@ class MappingBoundField(CompositeBoundField):
         )
         subform = self.field.form_class(
             data=data if is_bound else None,
-            files=cast("MultiValueDict[str, UploadedFile[Any]]", files)
+            files=cast("MultiValueDict[str, UploadedFile[bytes]]", files)
             if is_bound
             else None,
             initial=initial if isinstance(initial, dict) else {},
@@ -237,7 +240,8 @@ class MappingBoundField(CompositeBoundField):
     def prepare_widget(self, widget: CompositeWidget) -> None:
         """Give the mapping widget the child Form that holds the bound data."""
         if not isinstance(widget, MappingWidget):
-            return super().prepare_widget(widget)
+            super().prepare_widget(widget)
+            return
         widget.render_state = widget.RenderState(
             subform=self.subform,
             initial_error=(
@@ -254,7 +258,7 @@ class SequenceBoundField(CompositeBoundField):
     field: SequenceField
 
     def __init__(self, form: BaseForm, field: Field, name: str) -> None:
-        from nestingdolls.fields import SequenceField
+        from nestingdolls.fields import SequenceField  # noqa: PLC0415
 
         super().__init__(form, field, name)
         if not isinstance(self.field, SequenceField):
@@ -300,7 +304,7 @@ class SequenceBoundField(CompositeBoundField):
         )
 
     @cached_property
-    def formset(self) -> BaseFormSet[Any]:
+    def formset(self) -> BaseFormSet[BaseForm]:
         """Return the cached, prefix-aware row formset for cleaning and rendering."""
         initial_values = self.data if self.has_whole_value else self.initial
         initial = self.field.widget.initial_rows(initial_values)
@@ -312,7 +316,7 @@ class SequenceBoundField(CompositeBoundField):
         ):
             initial = [self.field.widget.empty_initial_row()]
         data: Mapping[str, object] | None
-        files: MultiValueDict[str, UploadedFile[Any]] | None
+        files: MultiValueDict[str, UploadedFile[bytes]] | None
         if self.has_whole_value and self.form.is_bound and not self.field.disabled:
             # A whole value carries no prefixed row keys, so the row
             # formset would otherwise stay unbound and could never show
@@ -324,15 +328,14 @@ class SequenceBoundField(CompositeBoundField):
         else:
             data = self.form.data if self.is_bound_formset else None
             files = self.form.files if self.is_bound_formset else None
-        formset = self.field.widget.new_formset(
+        return self.field.widget.new_formset(
             data=data,
             files=files,
             initial=initial,
             prefix=self.html_name,
-            auto_id=cast(str, self.form.auto_id),
+            auto_id=cast("str", self.form.auto_id),
             form_kwargs={"use_required_attribute": False},
         )
-        return formset
 
     @cached_property
     def data(self) -> list[object]:
@@ -370,7 +373,8 @@ class SequenceBoundField(CompositeBoundField):
     def prepare_widget(self, widget: CompositeWidget) -> None:
         """Give the sequence widget the formset that owns row state."""
         if not isinstance(widget, SequenceWidget):
-            return super().prepare_widget(widget)
+            super().prepare_widget(widget)
+            return
         if self.field.disabled:
             widget.render_state = widget.RenderState()
             return
