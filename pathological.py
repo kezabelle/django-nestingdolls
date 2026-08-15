@@ -56,12 +56,12 @@ nine reach rows through change detection, an ``empty_permitted`` form, a render,
 a hidden initial, or a mapping, and every one of them was still building rows
 when the abort timer killed it, at 6s and again at 20s.
 
-    a claim 498x wider  ->  rows built x1.0,  wall time x2.6
+    a claim 498x wider  ->  rows built x1.0,  wall time x2.0
 
 Rows built stayed flat at one budget per entry point. A 998-key claim for 996,498
-rows was answered with 2,000 rows in about 0.08s, and the same claim spread over
+rows was answered with 2,000 rows in 0.054s, and the same claim spread over
 three or five levels cost no more, because levels share one budget instead of
-each getting a fresh one. Peak allocation stayed between 5 and 45 MB.
+each getting a fresh one. Peak allocation stayed between 4.9 and 39.3 MB.
 
 Verdicts differ by shape and all three are correct. A plain nested sequence
 reports ``too_many_forms``. A sequence inside a mapping reports ``item_invalid``,
@@ -73,13 +73,13 @@ bounded in all three.
 Two costs remain. Both are ceilings rather than amplification, because a request
 cannot raise either bound:
 
-- About 0.08s for the widest single-field case, against 0.03s for a 4-key claim
+- 0.054s for the widest single-field case, against 0.027s for a 4-key claim
   asking for the same number of rows. Rows built are identical, so what is left
   of the difference is per-key work. See the next section.
-- About 0.33s and 16,000 rows for a form with eight sibling nested sequence
+- 0.317s and 16,000 rows for a form with eight sibling nested sequence
   fields, which is budget x fields x entry points. The field count is fixed by
   the form's author, the same position Django takes for ``absolute_max`` per
-  formset. Quote this number, not the 0.08s, as the per-request ceiling.
+  formset. Quote this number, not the single-field total, as the per-request ceiling.
 
 Two ways this script had already misled its own author, both fixed here, both
 worth re-checking if the numbers ever look surprising. Measuring peak allocation
@@ -109,12 +109,13 @@ client and the view on top and tells you nothing. The contrast pair is the whole
 method: both build the same 2,000 rows, so whatever separates their profiles is
 per-key cost, and per-key cost is all that is left to win.
 
-On the recorded run no function in this package appears in the top ten of
-either contrast profile, and ``str.startswith`` is down from 2.7 million calls
-to about 2,000. What is left in both is Django's own per-row form construction:
-``copy.deepcopy`` of ``base_fields`` in ``BaseForm.__init__`` and the
-``Field.__deepcopy__`` chain under it, about 0.45s of the 0.88s profiled
-``8 sibling`` request.
+No package function appears in the top ten of either final contrast profile.
+The 0.074s concentrated profile, 0.131s spread profile, and 0.705s sibling
+profile are instead dominated by Django and CPython copying. In the sibling
+profile, ``copy._deepcopy_dict`` takes 0.126s of self time, ``deepcopy`` takes
+0.056s, and Django ``Field.__init__`` takes 0.032s. This is Django's per-row
+form construction: ``copy.deepcopy`` of ``base_fields`` in
+``BaseForm.__init__`` and the ``Field.__deepcopy__`` chain under it.
 
 That is per-row cost, not per-key cost, so the contrast pair no longer
 separates it: both cases build 2,000 rows and both pay it. It is bounded by the
@@ -128,11 +129,11 @@ to prevent.
 What was reduced, and what is left
 ----------------------------------
 The per-key work above is gone. Both functions now do one pass over the keys
-where they did one pass per row, and the wall-time amplification fell from
-x13.1 to x3.0 without moving a single ``built`` figure or verdict.
+where they did one pass per row. The final clean pass reports x2.0 wall-time
+amplification without moving a single ``built`` figure or verdict.
 
-``row_carries_submitted_value`` is a set lookup against
-``RowFormSet.rows_with_submitted_values``, which indexes the row prefixes
+``RowFormSet.get_form_kwargs`` answers per row with one set lookup against
+``rows_with_submitted_values``, which indexes the row prefixes
 carrying a non-blank value in one pass over the keys. The lifetime is the
 formset, which is constructed per extraction with its own ``data`` and
 ``files``, so no new machinery was needed and the budget did not change. The
@@ -167,7 +168,35 @@ an index -- did not have to be made, so nothing was traded away. It still holds
 one integer, and that is still the only thing between a forged ``TOTAL_FORMS``
 and unbounded work. Keep it that way.
 
-The behavior to watch is unchanged, and ``row_carries_submitted_value``'s own
+Empty child formsets after overflow
+-----------------------------------
+``SequenceBoundField.data`` now reads the active shared count after it enters
+``submission_countdown``. A strictly negative count means an earlier child has
+already overdrawn the budget. Later children cannot add a row or change the one
+error the owning outer field reports, so extraction returns their empty values
+without constructing their zero-row formsets. It does not alter the count, row
+budget, or error owner. Zero is not overflow: the next child still constructs
+its formset and reads its claim, which can make the count negative.
+``HostileCleanCostTestCase.test_claim_after_exact_budget_still_records_overflow``
+holds that boundary.
+
+The old eight-sibling request built 496 formsets: eight outer formsets and 61
+child formsets for each sibling. The strict-negative shortcut builds 16: each
+sibling's outer formset and its first child formset. It still builds 16,000 row
+forms and returns the same response body.
+
+Whole-run timings had more process-to-process variation than this package-side
+change: five pre-change runs measured 0.278, 0.270, 0.276, 0.277, and 0.274s
+(median 0.276s), while two later strict-negative batches had 0.334s and 0.321s
+medians. Those sequential batches do not establish a source comparison. The
+comparison therefore ran the actual ``pathological.measure`` sibling case in
+ten alternating pairs of independent Python processes, with a source-equivalent
+old ``data`` implementation in one process and the strict-negative source in
+the other. Every request returned the same body, ``too_many_forms``, and 16,000
+rows. The old median was 294.778ms; the strict-negative median was 291.440ms:
+3.338ms, or 1.132%, lower. Peak allocation also fell from 39.8 to 39.3 MB.
+
+The behavior to watch is unchanged, and ``rows_with_submitted_values``'s own
 docstring is still where it is written down: a rendered row always sends its
 delete key and always sends blank values, so only a non-blank value counts as
 real content. ``empty_permitted`` correctness rests on that distinction. The
@@ -232,6 +261,37 @@ of every wide case's peak allocation (11.6 -> 9.0 MB), and the wall-time
 amplification fell from x3.0 to x2.6. Verdicts and every ``built`` figure are
 unchanged, which ``make test`` and this script confirmed.
 
+No ManagementForm for a formset past the budget
+-----------------------------------------------
+Django's ``total_form_count`` builds and cleans the ``ManagementForm`` to read
+``TOTAL_FORMS``. ``RowFormSet.total_form_count`` called it before it asked the
+shared budget for rows, so a wide hostile submission paid for one full Django
+form per outer row -- 499 management forms on the 998-key spread case, about a
+quarter of its profiled time, four deep-copied fields and four bound fields
+each -- and then clipped every one of those claims to zero rows.
+
+``RowFormSet.total_form_count`` now reads the sign of the countdown's shared
+remaining value first and skips the ``ManagementForm`` when the budget is
+already overdrawn. The skip cannot change a result. Overflow is the sign of
+the remaining value, which is already negative, and the magnitude is never
+read, so the skipped ``take()`` subtraction changes no observable state. The
+first overdrawing claim still goes through ``take()``, so exact use still
+succeeds and a ``TOTAL_FORMS`` of zero on an exactly-spent budget stays
+legal. ``management_form`` is a ``cached_property``, so a later reader -- a
+render's ``get_context``, a formset ``full_clean`` -- still builds it on
+demand.
+
+On the recorded management-form comparison, management forms in the spread
+profile fell from 499 to 2: the outer formset and the first inner formset,
+which overdraws. That comparison reduced the spread case from 0.081s to
+0.058s and from 9.0 to 6.2 MB. The current clean full run reports 0.054s and
+5.7 MB for the spread case, 0.317s and 39.3 MB for the eight-sibling case, and
+x2.0 wall-time amplification. The concentrated case does not move: its single
+nested formset is the one that overdraws, so there is nothing to skip. Every
+``built`` figure and verdict is unchanged, and the responses and rendered HTML
+were compared byte for byte. Verify with ``make test`` and this script, then
+re-record the numbers above.
+
 Slice comparisons, not startswith
 ---------------------------------
 A loop that tests a prefix against every submitted key is the shape this whole
@@ -272,6 +332,67 @@ is invisible. Replacing one with the other therefore improves a profile by more
 than it improves the request, and removes the ``ncalls`` line that made the
 remaining prefix tests easy to find. Believe wall time, not the disappearance of
 a ``startswith`` row.
+
+Where the peak allocation lives
+-------------------------------
+The row budget bounds rows, and rows bound memory. One tracemalloc pass over
+the eight-sibling case attributes its 41.4 MB peak like this: about 75 percent
+is Django's per-row form construction -- ``BaseForm.__init__`` deep-copying
+``base_fields``, ``Field.__deepcopy__``, ``Widget.__deepcopy__``, and formset
+plumbing -- and about 19 percent is stdlib ``copy``/``copyreg`` machinery that
+those same Django ``__deepcopy__`` hooks drive through the generic
+``__reduce_ex__`` path. About 5 percent lands on this package's lines, and
+most of that 5 percent is a trap, not a cost.
+
+tracemalloc charges an allocation to the innermost Python line that was
+executing, so Django's own call-setup allocation for ``_construct_form``
+appeared as 1.9 MB, about 117 bytes per row, on this package's old
+``RowFormSet._construct_form`` override line. Removing the override moved that
+block onto Django's ``formsets.py`` line and left the peak identical within
+10 KB on every case (6.14 MB spread, 41.36 MB sibling). There is no
+package-side peak-memory win. The one lever on peak allocation is rows built,
+and the shared row budget already holds it. Do not spend another pass hunting
+package allocations below Django's per-row deepcopy.
+
+Removing the override still bought time, because the override chain cost one
+Python frame, one ``typing.cast`` frame, one ``super`` object, and one kwargs
+dict per row. ``RowFormSet.get_form_kwargs`` now denies ``empty_permitted`` to
+a row whose keys carry a non-blank value, on a call Django already makes once
+per row, and ``row_carries_submitted_value`` went with its one caller. Ten
+alternating pairs of independent processes, nine posts each: spread medians
+41.08 -> 41.07 ms with the median of per-process minimums 40.08 -> 39.54 ms,
+and sibling medians 379.0 -> 368.2 ms. Peaks were equal,
+every response body was sha256-identical, and rows built stayed at 2,000 and
+16,000. The win is small and real; the reason to record it is the memory
+conclusion above.
+
+One read in the same family was measured twice, and the two verdicts
+differ. Inlining the read into the loop body, past the shared ``_getlist``
+helper, measured x1.21 for the full ``rows_with_submitted_values`` pass and
+stays rejected: the pass runs once per bound formset, not per row, about
+0.14 ms of the 40 ms spread request, and the inlined read is safe only on
+facts local to that one loop. Optimizing the helper itself was worth it,
+because every caller gets it. The ``cast`` it carried was already trust,
+not a check -- the values can be anything, and the annotation asserts they
+arrive as a list -- so the helper stops paying to look defensive.
+``MultiValueDict.getlist`` returns a fresh list (``force_list=True``) and
+``[]`` for a missing key, so the old ``list()`` wrapper was a second copy,
+the old ``in`` pre-check re-tested a key ``getlist`` already handles, and
+the ``cast`` was one Python frame per call. ``_getlist`` now asks for
+``getlist`` first and returns its result directly: 316 -> 237 ns per
+present-key call on the spread payload's QueryDict, and the full pass fell
+406 -> 355 us, x1.14, most of the inline gap, with no special case. Two
+shapes measured worse and stay rejected. Dropping the miss guard entirely
+makes a missing key cost 304 ns against 82 through ``getlist``'s own
+``KeyError`` handling, which is fine where it landed -- only the
+whole-value branch of ``value_from_datadict`` can miss, at most twice per
+extraction, and every hot caller reads a present key -- but is the reason
+the plain-``dict`` path keeps its ``in`` test: ``try``/``except`` there
+costs 192 ns against 93 on a miss. And ``try``/``except AttributeError``
+instead of ``getattr`` wins 9 ns on ``MultiValueDict`` sources and loses
+228 ns on every plain-``dict`` call, and Python data is a supported
+source.
+Verify with ``make test`` and this script, then re-record the numbers above.
 """
 
 import contextlib

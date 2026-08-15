@@ -1223,6 +1223,61 @@ class HostileCleanCostTestCase(HostileClientTestCase):
         self.addCleanup(setattr, formset_class, "_construct_form", original)
         return built
 
+    def _count_formsets_built(self):
+        """Count formsets built while the returned counter is in scope.
+
+        Row counts do not detect empty child formsets built after the shared
+        budget overflows. This counter detects that setup work.
+        """
+        built = []
+        widget_class = nestingdolls.SequenceWidget
+        original = widget_class.new_formset
+
+        def counting(inner_self, *args, **kwargs):
+            built.append(kwargs["prefix"])
+            return original(inner_self, *args, **kwargs)
+
+        widget_class.new_formset = counting
+        self.addCleanup(setattr, widget_class, "new_formset", original)
+        return built
+
+    def test_overflow_skips_empty_later_child_formsets(self):
+        """Reject overflow and skip child-formset setup that cannot admit a row."""
+        payload = self._amplified_sequence_payload(
+            "values", outer_total=20, inner_total=2000
+        )
+        built = self._count_formsets_built()
+        form = SequenceHostileFixtures.NestedTextListForm(data=payload)
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(
+            form.errors.as_data()["values"][0].code,
+            "too_many_forms",
+        )
+        self.assertEqual(built, ["values", "values-0"])
+
+    def test_claim_after_exact_budget_still_records_overflow(self):
+        """Let the claim after exact budget use record overflow.
+
+        Zero is not overflow. The next child must read its claim and set the
+        count negative. This prevents changing the guard to ``<= 0``.
+        """
+        payload = {
+            "values-TOTAL_FORMS": "2",
+            "values-INITIAL_FORMS": "0",
+            "values-0-TOTAL_FORMS": "1998",
+            "values-0-INITIAL_FORMS": "0",
+            "values-1-TOTAL_FORMS": "1",
+            "values-1-INITIAL_FORMS": "0",
+        }
+        form = SequenceHostileFixtures.NestedTextListForm(data=payload)
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(
+            form.errors.as_data()["values"][0].code,
+            "too_many_forms",
+        )
+
     def test_client_cannot_bypass_the_shared_budget_with_change_detection(self):
         """Change detection reserves rows from the same budget cleaning uses.
 

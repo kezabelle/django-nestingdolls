@@ -218,7 +218,12 @@ sequence nesting, not every collection configured by an application.
   is legal on its own at every level still cannot multiply across sibling
   rows. A step that waits until after row construction to call `take()` has
   already paid to build every row a forged `TOTAL_FORMS` asked for, once for
-  every sibling row that reaches it. `take(count)` returns only rows that
+  every sibling row that reaches it. A formset that finds the shared budget
+  already overdrawn returns zero rows without reading its `ManagementForm`
+  or calling `take()`: the overflow flag is already set, only the sign of
+  the remaining value is ever read, and `take()` would return zero anyway.
+  The `ManagementForm` stays lazily available for a reader that wants it,
+  such as a render. `take(count)` returns only rows that
   fit. Cleaning reports `too_many_forms` for the complete bound submission
   when extraction ran out; rendering shows only the prefix that fits. Exact
   use succeeds. Never put the limit in an overridable field `clean()`
@@ -233,9 +238,12 @@ sequence nesting, not every collection configured by an application.
 - Keep the class inside `SequenceWidget`, and use its normal
   `__enter__`/`__exit__` lifecycle. Mappings and the shared composite base
   classes must not import, start, inspect, or extend it. Its `ContextVar` is
-  a `ClassVar` containing only the remaining row count and overflow state. Do
-  not store field objects, add sentinels or marker values, or add lazy cap
-  expansion or a separate `scope()` API.
+  a `ClassVar` containing only the remaining row count and overflow state,
+  and it has no default: a read outside an open scope raises `LookupError`
+  from the unset variable, and only `__enter__` passes a call-site default
+  to see the unset state. Do not give it a default back, store field
+  objects, add sentinels or marker values, or add lazy cap expansion or a
+  separate `scope()` API.
 - The budget belongs to one field's own nested tree only. It does not
   reach a sibling field, on the same form or inside a mapping's child
   form. Django gives each formset on a page its own `absolute_max` with
@@ -284,6 +292,14 @@ treatment. The rules the measurements produced:
 - Do not reorder a cheap character test ahead of the prefix compare to skip
   calls. Measured at 0.61x: it skips 202 of 998 calls and pays a slice and
   two comparisons on all 998.
+- Trust `getlist`. A mapping that offers it behaves like `MultiValueDict`:
+  it returns a fresh list and `[]` for a missing key, so `_getlist` returns
+  its result directly — no `list()` re-copy, no `in` pre-check on that
+  path, no `cast` frame. Measured 316 -> 237 ns per present-key call and
+  1.14x on the full `rows_with_submitted_values` pass. Do not inline the
+  read past the shared helper: the special case measured 1.21x against the
+  old helper, and the trusted helper closes most of that gap for every
+  caller. pathological.py records both measurements.
 
 `cProfile` counts `startswith` as a call and charges per-call overhead to it,
 while a slice is an opcode and is invisible. Swapping one for the other flatters

@@ -6,7 +6,7 @@ import copy
 import dataclasses
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar, Token
-from typing import TYPE_CHECKING, ClassVar, Self, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 from django.forms import BaseForm, BaseFormSet, Field, Form
 from django.forms.formsets import (
@@ -41,13 +41,29 @@ _MANAGEMENT_NAMES = (
 
 
 def _getlist(data: Mapping[str, object], key: str) -> list[object]:
-    """Read repeated values through Django's mapping protocol."""
-    if key not in data:
-        return []
+    """Read repeated values through Django's mapping protocol.
+
+    Trust the protocol. A mapping that has ``getlist`` behaves like
+    ``MultiValueDict``: it returns a new list, and it returns an empty
+    list for a missing key. So this function returns that list
+    directly, with no copy and no key test. The type ignore states the
+    same trust: the values can be anything, and the annotation asserts,
+    without a check, that they arrive as a list. The trust is also a
+    performance tradeoff: a copy, a key test, or a cast frame here
+    costs work on every call of a hot read, and adds no safety. Do
+    not make this function defensive. A source that breaks the
+    protocol is a bug in that source, not here.
+
+    A plain mapping has no ``getlist``. A present key then holds one
+    value, which becomes a one-item list. A missing key gives the same
+    empty list that ``getlist`` gives.
+    """
     getlist = getattr(data, "getlist", None)
-    if getlist is None:
+    if getlist is not None:
+        return getlist(key)  # type: ignore[no-any-return]
+    if key in data:
         return [data[key]]
-    return cast("list[object]", list(getlist(key)))
+    return []
 
 
 class CompositeWidget(Widget):
@@ -344,11 +360,26 @@ class SequenceWidget(CompositeWidget):
         sequence_widget: SequenceWidget
         submission_total_form_count: int
 
-        def _construct_form(self, index: int, **kwargs: object) -> BaseForm:
-            form = cast("BaseForm", super()._construct_form(index, **kwargs))  # type: ignore[misc]
-            if form.empty_permitted and self.row_carries_submitted_value(form.prefix):
-                form.empty_permitted = False
-            return form
+        def get_form_kwargs(self, index: int | None) -> dict[str, Any]:
+            """Deny ``empty_permitted`` to a row whose keys carry a non-blank value.
+
+            ``Form.has_changed()`` must not skip a row with real data, so
+            such a row must not stay ``empty_permitted``. Django applies
+            these kwargs after its own ``empty_permitted`` default, so
+            this flips exactly the rows a ``_construct_form`` override
+            would flip, without one Python frame, one ``super`` object,
+            and one kwargs dict per row; pathological.py records the
+            measurement. ``None`` is the ``empty_form`` path, which has
+            no row prefix to look up. What counts as a non-blank value
+            is written down on ``rows_with_submitted_values``.
+            """
+            kwargs = super().get_form_kwargs(index)
+            if (
+                index is not None
+                and self.add_prefix(index) in self.rows_with_submitted_values
+            ):
+                kwargs["empty_permitted"] = False
+            return kwargs
 
         @cached_property
         def rows_with_submitted_values(self) -> set[str]:
@@ -365,6 +396,12 @@ class SequenceWidget(CompositeWidget):
             ``values-3``; ``values-31`` does not. A key that yields no real
             row prefix, such as ``values-TOTAL_FORMS``, lands in the set
             under its own name and is never looked up.
+
+            Only a non-blank value counts as content. A rendered row
+            always sends its delete key, checked or not, and always
+            sends its other keys, even when the user left them blank.
+            Neither shows real content, and a row with real content must
+            not clean as an empty permitted row.
 
             Compare a slice rather than calling ``startswith``: the prefix
             length is already in hand, and ``str.startswith`` builds an
@@ -396,34 +433,34 @@ class SequenceWidget(CompositeWidget):
                             break
             return found
 
-        def row_carries_submitted_value(self, prefix: str | None) -> bool:
-            """Report whether the browser sent a non-blank value for this row.
-
-            Check keys under the row's own prefix. Skip the row's own
-            delete key. A rendered row always sends that key, checked or
-            not. Its presence alone does not show real content.
-
-            A rendered row also always sends its other keys, even when
-            the user left them blank. A blank value is not real content
-            either. Only a non-blank value shows that the user put real
-            data in this row. ``Form.has_changed()`` must not skip a row
-            with real data.
-
-            One pass over the keys builds the index that answers this, so
-            a row costs one set lookup. See
-            ``rows_with_submitted_values``.
-            """
-            return prefix in self.rows_with_submitted_values
-
         def total_form_count(self) -> int:
-            """Build and reserve only the submitted rows within the shared budget."""
+            """Build and reserve only the submitted rows within the shared budget.
+
+            Read ``TOTAL_FORMS`` inside the scope: Django's own
+            ``total_form_count`` builds and cleans the ``ManagementForm``
+            to read it, and that form holds four ``IntegerField``s, so it
+            cannot re-enter the countdown.
+            """
             if hasattr(self, "submission_total_form_count"):
                 return self.submission_total_form_count
-            total = super().total_form_count()
             with self.sequence_widget.submission_countdown(
                 self.sequence_widget.limits.submission_max
             ) as countdown:
-                allowed = countdown.take(total)
+                # A negative remaining value means the shared budget
+                # already ran out, so take() returns zero for any claim
+                # and the ManagementForm buys nothing. Do not build it: on
+                # a wide hostile submission that form is one full Django
+                # form per outer row, about 28 percent of the request's
+                # wall time (measured in pathological.py). The skipped
+                # take() is safe because __exit__ reads only the sign of
+                # the remaining value, and the first overdrawing claim
+                # still goes through take(). The ManagementForm stays
+                # lazily available: get_context and full_clean build it on
+                # demand, so no reader changes.
+                if countdown.remaining.get() < 0:
+                    allowed = 0
+                else:
+                    allowed = countdown.take(super().total_form_count())
             self.submission_total_form_count = allowed
             return allowed
 
@@ -444,15 +481,20 @@ class SequenceWidget(CompositeWidget):
         rows than the budget had left. One value thus carries two facts:
         how many rows are left, and whether any caller ran out. A second
         stored flag is not needed.
+
+        The variable has no default. A read outside an open scope
+        raises ``LookupError`` from the unset variable itself, so no
+        read site tests for a missing value. Only ``__enter__`` must
+        see the unset state, and it passes a call-site default.
         """
 
-        remaining: ClassVar[ContextVar[int | None]] = ContextVar(
-            "nestingdolls_submission_countdown", default=None
+        remaining: ClassVar[ContextVar[int]] = ContextVar(
+            "nestingdolls_submission_countdown"
         )
 
         count: int
         ran_out: bool = False
-        token: Token[int | None] | None = dataclasses.field(
+        token: Token[int] | None = dataclasses.field(
             default=None, init=False, repr=False
         )
 
@@ -481,18 +523,22 @@ class SequenceWidget(CompositeWidget):
             Subtract the full requested count, not only the allowed part.
             A negative remaining value then marks that the budget ran out.
             Clamp the return value at zero: a caller must never build a
-            negative number of rows.
+            negative number of rows. A call outside an open scope
+            raises ``LookupError`` from the unset variable.
             """
             left = self.remaining.get()
-            if left is None:
-                raise RuntimeError("submission_countdown must be active")
             allowed = max(0, min(count, left))
             self.remaining.set(left - count)
             return allowed
 
         def __enter__(self) -> Self:
-            """Start the counter at the outer sequence and reuse it inside rows."""
-            if self.remaining.get() is None:
+            """Start the counter at the outer sequence and reuse it inside rows.
+
+            This is the one read that must see "no scope open yet".
+            The variable has no default, so give this read one:
+            ``None`` cannot collide with a stored count.
+            """
+            if self.remaining.get(None) is None:
                 self.token = self.remaining.set(self.count)
             return self
 
@@ -518,19 +564,16 @@ class SequenceWidget(CompositeWidget):
             Reset the token only if this scope owns it. Do the reset
             after the read above, not before it. The reset puts back the
             value from before this scope opened the shared context. For
-            the owning scope, that value is ``None``. A read after the
-            reset would see that old value, not the final state. The
-            assertion below would then fail.
+            the owning scope, that is the unset state. A read after the
+            reset would then raise ``LookupError`` instead of returning
+            the final state.
 
             A scope that does not own the token must not call reset.
             That scope did not open the shared context. It has no old
             value to put back. A reset with a token it did not receive
             would damage the owning scope's context.
             """
-            left = self.remaining.get()
-            if left is None:
-                raise RuntimeError("submission_countdown must be active")
-            self.ran_out = left < 0
+            self.ran_out = self.remaining.get() < 0
             if self.token is not None:
                 self.remaining.reset(self.token)
 

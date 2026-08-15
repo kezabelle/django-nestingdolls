@@ -357,7 +357,14 @@ class SequenceBoundField(CompositeBoundField):
 
     @cached_property
     def data(self) -> list[object]:
-        """Return a whole sequence value or formset row values."""
+        """Return a whole sequence value or formset row values.
+
+        After a child makes the shared submission count negative, later children
+        cannot add a row or change the error. Do not construct their empty
+        formsets. A count of zero is not overflow: the next child must read its
+        claim and can make the count negative. See ``pathological.py`` for the
+        measured cost.
+        """
         if self.has_whole_value:
             return self.field.widget.value_from_datadict(
                 self.form.data, self.form.files, self.html_name
@@ -367,7 +374,11 @@ class SequenceBoundField(CompositeBoundField):
         with self.field.widget.submission_countdown(
             self.field.limits.submission_max
         ) as countdown:
-            rows = [form["value"].data for form in self.formset.forms]
+            remaining = countdown.remaining.get()
+            if remaining < 0:
+                rows = []
+            else:
+                rows = [form["value"].data for form in self.formset.forms]
         if countdown.owns_scope and countdown:
             # Extraction ran out. Only the scope that owns the shared
             # counter records it, so cleaning reports one error for the
