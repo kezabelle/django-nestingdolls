@@ -1,4 +1,4 @@
-"""Django application configuration for django-nesting-dolls."""
+"""Django application configuration."""
 
 from __future__ import annotations
 

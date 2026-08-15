@@ -10,9 +10,11 @@ Django renders a form through one of four helpers — `as_div()`, `as_p()`,
 rendered the parent form. So each widget family has one top-level template per
 layout, selected by `CompositeWidget.template_name`:
 
-- `nestingdolls/mapping/` — mapping widgets
-- `nestingdolls/sequence/` — sequence widgets
-- `nestingdolls/shared/` — small fragments used by both families
+- `nestingdolls/mapping/` — the four mapping layout templates
+- `nestingdolls/sequence/` — the four sequence layout templates and the
+  fragments they include
+- `nestingdolls/shared/` — small fragments used by both widget families; no
+  layout template lives here
 
 Keep the top-level template names stable. Python selects them by name.
 
@@ -27,14 +29,14 @@ Keep the top-level template names stable. Python selects them by name.
 - Do not force reuse when it makes the HTML harder to follow, and do not build
   fake widget context to reuse one tiny Django widget template.
 - Move a fragment to `shared/` only when it is genuinely generic across both
-  families. Keep widget-specific structure local.
+  widgets. Keep widget-specific structure local.
 - Prefer small, obvious templates with explicit `only` includes over clever
   template abstraction. Keep whitespace handling simple.
 
 ## Safety invariants
 
-Two templates carry invariants that a refactor can silently break. Both are
-commented in place; do not remove those comments.
+Three templates carry two invariants that a refactor can silently break. Each
+is commented in place; do not remove those comments.
 
 - `sequence/row.html` interpolates `row_tag` and `body_tag` into markup. Every
   caller must pass a hard-coded literal resolved in Python from a closed set.
@@ -46,4 +48,5 @@ commented in place; do not remove those comments.
 
 1. Reuse an existing shared fragment before adding one.
 2. Check whether Django already has a correct built-in path.
-3. Re-run the focused rendering tests, then `make check`.
+3. Re-run the focused rendering tests (`test_dictfield` for mapping
+   templates, `test_listfield` for sequence templates), then `make check`.

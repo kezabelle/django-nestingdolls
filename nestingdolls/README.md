@@ -1,29 +1,139 @@
 # nestingdolls
 
-`nestingdolls` adds fields for nested data to Django forms. Use these two
-primary entry points:
+`nestingdolls` gives Django forms nested values without turning your form into
+a flat-key reconstruction project. `DictField` wraps a child `Form` and returns
+its cleaned values as one dictionary. `ListField` repeats one child `Field` in
+rows and returns their cleaned values as one list.
 
-- `DictField` validates a fixed group of named values. It returns a `dict`.
-- `ListField` validates a variable number of values of one type. It returns a
-  `list`.
+Use them when a screen edits an address, an order, a schedule, or another value
+your application passes around as one unit. Child fields still handle widgets,
+conversion, validation, uploads, and errors. `nestingdolls` just keeps the
+relevant bits together.
 
-## DictField
+## Examples
 
-### Purpose
+### Fixed values from a browser or Python
 
-Use `DictField` for one object that has a fixed set of named values. Examples
-include coordinates, postal addresses, and settings.
-
-`DictField` takes a Django form class as its first argument. The child form
-defines the names, fields, and validation rules.
-
-### Basic use
-
-This example defines and validates a point that has two integer values:
+A fixed shape belongs in a child form. A browser submits its children as
+prefixed strings; application code can pass one nested Python value directly.
+Either route runs the same child-field cleaning.
 
 ```python
 from django import forms
+from django.http import QueryDict
+
 import nestingdolls
+
+
+class TimeWindowForm(forms.Form):
+    start_hour = forms.IntegerField(min_value=0, max_value=23)
+    duration_minutes = forms.IntegerField(min_value=1)
+
+
+class ReminderForm(forms.Form):
+    window = nestingdolls.DictField(TimeWindowForm)
+
+
+# These names match the rendered inputs.
+browser_form = ReminderForm(
+    QueryDict('window-start_hour=9&window-duration_minutes=45')
+)
+
+# A worker, API adapter, or test can pass the whole value instead.
+python_form = ReminderForm({'window': {'start_hour': 9, 'duration_minutes': 45}})
+
+for form in (browser_form, python_form):
+    assert form.is_valid()
+    assert form.cleaned_data['window'] == {
+        'start_hour': 9,
+        'duration_minutes': 45,
+    }
+```
+
+### Repeated values from a browser or decoded data
+
+A browser sequence looks like a formset submission. A decoded Python list skips
+the management fields and indexed row names. Either way, the child field cleans
+every row the same way.
+
+```python
+class ReorderForm(forms.Form):
+    quantities = nestingdolls.ListField(
+        forms.IntegerField(min_value=1),
+        min_length=1,
+        max_length=5,
+    )
+
+
+browser_form = ReorderForm(
+    QueryDict(
+        'quantities-TOTAL_FORMS=2&quantities-INITIAL_FORMS=0&'
+        'quantities-0=2&quantities-1=3'
+    )
+)
+python_form = ReorderForm({'quantities': [2, '3']})
+
+for form in (browser_form, python_form):
+    assert form.is_valid()
+    assert form.cleaned_data['quantities'] == [2, 3]
+```
+
+### Validate decoded JSON, YAML, or CSV
+
+Decode external data first, then pass the resulting list under the field name.
+It gets the same row conversion and length checks as a browser submission.
+
+```python
+import csv
+import json
+
+import yaml
+
+
+json_form = ReorderForm(json.loads('{"quantities": [2, 3]}'))
+yaml_form = ReorderForm(yaml.safe_load('quantities:\n  - 2\n  - 3'))
+csv_form = ReorderForm({'quantities': next(csv.reader(['2,3']))})
+
+for form in (json_form, yaml_form, csv_form):
+    assert form.is_valid()
+    assert form.cleaned_data['quantities'] == [2, 3]
+```
+
+Use `yaml.safe_load`, not `yaml.load`. The decoder owns input-size and
+whole-input limits; the field only sees decoded values.
+
+### Return a set, dataclass, or named tuple
+
+`FrozenSetField` cleans each row, drops duplicates, and returns a `frozenset`.
+Rows must be hashable. That's simply the deal with sets.
+
+```python
+class TagsForm(forms.Form):
+    tags = nestingdolls.FrozenSetField(forms.IntegerField(), min_length=1)
+
+
+form = TagsForm({'tags': [1, '2', 1]})
+assert form.is_valid()
+assert form.cleaned_data['tags'] == frozenset({1, 2})
+```
+
+Use `output=` when your application wants a domain type rather than a plain
+mapping. The output type's field names must match the child form's.
+
+```python
+from dataclasses import dataclass
+from typing import NamedTuple
+
+
+@dataclass
+class Point:
+    x: int
+    y: int
+
+
+class PointTuple(NamedTuple):
+    x: int
+    y: int
 
 
 class PointForm(forms.Form):
@@ -31,285 +141,276 @@ class PointForm(forms.Form):
     y = forms.IntegerField()
 
 
-class ExampleForm(forms.Form):
-    point = nestingdolls.DictField(PointForm)
+class PlotForm(forms.Form):
+    point = nestingdolls.DataclassField(PointForm, output=Point)
+    origin = nestingdolls.NamedTupleField(PointForm, output=PointTuple)
 
 
-form = ExampleForm({"point": {"x": "1", "y": "2"}})
-
-assert form.is_valid()
-assert form.cleaned_data == {"point": {"x": 1, "y": 2}}
-```
-
-### Field-specific behavior
-
-If the input contains an exact mapping, the exact mapping has priority over
-prefixed field names.
-
-The child form runs its normal `clean_<field>()` methods and its `clean()`
-method. The widget displays the child form inside the parent field. A
-non-field error stays inside the child form.
-
-### Safety notes
-
-If a child widget needs repeated values, `DictField` keeps the same repeated
-value behavior that Django already uses for request data.
-
-### Related names
-
-`MappingField`, `FormField`, and `Subform` are aliases for `DictField`. All four
-names have the same behavior.
-
-## ListField
-
-### Purpose
-
-Use `ListField` for an ordered group of repeated values. Examples include
-email addresses, integer identifiers, and uploaded files.
-
-`ListField` takes a Django field instance as its first argument. The child
-field defines the widget, conversion, and validation for each row.
-
-### Basic use
-
-This example defines and validates a list that contains no more than five
-integers:
-
-```python
-from django import forms
-import nestingdolls
-
-
-class ExampleForm(forms.Form):
-    values = nestingdolls.ListField(
-        forms.IntegerField(),
-        required=False,
-        min_length=0,
-        max_length=5,
-    )
-
-
-form = ExampleForm({"values": ["1", "2"]})
+form = PlotForm(
+    {'point': {'x': 2, 'y': '3'}, 'origin': {'x': 0, 'y': 0}}
+)
 
 assert form.is_valid()
-assert form.cleaned_data == {"values": [1, 2]}
+assert form.cleaned_data['point'] == Point(x=2, y=3)
+assert form.cleaned_data['origin'] == PointTuple(x=0, y=0)
 ```
 
-### Field-specific behavior
+### Compose fields and show an initial value
 
-Use `min_length` and `max_length` to control the number of rows.
-
-The server displays usable rows without JavaScript. JavaScript adds controls
-that add and remove rows. The widget keeps these controls in inert `<template>`
-elements until JavaScript starts.
-
-The widget includes its JavaScript in Django form media. Render `form.media`
-when you want the add and remove controls.
-
-The script emits bubbling `CustomEvent`s from the sequence root, so a host
-page can hook row changes without patching this package:
-
-- `nestingdolls:sequence-add` fires before the script clones a new row.
-  `detail` contains the `index` the new row will receive. The event is
-  `cancelable`: `preventDefault()` stops the add.
-- `nestingdolls:sequence-remove` fires before the script hides a row. `detail`
-  contains the row `index` and the `row` element. The event is `cancelable`:
-  `preventDefault()` stops the removal.
-- `nestingdolls:sequence-change` fires after a row was added or removed.
-  `detail` contains an `action` of `"add"` or `"remove"`, the row `index`, and
-  the `row` element. It fires after the script has synchronised the controls
-  and moved focus, so a listener observes the settled state. Use it to
-  initialise third-party widgets inside an added `row`. It is not
-  `cancelable`.
-- `nestingdolls:sequence-ready` fires once per sequence widget after the
-  script attaches its controls. For a widget in the initial page it fires when
-  the script starts, so register that listener before the script runs. For a
-  nested sequence inside an added row it fires during the add, before that
-  row's `nestingdolls:sequence-change`.
-
-### Safety notes
-
-`ListField` uses the same row count pattern that Django formsets use.
-
-If row count fields are present, Django validates them. `ListField` also
-rejects a submitted row count above its hard upper bound.
-
-### Related types
-
-Use these related fields when you need a different cleaned value:
-
-- `TupleField` returns a tuple.
-- `SetField` removes duplicate values and returns a set.
-- `FrozenSetField` removes duplicate values and returns a frozenset.
-
-`min_length` and `max_length` apply after `SetField` or `FrozenSetField` removes
-duplicate values.
-
-## Behavior that both fields share
-
-### Django integration
-
-Both fields use standard Django fields, widgets, and validation. Each child
-field keeps its normal conversion and validation rules.
-
-Both fields support file uploads, compound widgets, multipart forms, and
-widget media. Each validation error stays near the child value that caused
-the error.
-
-The optional helper-aware rendering patch only changes package-owned wrapper
-markup. It does not rewrite Django child widgets or third-party child widgets.
-
-### Form renderer scope
-
-The app does not currently supply or support Django's Jinja2 form renderer. 
-It only supports normal Django Template Language via `DjangoTemplates` or
-`TemplatesSetting` when that renderer loads the templates through
-a DTL backend.
-
-### Empty values
-
-Set `required=False` to permit an empty value. `DictField` then returns `{}`.
-`ListField` then returns `[]`.
-
-If the user supplies a child value, the child field applies its normal
-required rules.
-
-### Input forms
-
-Both fields accept a whole value. Give `DictField` a mapping. Give `ListField`
-a list.
-
-Both fields also accept prefixed input names. Use a child name for `DictField`.
-Use a numeric row index for `ListField`, joined to the field name with a
-dash: `point-x` or `values-0`. These prefixed names work for form data, and they
-work in nested fields. Initial values use nested Python shapes only.
-
-### Nested fields
-
-You can put either primary field inside the other primary field. This example
-defines a list of items. Each item has a name and a list of tags.
+A mapping can contain a sequence of mappings. You don't have to flatten it
+again; application data stays nested at every level. The same shape works for
+validation and for `initial` rendering.
 
 ```python
-from django import forms
-import nestingdolls
+class SessionForm(forms.Form):
+    room = forms.CharField()
+    seats = forms.IntegerField(min_value=1)
 
 
-class ItemForm(forms.Form):
-    name = forms.CharField()
-    tags = nestingdolls.ListField(
-        forms.CharField(),
-        required=False,
+class AgendaForm(forms.Form):
+    host = forms.CharField()
+    sessions = nestingdolls.ListField(
+        nestingdolls.DictField(SessionForm),
+        min_length=1,
     )
 
 
-class ExampleForm(forms.Form):
-    owner = forms.CharField()
-    items = nestingdolls.ListField(
-        nestingdolls.DictField(ItemForm),
-        required=False,
-    )
-```
+class ConferenceForm(forms.Form):
+    agenda = nestingdolls.DictField(AgendaForm)
 
-After validation, `items` is a list of dictionaries. The `tags` value in each
-dictionary is a list:
 
-```python
-cleaned_data = {
-    "owner": "kezabelle",
-    "items": [
-        {
-            "name": "Example item",
-            "tags": ["one", "two"],
-        },
-        {
-            "name": "Another item",
-            "tags": ["a", "b"],
-        },
+agenda = {
+    'host': 'Ada',
+    'sessions': [
+        {'room': 'Aster', 'seats': 20},
+        {'room': 'Birch', 'seats': '35'},
     ],
 }
+
+bound = ConferenceForm({'agenda': agenda})
+redisplay = ConferenceForm(initial={'agenda': agenda})
+
+assert bound.is_valid()
+assert bound.cleaned_data['agenda']['sessions'][1]['seats'] == 35
+assert redisplay['agenda'].initial == agenda
 ```
 
-### Safety notes
+### Keep files with their row metadata
 
-Nested fields still use the normal child form and child field validation that
-Django already provides.
+Wrap a child form in `DictField` when every repeated row needs ordinary values
+and an upload side by side. Bind Django's `POST` and `FILES` as usual:
 
-The fields still respect Django request and upload limits such as
-`DATA_UPLOAD_MAX_MEMORY_SIZE`, `DATA_UPLOAD_MAX_NUMBER_FIELDS`,
-`DATA_UPLOAD_MAX_NUMBER_FILES`, and `FILE_UPLOAD_MAX_MEMORY_SIZE`.
+```python
+class ArtifactForm(forms.Form):
+    label = forms.CharField()
+    blob = forms.FileField()
 
 
-## Rendering configuration
+class ReleaseForm(forms.Form):
+    artifacts = nestingdolls.ListField(
+        nestingdolls.DictField(ArtifactForm),
+        min_length=1,
+    )
 
-### Recommended: install the app
 
-Add `"nestingdolls"` to `INSTALLED_APPS`:
+form = ReleaseForm(request.POST, request.FILES)
+```
+
+Render it inside `<form method='post' enctype='multipart/form-data'>`, and
+include `{{ form.media }}` whenever the page renders a sequence.
+
+`{{ form.media }}` loads the JavaScript that lets users add and remove rows. Without
+it, every row rendered at page load still submits and validates normally, but users
+cannot change the row count in the browser.
+
+## Reference
+
+### Mapping fields
+
+Every mapping field takes a Django `Form` class that Django can construct with
+no arguments. That form declares the names and child fields in the returned
+value.
+
+| Field | Cleaned value |
+|---|---|
+| `DictField` | `dict` |
+| `MappingField`, `FormField`, `Subform` | Aliases for `DictField`; `dict` |
+| `NamedTupleField` | Named tuple |
+| `DataclassField` | Dataclass |
+
+`NamedTupleField` and `DataclassField` accept `output=`. Its fields must match
+the child form's declared names. Leave `output=` out and the field builds a
+matching named tuple or dataclass for you.
+
+An optional `DictField` returns `{}` when empty. An optional `NamedTupleField`
+or `DataclassField` returns `None`; there is no useful empty instance to hand
+back.
+
+### Sequence fields
+
+Every sequence field takes one positional Django `Field` instance and
+deep-copies it for each row. Other keyword arguments are ordinary Django
+`Field` configuration.
+
+| Field | Cleaned value |
+|---|---|
+| `ListField`, `SequenceField` | `list` |
+| `TupleField`, `FrozenSequenceField` | `tuple` |
+| `SetField` | `set` |
+| `FrozenSetField` | `frozenset` |
+
+| Argument | Default | Meaning |
+|---|---:|---|
+| `min_length` | `0` | Minimum cleaned rows |
+| `max_length` | `1000` | Maximum cleaned rows |
+| `absolute_max` | `None` | Hard formset row limit; defaults to `max_length + 1000` |
+
+`SetField` and `FrozenSetField` remove duplicates before length checks, so
+`min_length` and `max_length` count distinct values, not submitted rows. Their
+child values must be hashable. A set has no stable display order, so use a list
+or tuple for `initial` when order matters.
+
+### Inputs and nesting
+
+Application code passes a mapping or list under the outer field name, and
+`initial` uses that same nested Python shape. A browser request uses prefixes
+instead: `point-x` for a mapping child, `values-0` for a sequence row, plus
+Django's usual formset management fields for a sequence.
+
+Submitted row keys win over a same-name scalar value. A key named `values`
+cannot replace rows named `values-0`, `values-1`, and so on. Nested fields
+compose their prefixes as expected. Child errors, uploads, compound widgets,
+and media stay child behavior; outer-field validators only see the final
+assembled mapping or collection.
+
+### Rendering
+
+Add `'nestingdolls'` to `INSTALLED_APPS` for the normal setup:
 
 ```python
 INSTALLED_APPS = [
     # ...
-    "nestingdolls",
+    'nestingdolls',
 ]
 ```
 
-This is the recommended configuration. Django's default
-`django.forms.renderers.DjangoTemplates` renderer discovers the package templates
-through the app registry. `NestingDollsConfig.ready()` also installs the
-helper-aware patch, so `as_p()`, `as_table()`, `as_ul()`, and `as_div()` select
-matching composite widget wrappers. No `TEMPLATES` or `FORM_RENDERER` change is
-needed.
+That's enough for Django's default `django.forms.renderers.DjangoTemplates`
+renderer to find the package templates. `NestingDollsConfig` also adds the
+composite wrapper used by `as_div()`, `as_p()`, `as_table()`, and `as_ul()`.
 
-### Without the app registry
-
-If you cannot add `"nestingdolls"` to `INSTALLED_APPS`, configure template
-loading explicitly. Package templates are included in the distribution, but the
-default `DjangoTemplates` form renderer does not use the project `TEMPLATES`
-setting. Adding the package directory to a backend `DIRS` list alone therefore
-does not make the widgets render.
-
-Use Django's built-in `TemplatesSetting` form renderer, not a custom renderer.
-Keep `"django.forms"` in `INSTALLED_APPS` so that renderer can load Django's
-own form templates. Add the package template directory to the Django Template
-Language backend that renders your forms; keep your other template directories,
-backends, and options unchanged. For example:
+Not using the app registry? Use Django's `TemplatesSetting` renderer instead.
+Keep `'django.forms'` in `INSTALLED_APPS`, add the package template directory
+to the DTL backend that renders your forms, then point `FORM_RENDERER` at it:
 
 ```python
 from pathlib import Path
 
 import nestingdolls
 
-NESTINGDOLLS_TEMPLATE_DIR = Path(nestingdolls.__file__).parent / "templates"
+
+NESTINGDOLLS_TEMPLATE_DIR = Path(nestingdolls.__file__).parent / 'templates'
 
 INSTALLED_APPS = [
     # ...
-    "django.forms",
+    'django.forms',
 ]
 
 TEMPLATES = [
     {
-        "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [
-            BASE_DIR / "templates",
+        'BACKEND': 'django.template.backends.django.DjangoTemplates',
+        'DIRS': [
+            BASE_DIR / 'templates',
             NESTINGDOLLS_TEMPLATE_DIR,
         ],
-        "APP_DIRS": True,
-        # Keep your existing OPTIONS and other configuration here.
+        'APP_DIRS': True,
+        # Keep existing OPTIONS and other configuration here.
     },
 ]
 
-FORM_RENDERER = "django.forms.renderers.TemplatesSetting"
+FORM_RENDERER = 'django.forms.renderers.TemplatesSetting'
 ```
 
-This configuration renders the composite widgets, but it does not install the
-helper-aware patch. Every helper therefore uses the widgets' default `div`
-wrapper; `as_p()`, `as_table()`, and `as_ul()` do not select their matching
-inner layouts.
+### Display errors
 
+You do not need a package-specific template or a form rendering helper. A normal
+manual form template renders both ordinary and composite fields:
 
-## Resource limits
+```django
+{{ form.media }}
+<form method="post">
+  {% csrf_token %}
+  {{ form.non_field_errors }}
+  {% for field in form.visible_fields %}
+    {{ field.errors }}
+    {{ field.label_tag }}
+    {{ field }}
+  {% endfor %}
+  {% for field in form.hidden_fields %}{{ field }}{% endfor %}
+  <button>Save</button>
+</form>
+```
 
-Django limits request parsing before a form receives data. `DATA_UPLOAD_MAX_NUMBER_FIELDS` limits keys, the file setting limits uploads, and the memory settings limit bytes. Django formsets also enforce `max_num` and `absolute_max` for one level. These limits are necessary but do not bound a recursive `ListField`: a small set of nested `TOTAL_FORMS` keys can request many empty rows without exceeding the request-key limit.
+For a composite field, `{{ field }}` renders its nested inputs and the errors
+from its child fields. `{{ field.errors }}` renders errors attached to the outer
+field, such as an outer validator error. It intentionally excludes child errors
+to prevent duplicate messages.
 
-`ListField` therefore has one narrow extra guard. `SequenceWidget.submission_countdown` starts at the outer sequence extraction or render with `max(absolute_max, DATA_UPLOAD_MAX_NUMBER_FIELDS)`. Nested sequences share its context-local remaining-row count and spend both parent and child rows. If extraction runs out, validation rejects the complete submission with `too_many_forms`; rendering shows only the rows that fit. Exact use of the count succeeds.
+Use a custom widget template only when you need to replace the markup inside a
+composite field.
 
-`DictField` has no rows and does not participate. A mapping can contain independent list fields, just as an ordinary Django form can. Their number is application structure, not an attacker-created sequence level, so this package does not add a mapping policy or a global form-tree walk. Python values and decoded JSON bypass Django's request parser; callers accepting arbitrary structures must set their own size and depth limits before creating the form.
+### Browser events
+
+`form.media` includes `nestingdolls/sequence.js`, and every sequence root sends
+these bubbling `CustomEvent`s:
+
+| Event | Timing | `detail` | Cancelable |
+|---|---|---|---|
+| `nestingdolls:sequence-add` | Before cloning a row | `{index}` | Yes |
+| `nestingdolls:sequence-remove` | Before hiding a row | `{index, row}` | Yes |
+| `nestingdolls:sequence-change` | After an add or remove synchronizes controls and focus | `{action: 'add' or 'remove', index, row}` | No |
+| `nestingdolls:sequence-ready` | Once, when enhancement starts | `null` | No |
+
+A sequence nested in a freshly added row sends its own
+`nestingdolls:sequence-ready` before the outer sequence sends
+`nestingdolls:sequence-change`.
+
+## Why two field types?
+
+A mapping needs names, per-field errors, and form-wide cleaning. Django already
+puts those jobs on a `Form`, so `DictField` uses one. A sequence repeats one
+kind of value. Django puts the job of turning one input into one Python value
+on a `Field`, so `ListField` repeats one across formset-shaped rows.
+
+You can put every child field directly on the parent form. That's right when
+the values really are siblings on that screen. Once they make up an order, an
+address, or another value passed around as a unit, one outer field makes the
+form result match the thing it represents.
+
+The browser is a convenience, not a second form system. `sequence.js` can add
+and remove rendered rows, but Django still decides which row names it reads and
+whether submitted values pass. With JavaScript off, rendered rows still submit
+fine; their count is simply fixed at page load.
+
+## Nested row limits
+
+The package adds one resource limit, and it only matters when a sequence sits
+inside another sequence. Django already limits request keys, files, and bytes
+while parsing a request, and a formset's `absolute_max` limits one level of
+rows. Neither catches a few outer rows that each ask for lots of inner rows.
+
+`SequenceWidget.submission_countdown` shares one row budget across an outer
+sequence's whole tree:
+
+```text
+submission_max = max(absolute_max, DATA_UPLOAD_MAX_NUMBER_FIELDS)
+```
+
+Parent and child rows spend that budget before Django builds them. A submission
+right at the limit works; one over it gets `too_many_forms` for the whole
+submission. Sibling sequence fields get separate budgets because the form
+author chose how many siblings exist. Sharing a countdown across separate
+`ListField` definitions needs a custom `Form` subclass to open that context.
+
+Python lists and decoded JSON never go through Django's request parser. The
+sequence field still applies its own row limits, but code accepting arbitrary
+decoded structures still needs its own total-size and depth limit.

@@ -16,6 +16,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.forms.formsets import INITIAL_FORM_COUNT, TOTAL_FORM_COUNT
 from django.http import QueryDict
+from django.template import Context, Template
 from django.test import SimpleTestCase
 from django.test.utils import setup_test_environment, teardown_test_environment
 from django.utils.datastructures import MultiValueDict
@@ -129,6 +130,23 @@ class CompositeFieldAssertions:
         self.assertEqual(list(bound_field.errors), [])
         self.assertIn(invalid_message, list(form.errors[field_name]))
         self.assertIs(bound_field.errors, bound_field.errors)
+
+    def assertManualFieldRenderingIncludesChildErrors(
+        self,
+        form_class: type[forms.Form],
+        invalid_data: dict[str, str],
+        invalid_message: str,
+    ) -> None:
+        form = form_class(invalid_data)
+
+        self.assertIs(form.is_valid(), False)
+        html = Template(
+            "{% for field in form.visible_fields %}"
+            "{{ field.errors }}{{ field.label_tag }}{{ field }}"
+            "{% endfor %}"
+        ).render(Context({"form": form}))
+
+        self.assertEqual(html.count(invalid_message), 1)
 
     def assertMultipleOuterMessagesStayVisible(
         self,
@@ -250,6 +268,18 @@ class SequenceCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCa
         self.assertBoundFieldHidesChildErrors(
             OptionalSequenceForm,
             "values",
+            {
+                "values-0": "bad",
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+            },
+            "Enter a whole number.",
+        )
+
+    def test_manual_field_rendering_keeps_child_errors_inline(self):
+        """A manual sequence field render includes its row error once."""
+        self.assertManualFieldRenderingIncludesChildErrors(
+            OptionalSequenceForm,
             {
                 "values-0": "bad",
                 f"values-{TOTAL_FORM_COUNT}": "1",
@@ -423,6 +453,14 @@ class MappingCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCas
         self.assertBoundFieldHidesChildErrors(
             OptionalMappingForm,
             "point",
+            {"point-a": "bad"},
+            "Enter a whole number.",
+        )
+
+    def test_manual_field_rendering_keeps_child_errors_inline(self):
+        """A manual mapping field render includes its child error once."""
+        self.assertManualFieldRenderingIncludesChildErrors(
+            OptionalMappingForm,
             {"point-a": "bad"},
             "Enter a whole number.",
         )

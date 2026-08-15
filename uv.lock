@@ -427,7 +427,7 @@ wheels = [
 ]
 
 [[package]]
-name = "django-nesting-dolls"
+name = "django-nestingdolls"
 source = { editable = "." }
 dependencies = [
     { name = "django" },
