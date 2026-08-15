@@ -7,7 +7,7 @@ NPM := npm --silent
 PYTHON_FILES := demo.py nestingdolls pathological.py test_composite.py test_dataclassfield.py test_dictfield.py test_hostile.py test_listfield.py test_namedtuplefield.py test_patches.py mypy_settings.py
 COMPILED_JS := nestingdolls/static/nestingdolls/sequence.js
 
-.PHONY: js jsdrift tscheck jstest format formatcheck ruff rufffix mypy test pathological distcheck check fix
+.PHONY: js jsdrift tscheck jstest format formatcheck ruff rufffix mypy test pathological distcheck hooks check fix
 
 .DEFAULT_GOAL := help
 
@@ -68,6 +68,18 @@ distcheck: ## Build both distributions from the tracked tree and check their met
 	fi ; \
 	rm -rf $$tmp ; \
 	exit $$status
+
+hooks: ## Install Git hooks, preferring prek over pre-commit.
+	@if $(UV_RUN) prek --version >/dev/null 2>&1; then \
+		$(UV_RUN) prek install; \
+	elif command -v prek >/dev/null 2>&1; then \
+		prek install; \
+	elif command -v pre-commit >/dev/null 2>&1; then \
+		pre-commit install; \
+	else \
+		echo "Neither prek nor pre-commit is installed. See https://github.com/j178/prek or https://pre-commit.com/#install."; \
+		exit 1; \
+	fi
 
 check: ## Run every fast check. Writes nothing, so CI can gate on it.
 check: tscheck jsdrift jstest ruff formatcheck test distcheck mypy
