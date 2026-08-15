@@ -880,9 +880,7 @@ class MappingFieldUnitTestCase(FormBindingUnitTestCase):
 
 
 class DictFieldRenderingTestCase(SimpleTestCase):
-    def test_child_errors_render_once_with_resolvable_references(self):
-        """A child error renders beside its own input, with resolvable ids."""
-
+    def assertChildErrorReferencesResolve(self, renderer):
         class Form(forms.Form):
             point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
             values = nestingdolls.ListField(forms.IntegerField())
@@ -912,53 +910,73 @@ class DictFieldRenderingTestCase(SimpleTestCase):
             paragraphs,
         )
 
-        for renderer in (form.as_div, form.as_p, form.as_ul, form.as_table):
-            with self.subTest(renderer=renderer.__name__):
-                elements = [parse_html(renderer())]
-                for element in elements:
-                    elements.extend(
-                        child
-                        for child in element.children
-                        if isinstance(child, Element)
-                    )
+        elements = [parse_html(getattr(form, renderer)())]
+        for element in elements:
+            elements.extend(
+                child for child in element.children if isinstance(child, Element)
+            )
 
-                element_attributes = [dict(element.attributes) for element in elements]
-                ids = [
-                    attributes["id"]
-                    for attributes in element_attributes
-                    if "id" in attributes
-                ]
-                self.assertEqual(len(ids), len(set(ids)))
-                self.assertIn("id_point-a_error", ids)
-                self.assertIn("id_values_0_error", ids)
-                for attributes in element_attributes:
-                    for reference in attributes.get("aria-describedby", "").split():
-                        self.assertIn(reference, ids)
+        element_attributes = [dict(element.attributes) for element in elements]
+        ids = [
+            attributes["id"] for attributes in element_attributes if "id" in attributes
+        ]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertIn("id_point-a_error", ids)
+        self.assertIn("id_values_0_error", ids)
+        for attributes in element_attributes:
+            for reference in attributes.get("aria-describedby", "").split():
+                self.assertIn(reference, ids)
 
-    def test_every_helper_layout_renders_the_child_form_and_wrapper(self):
-        """Each helper renders the child inputs, the wrapper, and one hidden initial."""
+    def test_div_layout_resolves_child_error_references(self):
+        """The div layout resolves every child error reference."""
+        self.assertChildErrorReferencesResolve("as_div")
 
+    def test_p_layout_resolves_child_error_references(self):
+        """The paragraph layout resolves every child error reference."""
+        self.assertChildErrorReferencesResolve("as_p")
+
+    def test_ul_layout_resolves_child_error_references(self):
+        """The list layout resolves every child error reference."""
+        self.assertChildErrorReferencesResolve("as_ul")
+
+    def test_table_layout_resolves_child_error_references(self):
+        """The table layout resolves every child error reference."""
+        self.assertChildErrorReferencesResolve("as_table")
+
+    def assertMappingChildFormAndWrapperRender(self, renderer):
         class Form(forms.Form):
             point = nestingdolls.MappingField(
                 MappingProbeFixtures.PointForm, show_hidden_initial=True
             )
 
         form = Form(initial={"point": {"a": 9, "label": "layout"}})
+        html = getattr(form, renderer)()
+        self.assertIn('data-widget="mapping"', html)
+        self.assertIn('data-mapping-field="point"', html)
+        self.assertIn('id="id_point_widget"', html)
+        self.assertIn('name="point-a"', html)
+        self.assertIn('name="point-label"', html)
+        self.assertEqual(html.count('name="initial-point-a"'), 1)
+        self.assertInHTML(
+            '<input type="number" name="point-a" value="9" required id="id_point-a">',
+            html,
+        )
 
-        for renderer in (form.as_div, form.as_p, form.as_table, form.as_ul):
-            with self.subTest(renderer=renderer.__name__):
-                html = renderer()
-                self.assertIn('data-widget="mapping"', html)
-                self.assertIn('data-mapping-field="point"', html)
-                self.assertIn('id="id_point_widget"', html)
-                self.assertIn('name="point-a"', html)
-                self.assertIn('name="point-label"', html)
-                self.assertEqual(html.count('name="initial-point-a"'), 1)
-                self.assertInHTML(
-                    '<input type="number" name="point-a" value="9" required'
-                    ' id="id_point-a">',
-                    html,
-                )
+    def test_div_layout_renders_mapping_child_form_and_wrapper(self):
+        """The div layout renders the mapping child form and wrapper."""
+        self.assertMappingChildFormAndWrapperRender("as_div")
+
+    def test_p_layout_renders_mapping_child_form_and_wrapper(self):
+        """The paragraph layout renders the mapping child form and wrapper."""
+        self.assertMappingChildFormAndWrapperRender("as_p")
+
+    def test_ul_layout_renders_mapping_child_form_and_wrapper(self):
+        """The list layout renders the mapping child form and wrapper."""
+        self.assertMappingChildFormAndWrapperRender("as_ul")
+
+    def test_table_layout_renders_mapping_child_form_and_wrapper(self):
+        """The table layout renders the mapping child form and wrapper."""
+        self.assertMappingChildFormAndWrapperRender("as_table")
 
     def test_widget_exposes_child_media_and_multipart_requirement(self):
         """The outer widget reports child widget integration requirements."""
@@ -1238,28 +1256,42 @@ class MappingSequenceOfRecordsTestCase(FormBindingUnitTestCase):
 
 
 class DictFieldRegressionTestCase(SimpleTestCase):
-    def test_hostile_initials_and_payloads_stay_renderable_errors(self):
-        """Malformed initials and payloads stay ordinary Django form errors."""
+    def assertPointValueRenders(self, form):
+        self.assertEqual(form["point"].value(), ["bad"])
+        str(form["point"])
+
+    def test_list_initial_stays_renderable(self):
+        """A list initial for a mapping field stays renderable."""
 
         class Form(forms.Form):
             point = nestingdolls.MappingField(
                 MappingProbeFixtures.PointForm, required=False
             )
 
+        self.assertPointValueRenders(Form(initial={"point": ["bad"]}))
+
+    def test_callable_list_initial_stays_renderable(self):
+        """A callable list initial for a mapping field stays renderable."""
+
         class CallableInitialForm(forms.Form):
             point = nestingdolls.MappingField(
                 MappingProbeFixtures.PointForm, required=False, initial=lambda: ["bad"]
+            )
+
+        self.assertPointValueRenders(CallableInitialForm())
+
+    def test_disabled_and_scalar_file_hostile_values_stay_renderable_errors(self):
+        """Disabled and scalar file hostile values stay Django form errors."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(
+                MappingProbeFixtures.PointForm, required=False
             )
 
         class DisabledForm(forms.Form):
             point = nestingdolls.MappingField(
                 MappingProbeFixtures.PointForm, required=False, disabled=True
             )
-
-        for form in (Form(initial={"point": ["bad"]}), CallableInitialForm()):
-            with self.subTest(form=form.__class__.__name__):
-                self.assertEqual(form["point"].value(), ["bad"])
-                str(form["point"])
 
         disabled = DisabledForm({}, initial={"point": ["bad"]})
         self.assertIs(disabled.is_valid(), False)
@@ -1273,6 +1305,7 @@ class DictFieldRegressionTestCase(SimpleTestCase):
         self.assertIs(scalar_file["point"].value(), False)
         str(scalar_file["point"])
 
+    def assertHostileHiddenInitialPayloadRendersError(self, data):
         class NestedForm(forms.Form):
             rows = nestingdolls.ListField(
                 nestingdolls.MappingField(MappingProbeFixtures.PointForm),
@@ -1284,20 +1317,41 @@ class DictFieldRegressionTestCase(SimpleTestCase):
                 NestedForm, required=False, show_hidden_initial=True
             )
 
-        initial = {"payload": {"rows": [{"a": 1, "label": "saved"}]}}
-        for data in ({"payload": "hostile"}, {"payload": {"rows": ["hostile"]}}):
-            with self.subTest(data=data):
-                hidden = HiddenInitialForm(data, initial=initial)
-                self.assertIs(hidden.is_valid(), False)
-                self.assertIn("Enter a mapping of values.", hidden.as_p())
+        hidden = HiddenInitialForm(
+            data,
+            initial={"payload": {"rows": [{"a": 1, "label": "saved"}]}},
+        )
+        self.assertIs(hidden.is_valid(), False)
+        self.assertIn("Enter a mapping of values.", hidden.as_p())
 
-    def test_child_rebinding_rejections_use_mapping_fallbacks(self):
-        """A child rejection returns a mapping through Django's base contract."""
+    def test_scalar_hidden_initial_payload_stays_a_renderable_error(self):
+        """A scalar hidden initial payload stays a renderable form error."""
+        self.assertHostileHiddenInitialPayloadRendersError({"payload": "hostile"})
+
+    def test_nested_list_hidden_initial_payload_stays_a_renderable_error(self):
+        """A nested list hidden initial payload stays a renderable form error."""
+        self.assertHostileHiddenInitialPayloadRendersError(
+            {"payload": {"rows": ["hostile"]}}
+        )
+
+    def test_bound_data_rejection_returns_the_mapping_initial_value(self):
+        """A child bound data rejection returns the mapping initial value."""
 
         class RejectingField(forms.CharField):
             def bound_data(self, data, initial):
                 raise ValidationError("Cannot bind this value.")
 
+        class ChildForm(forms.Form):
+            value = RejectingField()
+
+        field = nestingdolls.MappingField(ChildForm)
+        value = {"value": "hostile"}
+        self.assertEqual(field.bound_data(value, {}), value)
+
+    def test_prepare_value_rejection_returns_the_mapping_initial_value(self):
+        """A child prepare value rejection returns the mapping initial value."""
+
+        class RejectingField(forms.CharField):
             def prepare_value(self, value):
                 raise nestingdolls.InvalidInitialValueError(
                     "Cannot prepare this value."
@@ -1308,14 +1362,7 @@ class DictFieldRegressionTestCase(SimpleTestCase):
 
         field = nestingdolls.MappingField(ChildForm)
         value = {"value": "hostile"}
-
-        operations = (
-            ("bound_data", lambda: field.bound_data(value, {})),
-            ("prepare_value", lambda: field.prepare_value(value)),
-        )
-        for operation_name, operation in operations:
-            with self.subTest(operation=operation_name):
-                self.assertEqual(operation(), value)
+        self.assertEqual(field.prepare_value(value), value)
 
 
 if __name__ == "__main__":  # pragma: no cover

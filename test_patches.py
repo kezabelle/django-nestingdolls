@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from functools import wraps
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import django
@@ -10,6 +11,7 @@ from django.apps import apps
 from django.conf import settings
 from django.forms import BaseForm
 from django.forms.renderers import DjangoTemplates, TemplatesSetting
+from django.template import TemplateDoesNotExist
 from django.test import SimpleTestCase, override_settings
 
 import nestingdolls
@@ -60,6 +62,16 @@ def without_form_rendering_patch() -> Iterator[None]:
 def squashed(html: str) -> str:
     """Collapse runs of whitespace so multi-line attributes compare as one line."""
     return " ".join(html.split())
+
+
+class UninstalledApplicationPointForm(forms.Form):
+    a = forms.IntegerField()
+    label = forms.CharField(required=False)
+
+
+class UninstalledApplicationCompositeForm(forms.Form):
+    point = nestingdolls.MappingField(UninstalledApplicationPointForm)
+    values = nestingdolls.ListField(forms.IntegerField(), min_length=2)
 
 
 class FormRenderingPatchTestCase(SimpleTestCase):
@@ -141,9 +153,7 @@ class FormRenderingPatchTestCase(SimpleTestCase):
             Form().as_p()
         self.assertEqual(FormLayout.current(), FormLayout.div)
 
-    @override_settings(INSTALLED_APPS=("django.forms", "nestingdolls"))
-    def test_patch_supports_django_template_renderers(self):
-        """Both Django template renderers pass the selected layout to child widgets."""
+    def assertRendererPassesLayoutToNestedWidget(self, renderer):
         widget_layouts = []
 
         class LayoutWidget(forms.TextInput):
@@ -157,18 +167,24 @@ class FormRenderingPatchTestCase(SimpleTestCase):
         class Form(forms.Form):
             child = nestingdolls.MappingField(ChildForm)
 
-        for renderer in (DjangoTemplates(), TemplatesSetting()):
-            with self.subTest(renderer=type(renderer).__name__):
-                widget_layouts.clear()
-                form = Form(renderer=renderer)
+        form = Form(renderer=renderer)
+        html = form.as_p()
 
-                html = form.as_p()
+        self.assertIs(form.renderer, renderer)
+        self.assertIs(bool(widget_layouts), True)
+        self.assertEqual(set(widget_layouts), {FormLayout.p})
+        self.assertIn('data-widget="mapping"', html)
+        self.assertIn('name="child-value"', html)
 
-                self.assertIs(form.renderer, renderer)
-                self.assertIs(bool(widget_layouts), True)
-                self.assertEqual(set(widget_layouts), {FormLayout.p})
-                self.assertIn('data-widget="mapping"', html)
-                self.assertIn('name="child-value"', html)
+    @override_settings(INSTALLED_APPS=("django.forms", "nestingdolls"))
+    def test_django_templates_renderer_passes_layout_to_nested_widget(self):
+        """The Django templates renderer passes the paragraph layout to its child."""
+        self.assertRendererPassesLayoutToNestedWidget(DjangoTemplates())
+
+    @override_settings(INSTALLED_APPS=("django.forms", "nestingdolls"))
+    def test_template_settings_renderer_passes_layout_to_nested_widget(self):
+        """The template settings renderer passes the paragraph layout to its child."""
+        self.assertRendererPassesLayoutToNestedWidget(TemplatesSetting())
 
     def test_mapping_widget_renders_without_patch(self):
         """A mapping widget renders its wrapper and child inputs without the patch."""
@@ -203,6 +219,61 @@ class FormRenderingPatchTestCase(SimpleTestCase):
 
         self.assertIn('data-widget="sequence"', html)
         self.assertIn("<div", html)
+        self.assertIn('name="values-0"', html)
+        self.assertIn('name="values-1"', html)
+
+    @override_settings(INSTALLED_APPS=("nestingdolls",))
+    def test_installing_the_app_resolves_templates_and_tracks_paragraph_layout(self):
+        """The default renderer finds templates and the patch selects paragraph widgets."""
+        html = squashed(UninstalledApplicationCompositeForm().as_p())
+
+        self.assertIn('<span data-widget="mapping"', html)
+        self.assertIn('<span data-widget="sequence"', html)
+        self.assertIn('name="point-a"', html)
+        self.assertIn('name="values-0"', html)
+        self.assertIn('name="values-1"', html)
+
+    @override_settings(
+        INSTALLED_APPS=("django.forms",),
+        TEMPLATES=[
+            {
+                "BACKEND": "django.template.backends.django.DjangoTemplates",
+                "DIRS": [Path(nestingdolls.__file__).parent / "templates"],
+                "APP_DIRS": True,
+            }
+        ],
+    )
+    def test_default_renderer_ignores_template_dirs_without_the_app(self):
+        """The default form renderer does not load project template settings."""
+        with (
+            without_form_rendering_patch(),
+            self.assertRaisesRegex(
+                TemplateDoesNotExist, "nestingdolls/mapping/div.html"
+            ),
+        ):
+            UninstalledApplicationCompositeForm().as_p()
+
+    @override_settings(
+        INSTALLED_APPS=("django.forms",),
+        FORM_RENDERER="django.forms.renderers.TemplatesSetting",
+        TEMPLATES=[
+            {
+                "BACKEND": "django.template.backends.django.DjangoTemplates",
+                "DIRS": [Path(nestingdolls.__file__).parent / "templates"],
+                "APP_DIRS": True,
+            }
+        ],
+    )
+    def test_template_settings_renderer_uses_template_dirs_without_the_app(self):
+        """The template-settings renderer finds widgets, but cannot track helpers."""
+        with without_form_rendering_patch():
+            html = squashed(UninstalledApplicationCompositeForm().as_p())
+
+        self.assertIn('<div data-widget="mapping"', html)
+        self.assertIn('<div data-widget="sequence"', html)
+        self.assertNotIn('<span data-widget="mapping"', html)
+        self.assertNotIn('<span data-widget="sequence"', html)
+        self.assertIn('name="point-a"', html)
         self.assertIn('name="values-0"', html)
         self.assertIn('name="values-1"', html)
 

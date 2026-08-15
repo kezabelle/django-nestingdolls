@@ -118,14 +118,26 @@ elements until JavaScript starts.
 The widget includes its JavaScript in Django form media. Render `form.media`
 when you want the add and remove controls.
 
-After a row is added or removed, the sequence root emits a bubbling
-`nestingdolls:sequence-change` `CustomEvent`. Its `detail` contains an `action`
-of `"add"` or `"remove"` and the row `index`. Consumers can listen for this
-event when they need their own announcements or other interface updates.
+The script emits bubbling `CustomEvent`s from the sequence root, so a host
+page can hook row changes without patching this package:
 
-The event fires after the script has synchronised the add and remove controls
-and moved focus, so a listener always observes the settled state. It is not
-`cancelable`: a listener cannot veto the change.
+- `nestingdolls:sequence-add` fires before the script clones a new row.
+  `detail` contains the `index` the new row will receive. The event is
+  `cancelable`: `preventDefault()` stops the add.
+- `nestingdolls:sequence-remove` fires before the script hides a row. `detail`
+  contains the row `index` and the `row` element. The event is `cancelable`:
+  `preventDefault()` stops the removal.
+- `nestingdolls:sequence-change` fires after a row was added or removed.
+  `detail` contains an `action` of `"add"` or `"remove"`, the row `index`, and
+  the `row` element. It fires after the script has synchronised the controls
+  and moved focus, so a listener observes the settled state. Use it to
+  initialise third-party widgets inside an added `row`. It is not
+  `cancelable`.
+- `nestingdolls:sequence-ready` fires once per sequence widget after the
+  script attaches its controls. For a widget in the initial page it fires when
+  the script starts, so register that listener before the script runs. For a
+  nested sequence inside an added row it fires during the add, before that
+  row's `nestingdolls:sequence-change`.
 
 Without JavaScript there are no add or remove controls at all. Both live inside
 inert `<template>` elements, so a browser with scripting disabled renders the
@@ -263,9 +275,11 @@ limits count keys, files, and bytes, but they do not count rows. Refer to
 the limits that this package adds.
 
 
-## Optional helper-aware rendering patch
+## Rendering configuration
 
-Optional but recommended. Add `"nestingdolls"` to `INSTALLED_APPS` to enable it:
+### Recommended: install the app
+
+Add `"nestingdolls"` to `INSTALLED_APPS`:
 
 ```python
 INSTALLED_APPS = [
@@ -273,16 +287,59 @@ INSTALLED_APPS = [
     "nestingdolls",
 ]
 ```
-If `"nestingdolls"` is not in `INSTALLED_APPS`, the package does not patch
-`BaseForm.render`. `ListField` and `DictField` can work without the patch, but
-each composite widget then uses its default inner layout.
 
-The patch y records which standard helper renders the form. Composite widgets 
-use that to select their inner layout.
+This is the recommended configuration. Django's default
+`django.forms.renderers.DjangoTemplates` renderer discovers the package templates
+through the app registry. `NestingDollsConfig.ready()` also installs the
+helper-aware patch, so `as_p()`, `as_table()`, `as_ul()`, and `as_div()` select
+matching composite widget wrappers. No `TEMPLATES` or `FORM_RENDERER` change is
+needed.
 
-This patch is included because Django does not tell a widget which helper method
-rendered the parent form. If the parent form uses `as_p()`, `as_table()`,
-`as_ul()`, or `as_div()`, the widget does not know that by default.
+### Without the app registry
+
+If you cannot add `"nestingdolls"` to `INSTALLED_APPS`, configure template
+loading explicitly. Package templates are included in the distribution, but the
+default `DjangoTemplates` form renderer does not use the project `TEMPLATES`
+setting. Adding the package directory to a backend `DIRS` list alone therefore
+does not make the widgets render.
+
+Use Django's built-in `TemplatesSetting` form renderer, not a custom renderer.
+Keep `"django.forms"` in `INSTALLED_APPS` so that renderer can load Django's
+own form templates. Add the package template directory to the Django Template
+Language backend that renders your forms; keep your other template directories,
+backends, and options unchanged. For example:
+
+```python
+from pathlib import Path
+
+import nestingdolls
+
+NESTINGDOLLS_TEMPLATE_DIR = Path(nestingdolls.__file__).parent / "templates"
+
+INSTALLED_APPS = [
+    # ...
+    "django.forms",
+]
+
+TEMPLATES = [
+    {
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [
+            BASE_DIR / "templates",
+            NESTINGDOLLS_TEMPLATE_DIR,
+        ],
+        "APP_DIRS": True,
+        # Keep your existing OPTIONS and other configuration here.
+    },
+]
+
+FORM_RENDERER = "django.forms.renderers.TemplatesSetting"
+```
+
+This configuration renders the composite widgets, but it does not install the
+helper-aware patch. Every helper therefore uses the widgets' default `div`
+wrapper; `as_p()`, `as_table()`, and `as_ul()` do not select their matching
+inner layouts.
 
 
 ## Resource limits

@@ -16,19 +16,35 @@ const controller = await readFile(
 // does not implement the table content model, so these fixtures cannot prove
 // the markup is valid; they prove the script puts every control in the slot
 // the template gave it, which is what makes the markup valid.
-const LAYOUTS = [
-  { name: "div", rootTag: "div", rowsTag: "div", rowTag: "div", bodyTag: null },
-  { name: "p", rootTag: "span", rowsTag: "span", rowTag: "span", bodyTag: null },
-  { name: "ul", rootTag: "div", rowsTag: "ul", rowTag: "li", bodyTag: null },
-  {
-    name: "table",
-    rootTag: "div",
-    rowsTag: "tbody",
-    rowTag: "tr",
-    bodyTag: "td",
-    rowsWrapper: "table",
-  },
-];
+const DIV_LAYOUT = {
+  name: "div",
+  rootTag: "div",
+  rowsTag: "div",
+  rowTag: "div",
+  bodyTag: null,
+};
+const P_LAYOUT = {
+  name: "p",
+  rootTag: "span",
+  rowsTag: "span",
+  rowTag: "span",
+  bodyTag: null,
+};
+const UL_LAYOUT = {
+  name: "ul",
+  rootTag: "div",
+  rowsTag: "ul",
+  rowTag: "li",
+  bodyTag: null,
+};
+const TABLE_LAYOUT = {
+  name: "table",
+  rootTag: "div",
+  rowsTag: "tbody",
+  rowTag: "tr",
+  bodyTag: "td",
+  rowsWrapper: "table",
+};
 
 function row(layout, attributes, content) {
   const open = layout.bodyTag ? `<${layout.bodyTag}>` : "";
@@ -118,6 +134,15 @@ test("the added row has the correct attribute values", () => {
   const label = dom.window.document.querySelector("label");
   assert.ok(label);
   assert.equal(label.getAttribute("for"), "input-0");
+
+  // The row template has no actions slot, so the injected remove button
+  // lands on the row element itself.
+  const removeButton = dom.window.document.querySelector("[data-sequence-remove]");
+  assert.ok(removeButton);
+  assert.equal(
+    removeButton.parentElement,
+    dom.window.document.querySelector("[data-sequence-row]"),
+  );
 });
 
 test("the added row keeps the placeholder for the inner row", () => {
@@ -324,271 +349,743 @@ test("mapping and nested sequence actions stay with their owning sequence", () =
   assert.equal(outerRows.children.length, 2);
 });
 
-for (const layout of LAYOUTS) {
-  test(`[${layout.name}] add and remove manage limits, focus, and change events`, () => {
-    const dom = build(
-      `
-        <${layout.rootTag}
-          data-widget="sequence"
-          data-sequence-minimum="1"
-          data-sequence-maximum="2"
-          data-sequence-absolute-maximum="3"
-        >
-          <input type="hidden" value="1" data-sequence-total>
-          ${rowsContainer(
+function assertAddAndRemoveManageLimitsFocusAndEvents(layout) {
+  const dom = build(
+    `
+      <${layout.rootTag}
+        data-widget="sequence"
+        data-sequence-minimum="1"
+        data-sequence-maximum="2"
+        data-sequence-absolute-maximum="3"
+      >
+        <input type="hidden" value="1" data-sequence-total>
+        ${rowsContainer(
+          layout,
+          row(
             layout,
-            row(
-              layout,
-              'data-sequence-index="0"',
-              `
-                <input type="hidden" name="values-0-DELETE" data-sequence-delete>
-                <input id="value-0" name="values-0">
-              `,
-            ),
+            'data-sequence-index="0"',
+            `
+              <input type="hidden" name="values-0-DELETE" data-sequence-delete>
+              <input id="value-0" name="values-0">
+            `,
+          ),
+        )}
+        <template data-sequence-empty-row>
+          ${row(
+            layout,
+            "",
+            `
+              <input
+                type="hidden"
+                name="values-__prefix__-DELETE"
+                data-sequence-delete
+              >
+              <input id="value-__prefix__" name="values-__prefix__">
+            `,
           )}
-          <template data-sequence-empty-row>
-            ${row(
-              layout,
-              "",
-              `
-                <input
-                  type="hidden"
-                  name="values-__prefix__-DELETE"
-                  data-sequence-delete
-                >
-                <input id="value-__prefix__" name="values-__prefix__">
-              `,
-            )}
-          </template>
-          <template data-sequence-remove-button>
-            <button type="button" data-sequence-remove>Remove</button>
-          </template>
-          <button type="button" data-sequence-add>Add</button>
-        </${layout.rootTag}>
-      `,
-    );
+        </template>
+        <template data-sequence-remove-button>
+          <button type="button" data-sequence-remove>Remove</button>
+        </template>
+        <button type="button" data-sequence-add>Add</button>
+      </${layout.rootTag}>
+    `,
+  );
 
-    const { document } = dom.window;
-    const root = document.querySelector('[data-widget="sequence"]');
-    const addButton = document.querySelector("[data-sequence-add]");
-    const totalInput = document.querySelector("[data-sequence-total]");
-    const firstRow = document.querySelector('[data-sequence-index="0"]');
-    const firstRemove = firstRow?.querySelector("[data-sequence-remove]");
-    assert.ok(root);
-    assert.ok(addButton instanceof dom.window.HTMLButtonElement);
-    assert.ok(totalInput instanceof dom.window.HTMLInputElement);
-    assert.ok(firstRow instanceof dom.window.HTMLElement);
-    assert.ok(firstRemove instanceof dom.window.HTMLButtonElement);
+  const { document } = dom.window;
+  const root = document.querySelector('[data-widget="sequence"]');
+  const addButton = document.querySelector("[data-sequence-add]");
+  const totalInput = document.querySelector("[data-sequence-total]");
+  const firstRow = document.querySelector('[data-sequence-index="0"]');
+  const firstRemove = firstRow?.querySelector("[data-sequence-remove]");
+  assert.ok(root);
+  assert.ok(addButton instanceof dom.window.HTMLButtonElement);
+  assert.ok(totalInput instanceof dom.window.HTMLInputElement);
+  assert.ok(firstRow instanceof dom.window.HTMLElement);
+  assert.ok(firstRemove instanceof dom.window.HTMLButtonElement);
 
-    // The button lands in the row's action slot, never as a bare child of the
-    // row element. In the table layout that slot lives inside the <td>.
+  // The button lands in the row's action slot, never as a bare child of the
+  // row element. In the table layout that slot lives inside the <td>.
+  assert.equal(
+    firstRemove.parentElement?.getAttribute("data-sequence-actions"),
+    "",
+  );
+  if (layout.bodyTag) {
     assert.equal(
-      firstRemove.parentElement?.getAttribute("data-sequence-actions"),
-      "",
+      firstRemove.closest(layout.bodyTag)?.tagName.toLowerCase(),
+      layout.bodyTag,
     );
-    if (layout.bodyTag) {
-      assert.equal(
-        firstRemove.closest(layout.bodyTag)?.tagName.toLowerCase(),
-        layout.bodyTag,
-      );
-    }
+  }
 
-    // At the minimum, removing is unavailable but still discoverable: disabled
-    // and announced, not removed from the accessibility tree.
-    assert.equal(firstRemove.disabled, true);
-    assert.equal(firstRemove.getAttribute("aria-disabled"), "true");
-    assert.equal(firstRemove.hidden, false);
+  // At the minimum, removing is unavailable but still discoverable: disabled
+  // and announced, not removed from the accessibility tree.
+  assert.equal(firstRemove.disabled, true);
+  assert.equal(firstRemove.getAttribute("aria-disabled"), "true");
+  assert.equal(firstRemove.hidden, false);
 
-    const changes = [];
-    document.addEventListener("nestingdolls:sequence-change", (event) => {
-      assert.ok(event instanceof dom.window.CustomEvent);
-      assert.equal(event.bubbles, true);
-      assert.equal(event.target, root);
-      changes.push({ action: event.detail.action, index: event.detail.index });
+  const changes = [];
+  document.addEventListener("nestingdolls:sequence-change", (event) => {
+    assert.ok(event instanceof dom.window.CustomEvent);
+    assert.equal(event.bubbles, true);
+    assert.equal(event.target, root);
+    assert.ok(event.detail.row instanceof dom.window.HTMLElement);
+    changes.push({
+      action: event.detail.action,
+      index: event.detail.index,
+      rowIndex: event.detail.row.dataset.sequenceIndex,
     });
-
-    addButton.click();
-
-    const secondRow = document.querySelector('[data-sequence-index="1"]');
-    const secondInput = document.querySelector("#value-1");
-    const secondRemove = secondRow?.querySelector("[data-sequence-remove]");
-    assert.ok(secondRow instanceof dom.window.HTMLElement);
-    assert.ok(secondInput instanceof dom.window.HTMLInputElement);
-    assert.ok(secondRemove instanceof dom.window.HTMLButtonElement);
-    assert.equal(document.activeElement, secondInput);
-    assert.equal(addButton.disabled, true);
-    assert.equal(firstRemove.disabled, false);
-    assert.equal(secondRemove.disabled, false);
-
-    firstRemove.click();
-
-    assert.equal(firstRow.hidden, true);
-    // [hidden] alone loses to any framework rule of higher specificity.
-    assert.equal(firstRow.style.display, "none");
-    assert.equal(document.activeElement, secondInput);
-    assert.equal(addButton.disabled, false);
-    assert.equal(secondRemove.disabled, true);
-
-    addButton.click();
-
-    const thirdRow = document.querySelector('[data-sequence-index="2"]');
-    const thirdInput = document.querySelector("#value-2");
-    const thirdRemove = thirdRow?.querySelector("[data-sequence-remove]");
-    assert.ok(thirdRow instanceof dom.window.HTMLElement);
-    assert.ok(thirdInput instanceof dom.window.HTMLInputElement);
-    assert.ok(thirdRemove instanceof dom.window.HTMLButtonElement);
-    assert.equal(document.activeElement, thirdInput);
-    assert.equal(totalInput.value, "3");
-
-    thirdRemove.click();
-
-    assert.equal(thirdRow.hidden, true);
-    assert.equal(document.activeElement, secondInput);
-    assert.equal(addButton.disabled, true);
-    assert.equal(secondRemove.disabled, true);
-
-    secondRemove.click();
-
-    assert.equal(secondRow.hidden, false);
-    assert.equal(document.activeElement, secondInput);
-    assert.deepEqual(changes, [
-      { action: "add", index: 1 },
-      { action: "remove", index: 0 },
-      { action: "add", index: 2 },
-      { action: "remove", index: 2 },
-    ]);
   });
 
-  test(`[${layout.name}] removing a row marks deletion and disables stale controls`, () => {
-    const dom = build(
-      `
-        <${layout.rootTag}
-          data-widget="sequence"
-          data-sequence-maximum="3"
-          data-sequence-absolute-maximum="4"
-        >
-          <input type="hidden" value="2" data-sequence-total>
-          ${rowsContainer(
+  addButton.click();
+
+  const secondRow = document.querySelector('[data-sequence-index="1"]');
+  const secondInput = document.querySelector("#value-1");
+  const secondRemove = secondRow?.querySelector("[data-sequence-remove]");
+  assert.ok(secondRow instanceof dom.window.HTMLElement);
+  assert.ok(secondInput instanceof dom.window.HTMLInputElement);
+  assert.ok(secondRemove instanceof dom.window.HTMLButtonElement);
+  assert.equal(document.activeElement, secondInput);
+  assert.equal(addButton.disabled, true);
+  assert.equal(firstRemove.disabled, false);
+  assert.equal(secondRemove.disabled, false);
+
+  firstRemove.click();
+
+  assert.equal(firstRow.hidden, true);
+  // [hidden] alone loses to any framework rule of higher specificity.
+  assert.equal(firstRow.style.display, "none");
+  assert.equal(document.activeElement, secondInput);
+  assert.equal(addButton.disabled, false);
+  assert.equal(secondRemove.disabled, true);
+
+  addButton.click();
+
+  const thirdRow = document.querySelector('[data-sequence-index="2"]');
+  const thirdInput = document.querySelector("#value-2");
+  const thirdRemove = thirdRow?.querySelector("[data-sequence-remove]");
+  assert.ok(thirdRow instanceof dom.window.HTMLElement);
+  assert.ok(thirdInput instanceof dom.window.HTMLInputElement);
+  assert.ok(thirdRemove instanceof dom.window.HTMLButtonElement);
+  assert.equal(document.activeElement, thirdInput);
+  assert.equal(totalInput.value, "3");
+
+  thirdRemove.click();
+
+  assert.equal(thirdRow.hidden, true);
+  assert.equal(document.activeElement, secondInput);
+  assert.equal(addButton.disabled, true);
+  assert.equal(secondRemove.disabled, true);
+
+  secondRemove.click();
+
+  assert.equal(secondRow.hidden, false);
+  assert.equal(document.activeElement, secondInput);
+  assert.deepEqual(changes, [
+    { action: "add", index: 1, rowIndex: "1" },
+    { action: "remove", index: 0, rowIndex: "0" },
+    { action: "add", index: 2, rowIndex: "2" },
+    { action: "remove", index: 2, rowIndex: "2" },
+  ]);
+}
+
+function assertRemovingRowMarksDeletionAndDisablesStaleControls(layout) {
+  const dom = build(
+    `
+      <${layout.rootTag}
+        data-widget="sequence"
+        data-sequence-maximum="3"
+        data-sequence-absolute-maximum="4"
+      >
+        <input type="hidden" value="2" data-sequence-total>
+        ${rowsContainer(
+          layout,
+          row(
             layout,
+            'data-sequence-index="0"',
+            `
+              <input type="hidden" name="values-0-DELETE" value="" data-sequence-delete>
+              <input id="value-0" name="values-0" value="first">
+              <select id="choice-0" name="choices-0"><option>a</option></select>
+              <textarea id="note-0" name="notes-0"></textarea>
+            `,
+          ) +
             row(
               layout,
-              'data-sequence-index="0"',
+              'data-sequence-index="1"',
               `
-                <input type="hidden" name="values-0-DELETE" value="" data-sequence-delete>
-                <input id="value-0" name="values-0" value="first">
-                <select id="choice-0" name="choices-0"><option>a</option></select>
-                <textarea id="note-0" name="notes-0"></textarea>
-              `,
-            ) +
-              row(
-                layout,
-                'data-sequence-index="1"',
-                `
-                <input type="hidden" name="values-1-DELETE" value="" data-sequence-delete>
-                <input id="value-1" name="values-1" value="second">
-              `,
-              ),
+              <input type="hidden" name="values-1-DELETE" value="" data-sequence-delete>
+              <input id="value-1" name="values-1" value="second">
+            `,
+            ),
+        )}
+        <input
+          type="hidden"
+          name="values-9-DELETE"
+          value="1"
+          data-sequence-deleted-row
+        >
+        <template data-sequence-empty-row>
+          ${row(
+            layout,
+            "",
+            `
+              <input
+                type="hidden"
+                name="values-__prefix__-DELETE"
+                value=""
+                data-sequence-delete
+              >
+              <input id="value-__prefix__" name="values-__prefix__">
+            `,
           )}
-          <input
-            type="hidden"
-            name="values-9-DELETE"
-            value="1"
-            data-sequence-deleted-row
-          >
-          <template data-sequence-empty-row>
-            ${row(
-              layout,
-              "",
-              `
-                <input
-                  type="hidden"
-                  name="values-__prefix__-DELETE"
-                  value=""
-                  data-sequence-delete
-                >
-                <input id="value-__prefix__" name="values-__prefix__">
-              `,
-            )}
-          </template>
-          <template data-sequence-remove-button>
-            <button
-              type="button"
-              data-sequence-remove
-              id="values___prefix___remove"
-              aria-label="Remove row __prefix__"
-            >Remove</button>
-          </template>
-          <template data-sequence-add-button>
-            <button type="button" data-sequence-add id="values_add">Add</button>
-          </template>
-        </${layout.rootTag}>
-      `,
-    );
+        </template>
+        <template data-sequence-remove-button>
+          <button
+            type="button"
+            data-sequence-remove
+            id="values___prefix___remove"
+            aria-label="Remove row __prefix__"
+          >Remove</button>
+        </template>
+        <template data-sequence-add-button>
+          <button type="button" data-sequence-add id="values_add">Add</button>
+        </template>
+      </${layout.rootTag}>
+    `,
+  );
 
-    const { document } = dom.window;
-    const totalInput = document.querySelector("[data-sequence-total]");
-    const deletedRow = document.querySelector("[data-sequence-deleted-row]");
-    const firstRow = document.querySelector('[data-sequence-index="0"]');
-    const secondRow = document.querySelector('[data-sequence-index="1"]');
-    const addButton = document.querySelector("[data-sequence-add]");
-    assert.ok(totalInput instanceof dom.window.HTMLInputElement);
-    assert.ok(deletedRow instanceof dom.window.HTMLInputElement);
-    assert.ok(firstRow instanceof dom.window.HTMLElement);
-    assert.ok(secondRow instanceof dom.window.HTMLElement);
-    assert.ok(addButton instanceof dom.window.HTMLButtonElement);
+  const { document } = dom.window;
+  const totalInput = document.querySelector("[data-sequence-total]");
+  const deletedRow = document.querySelector("[data-sequence-deleted-row]");
+  const firstRow = document.querySelector('[data-sequence-index="0"]');
+  const secondRow = document.querySelector('[data-sequence-index="1"]');
+  const addButton = document.querySelector("[data-sequence-add]");
+  assert.ok(totalInput instanceof dom.window.HTMLInputElement);
+  assert.ok(deletedRow instanceof dom.window.HTMLInputElement);
+  assert.ok(firstRow instanceof dom.window.HTMLElement);
+  assert.ok(secondRow instanceof dom.window.HTMLElement);
+  assert.ok(addButton instanceof dom.window.HTMLButtonElement);
 
-    // Each hoisted remove button carries the index of its own row, so ids stay
-    // unique, the accessible names differ, and the markup keeps matching the
-    // server-rendered row ids.
-    const removeButtons = [...document.querySelectorAll("[data-sequence-remove]")];
-    assert.deepEqual(
-      removeButtons.map((button) => button.id),
-      ["values_0_remove", "values_1_remove"],
-    );
-    assert.deepEqual(
-      removeButtons.map((button) => button.getAttribute("aria-label")),
-      ["Remove row 0", "Remove row 1"],
-    );
+  // Each hoisted remove button carries the index of its own row, so ids stay
+  // unique, the accessible names differ, and the markup keeps matching the
+  // server-rendered row ids.
+  const removeButtons = [...document.querySelectorAll("[data-sequence-remove]")];
+  assert.deepEqual(
+    removeButtons.map((button) => button.id),
+    ["values_0_remove", "values_1_remove"],
+  );
+  assert.deepEqual(
+    removeButtons.map((button) => button.getAttribute("aria-label")),
+    ["Remove row 0", "Remove row 1"],
+  );
 
-    // A row deleted on a previous request is not a row: it must not count
-    // toward the limits and must keep posting its deletion flag.
-    assert.equal(addButton.disabled, false);
-    assert.equal(deletedRow.value, "1");
-    assert.equal(deletedRow.disabled, false);
+  // A row deleted on a previous request is not a row: it must not count
+  // toward the limits and must keep posting its deletion flag.
+  assert.equal(addButton.disabled, false);
+  assert.equal(deletedRow.value, "1");
+  assert.equal(deletedRow.disabled, false);
 
-    const firstRemove = firstRow.querySelector("[data-sequence-remove]");
-    const firstDelete = firstRow.querySelector("[data-sequence-delete]");
-    assert.ok(firstRemove instanceof dom.window.HTMLButtonElement);
-    assert.ok(firstDelete instanceof dom.window.HTMLInputElement);
+  const firstRemove = firstRow.querySelector("[data-sequence-remove]");
+  const firstDelete = firstRow.querySelector("[data-sequence-delete]");
+  assert.ok(firstRemove instanceof dom.window.HTMLButtonElement);
+  assert.ok(firstDelete instanceof dom.window.HTMLInputElement);
 
-    firstRemove.click();
+  firstRemove.click();
 
-    // The deletion flag is the only thing the server sees, so it must be set
-    // and must stay enabled; every other control in the row must stop posting.
-    assert.equal(firstDelete.value, "1");
-    assert.equal(firstDelete.disabled, false);
-    assert.equal(firstRow.hidden, true);
-    assert.equal(firstRow.style.display, "none");
-    for (const id of ["value-0", "choice-0", "note-0"]) {
-      const control = document.querySelector(`#${id}`);
-      assert.ok(control);
-      assert.equal(control.disabled, true, `${id} should be disabled`);
-    }
-    assert.equal(firstRemove.disabled, true);
-    assert.equal(document.activeElement, document.querySelector("#value-1"));
-    // Removing never renumbers: the total form count stays the high-water mark.
-    assert.equal(totalInput.value, "2");
+  // The deletion flag is the only thing the server sees, so it must be set
+  // and must stay enabled; every other control in the row must stop posting.
+  assert.equal(firstDelete.value, "1");
+  assert.equal(firstDelete.disabled, false);
+  assert.equal(firstRow.hidden, true);
+  assert.equal(firstRow.style.display, "none");
+  for (const id of ["value-0", "choice-0", "note-0"]) {
+    const control = document.querySelector(`#${id}`);
+    assert.ok(control);
+    assert.equal(control.disabled, true, `${id} should be disabled`);
+  }
+  assert.equal(firstRemove.disabled, true);
+  assert.equal(document.activeElement, document.querySelector("#value-1"));
+  // Removing never renumbers: the total form count stays the high-water mark.
+  assert.equal(totalInput.value, "2");
 
-    const secondRemove = secondRow.querySelector("[data-sequence-remove]");
-    assert.ok(secondRemove instanceof dom.window.HTMLButtonElement);
+  const secondRemove = secondRow.querySelector("[data-sequence-remove]");
+  assert.ok(secondRemove instanceof dom.window.HTMLButtonElement);
 
-    // Without data-sequence-minimum the minimum is zero, so the last row goes
-    // too, and focus lands on the add button instead of being lost to the body.
-    secondRemove.click();
+  // Without data-sequence-minimum the minimum is zero, so the last row goes
+  // too, and focus lands on the add button instead of being lost to the body.
+  secondRemove.click();
 
-    assert.equal(secondRow.hidden, true);
-    assert.equal(document.activeElement, addButton);
-    assert.equal(addButton.disabled, false);
-    assert.equal(totalInput.value, "2");
-  });
+  assert.equal(secondRow.hidden, true);
+  assert.equal(document.activeElement, addButton);
+  assert.equal(addButton.disabled, false);
+  assert.equal(totalInput.value, "2");
 }
+
+test("div layout add and remove manage limits focus and change events", () => {
+  assertAddAndRemoveManageLimitsFocusAndEvents(DIV_LAYOUT);
+});
+
+test("p layout add and remove manage limits focus and change events", () => {
+  assertAddAndRemoveManageLimitsFocusAndEvents(P_LAYOUT);
+});
+
+test("ul layout add and remove manage limits focus and change events", () => {
+  assertAddAndRemoveManageLimitsFocusAndEvents(UL_LAYOUT);
+});
+
+test("table layout add and remove manage limits focus and change events", () => {
+  assertAddAndRemoveManageLimitsFocusAndEvents(TABLE_LAYOUT);
+});
+
+test("div layout removing a row marks deletion and disables stale controls", () => {
+  assertRemovingRowMarksDeletionAndDisablesStaleControls(DIV_LAYOUT);
+});
+
+test("p layout removing a row marks deletion and disables stale controls", () => {
+  assertRemovingRowMarksDeletionAndDisablesStaleControls(P_LAYOUT);
+});
+
+test("ul layout removing a row marks deletion and disables stale controls", () => {
+  assertRemovingRowMarksDeletionAndDisablesStaleControls(UL_LAYOUT);
+});
+
+test("table layout removing a row marks deletion and disables stale controls", () => {
+  assertRemovingRowMarksDeletionAndDisablesStaleControls(TABLE_LAYOUT);
+});
+
+test("canceling the add event prevents the clone", () => {
+  const dom = build(
+    `
+      <div
+        data-widget="sequence"
+        data-sequence-maximum="2"
+        data-sequence-absolute-maximum="2"
+      >
+        <input type="hidden" value="0" data-sequence-total>
+        <div data-sequence-rows></div>
+        <template data-sequence-empty-row>
+          <div data-sequence-row>
+            <input name="values-__prefix__">
+          </div>
+        </template>
+        <template data-sequence-remove-button>
+          <button type="button" data-sequence-remove>Remove</button>
+        </template>
+        <button type="button" data-sequence-add>Add</button>
+      </div>
+    `,
+  );
+
+  const { document } = dom.window;
+  const addButton = document.querySelector("[data-sequence-add]");
+  const totalInput = document.querySelector("[data-sequence-total]");
+  assert.ok(addButton instanceof dom.window.HTMLButtonElement);
+  assert.ok(totalInput instanceof dom.window.HTMLInputElement);
+
+  let addDetail;
+  document.addEventListener(
+    "nestingdolls:sequence-add",
+    (event) => {
+      addDetail = {
+        index: event.detail.index,
+        cancelable: event.cancelable,
+        rowsInDom: document.querySelectorAll("[data-sequence-row]").length,
+      };
+      event.preventDefault();
+    },
+    { once: true },
+  );
+  const changes = [];
+  document.addEventListener("nestingdolls:sequence-change", (event) => {
+    changes.push(event.detail.action);
+  });
+
+  addButton.click();
+
+  // The listener saw the event before any clone existed, and the veto left
+  // the widget untouched.
+  assert.deepEqual(addDetail, { index: 0, cancelable: true, rowsInDom: 0 });
+  assert.equal(document.querySelectorAll("[data-sequence-row]").length, 0);
+  assert.equal(totalInput.value, "0");
+  assert.deepEqual(changes, []);
+
+  addButton.click();
+
+  assert.equal(document.querySelectorAll("[data-sequence-row]").length, 1);
+  assert.equal(totalInput.value, "1");
+  assert.deepEqual(changes, ["add"]);
+});
+
+test("canceling the remove event keeps the row", () => {
+  const dom = build(
+    `
+      <div
+        data-widget="sequence"
+        data-sequence-maximum="2"
+        data-sequence-absolute-maximum="2"
+      >
+        <input type="hidden" value="1" data-sequence-total>
+        <div data-sequence-rows>
+          <div data-sequence-row data-sequence-index="0">
+            <input type="hidden" name="values-0-DELETE" value="" data-sequence-delete>
+            <input id="value-0" name="values-0">
+          </div>
+        </div>
+        <template data-sequence-empty-row>
+          <div data-sequence-row>
+            <input
+              type="hidden"
+              name="values-__prefix__-DELETE"
+              value=""
+              data-sequence-delete
+            >
+            <input name="values-__prefix__">
+          </div>
+        </template>
+        <template data-sequence-remove-button>
+          <button type="button" data-sequence-remove>Remove</button>
+        </template>
+        <button type="button" data-sequence-add>Add</button>
+      </div>
+    `,
+  );
+
+  const { document } = dom.window;
+  const firstRow = document.querySelector('[data-sequence-index="0"]');
+  const removeButton = document.querySelector("[data-sequence-remove]");
+  const deleteInput = document.querySelector("[data-sequence-delete]");
+  const valueInput = document.querySelector("#value-0");
+  assert.ok(firstRow instanceof dom.window.HTMLElement);
+  assert.ok(removeButton instanceof dom.window.HTMLButtonElement);
+  assert.ok(deleteInput instanceof dom.window.HTMLInputElement);
+  assert.ok(valueInput instanceof dom.window.HTMLInputElement);
+
+  let removeDetail;
+  document.addEventListener(
+    "nestingdolls:sequence-remove",
+    (event) => {
+      removeDetail = {
+        index: event.detail.index,
+        row: event.detail.row,
+        cancelable: event.cancelable,
+        rowHidden: event.detail.row.hidden,
+      };
+      event.preventDefault();
+    },
+    { once: true },
+  );
+  const changes = [];
+  document.addEventListener("nestingdolls:sequence-change", (event) => {
+    changes.push(event.detail.action);
+  });
+
+  removeButton.click();
+
+  // The listener saw the row before any mutation, and the veto kept the
+  // row visible, undeleted, and enabled.
+  assert.ok(removeDetail);
+  assert.equal(removeDetail.index, 0);
+  assert.equal(removeDetail.row, firstRow);
+  assert.equal(removeDetail.cancelable, true);
+  assert.equal(removeDetail.rowHidden, false);
+  assert.equal(firstRow.hidden, false);
+  assert.equal(deleteInput.value, "");
+  assert.equal(valueInput.disabled, false);
+  assert.deepEqual(changes, []);
+
+  removeButton.click();
+
+  assert.equal(firstRow.hidden, true);
+  assert.equal(deleteInput.value, "1");
+  assert.deepEqual(changes, ["remove"]);
+});
+
+test("enhancement emits one ready event per widget", () => {
+  const dom = new JSDOM(
+    `
+      <div
+        data-widget="sequence"
+        data-sequence-maximum="3"
+        data-sequence-absolute-maximum="3"
+      >
+        <input type="hidden" value="1" data-sequence-total>
+        <div data-sequence-rows></div>
+        <template data-sequence-empty-row>
+          <div data-sequence-row>
+            <div
+              data-widget="sequence"
+              data-sequence-field="values-__prefix__"
+              data-sequence-maximum="2"
+              data-sequence-absolute-maximum="2"
+            >
+              <input
+                type="hidden"
+                name="values-__prefix__-TOTAL_FORMS"
+                value="0"
+                data-sequence-total
+              >
+              <div data-sequence-rows></div>
+              <template data-sequence-empty-row>
+                <div data-sequence-row>
+                  <input name="values-__prefix__-__prefix__">
+                </div>
+              </template>
+              <template data-sequence-remove-button>
+                <button type="button" data-sequence-remove>Remove</button>
+              </template>
+              <button type="button" data-sequence-add>Add</button>
+            </div>
+          </div>
+        </template>
+        <template data-sequence-remove-button>
+          <button type="button" data-sequence-remove>Remove</button>
+        </template>
+        <button type="button" data-sequence-add>Add</button>
+      </div>
+    `,
+    { runScripts: "outside-only" },
+  );
+
+  const { document } = dom.window;
+  const readyTargets = [];
+  document.addEventListener("nestingdolls:sequence-ready", (event) => {
+    readyTargets.push(event.target);
+  });
+
+  dom.window.eval(controller);
+  document.dispatchEvent(new dom.window.Event("DOMContentLoaded"));
+
+  // The inner widget is inert template content, so only the outer widget
+  // is enhanced at start.
+  const outerRoot = document.querySelector('[data-widget="sequence"]');
+  assert.ok(outerRoot);
+  assert.deepEqual(readyTargets, [outerRoot]);
+
+  document.dispatchEvent(new dom.window.Event("DOMContentLoaded"));
+  assert.deepEqual(readyTargets, [outerRoot]);
+
+  const addButton = document.querySelector("[data-sequence-add]");
+  assert.ok(addButton instanceof dom.window.HTMLButtonElement);
+  addButton.click();
+
+  const nestedRoot = document.querySelector(
+    '[data-sequence-field="values-1"]',
+  );
+  assert.ok(nestedRoot);
+  assert.deepEqual(readyTargets, [outerRoot, nestedRoot]);
+});
+
+test("a forced click past the limit adds nothing", () => {
+  const dom = build(
+    `
+      <div
+        data-widget="sequence"
+        data-sequence-maximum="1"
+        data-sequence-absolute-maximum="1"
+      >
+        <input type="hidden" value="1" data-sequence-total>
+        <div data-sequence-rows>
+          <div data-sequence-row data-sequence-index="0">
+            <input name="values-0">
+          </div>
+        </div>
+        <template data-sequence-empty-row>
+          <div data-sequence-row>
+            <input name="values-__prefix__">
+          </div>
+        </template>
+        <template data-sequence-remove-button>
+          <button type="button" data-sequence-remove>Remove</button>
+        </template>
+        <button type="button" data-sequence-add>Add</button>
+      </div>
+    `,
+  );
+
+  const { document } = dom.window;
+  const addButton = document.querySelector("[data-sequence-add]");
+  const totalInput = document.querySelector("[data-sequence-total]");
+  assert.ok(addButton instanceof dom.window.HTMLButtonElement);
+  assert.ok(totalInput instanceof dom.window.HTMLInputElement);
+  assert.equal(addButton.disabled, true);
+
+  let addEvents = 0;
+  document.addEventListener("nestingdolls:sequence-add", () => {
+    addEvents += 1;
+  });
+
+  // A DevTools user can re-enable the button; the script must still refuse,
+  // and the limit guard must refuse before the add event fires.
+  addButton.disabled = false;
+  addButton.click();
+
+  assert.equal(document.querySelectorAll("[data-sequence-row]").length, 1);
+  assert.equal(totalInput.value, "1");
+  assert.equal(addEvents, 0);
+});
+
+// jsdom parses `new JSDOM()` markup with the document still in the "loading"
+// state, so the controller defers start() to DOMContentLoaded and a throw
+// surfaces as a window error event, exactly as it would for a real deferred
+// script.
+function enhancementFailure(html) {
+  const dom = new JSDOM(html, { runScripts: "outside-only" });
+  const errors = [];
+  dom.window.addEventListener("error", (event) => {
+    event.preventDefault();
+    errors.push(String(event.error ?? event.message));
+  });
+  dom.window.eval(controller);
+  dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded"));
+  assert.equal(errors.length, 1);
+  return errors[0];
+}
+
+test("a malformed widget fails loudly at enhancement", () => {
+  assert.match(
+    enhancementFailure(`
+      <div
+        data-widget="sequence"
+        data-sequence-maximum="banana"
+        data-sequence-absolute-maximum="5"
+      >
+        <input type="hidden" value="0" data-sequence-total>
+        <div data-sequence-rows></div>
+        <button type="button" data-sequence-add>Add</button>
+      </div>
+    `),
+    /Invalid integer value for data-sequence-maximum: banana/,
+  );
+
+  assert.match(
+    enhancementFailure(`
+      <div data-widget="sequence">
+        <div data-sequence-rows></div>
+        <button type="button" data-sequence-add>Add</button>
+      </div>
+    `),
+    /Missing required element: \[data-sequence-total\]/,
+  );
+});
+
+test("removal focuses the add button when the next row has no focusable control", () => {
+  const dom = build(
+    `
+      <div
+        data-widget="sequence"
+        data-sequence-minimum="1"
+        data-sequence-maximum="3"
+        data-sequence-absolute-maximum="4"
+      >
+        <input type="hidden" value="2" data-sequence-total>
+        <div data-sequence-rows>
+          <div data-sequence-row data-sequence-index="0">
+            <input type="hidden" name="values-0-DELETE" value="" data-sequence-delete>
+            <input id="value-0" name="values-0">
+            <span data-sequence-actions></span>
+          </div>
+          <div data-sequence-row data-sequence-index="1">
+            <input type="hidden" name="values-1-DELETE" value="" data-sequence-delete>
+            <span data-sequence-actions></span>
+          </div>
+        </div>
+        <template data-sequence-empty-row>
+          <div data-sequence-row>
+            <input
+              type="hidden"
+              name="values-__prefix__-DELETE"
+              value=""
+              data-sequence-delete
+            >
+            <input name="values-__prefix__">
+            <span data-sequence-actions></span>
+          </div>
+        </template>
+        <template data-sequence-remove-button>
+          <button type="button" data-sequence-remove>Remove</button>
+        </template>
+        <button type="button" data-sequence-add>Add</button>
+      </div>
+    `,
+  );
+
+  const { document } = dom.window;
+  const addButton = document.querySelector("[data-sequence-add]");
+  const firstRow = document.querySelector('[data-sequence-index="0"]');
+  const secondRow = document.querySelector('[data-sequence-index="1"]');
+  const firstRemove = firstRow?.querySelector("[data-sequence-remove]");
+  assert.ok(addButton instanceof dom.window.HTMLButtonElement);
+  assert.ok(firstRow instanceof dom.window.HTMLElement);
+  assert.ok(secondRow instanceof dom.window.HTMLElement);
+  assert.ok(firstRemove instanceof dom.window.HTMLButtonElement);
+  assert.equal(firstRemove.disabled, false);
+
+  firstRemove.click();
+
+  // The next row survives, but at the minimum its remove button is disabled
+  // and it holds no other focusable control, so focus falls back to add.
+  assert.equal(firstRow.hidden, true);
+  assert.equal(secondRow.hidden, false);
+  assert.equal(document.activeElement, addButton);
+});
+
+test("a second copy of the script leaves the first copy in charge", () => {
+  const dom = new JSDOM(
+    `
+      <div
+        data-widget="sequence"
+        data-sequence-maximum="5"
+        data-sequence-absolute-maximum="5"
+      >
+        <input type="hidden" value="0" data-sequence-total>
+        <div data-sequence-rows></div>
+        <template data-sequence-empty-row>
+          <div data-sequence-row>
+            <input name="values-__prefix__">
+          </div>
+        </template>
+        <template data-sequence-remove-button>
+          <button type="button" data-sequence-remove>Remove</button>
+        </template>
+        <button type="button" data-sequence-add>Add</button>
+      </div>
+    `,
+    { runScripts: "outside-only" },
+  );
+
+  const { document } = dom.window;
+  let ready = 0;
+  let adds = 0;
+  const changes = [];
+  document.addEventListener("nestingdolls:sequence-ready", () => {
+    ready += 1;
+  });
+  document.addEventListener("nestingdolls:sequence-add", () => {
+    adds += 1;
+  });
+  document.addEventListener("nestingdolls:sequence-change", (event) => {
+    changes.push(event.detail.action);
+  });
+
+  // Two forms each render their own form.media, so the page holds two
+  // <script> tags with one URL, and a browser executes both.
+  dom.window.eval(controller);
+  dom.window.eval(controller);
+  document.dispatchEvent(new dom.window.Event("DOMContentLoaded"));
+
+  assert.equal(ready, 1);
+
+  const addButton = document.querySelector("[data-sequence-add]");
+  assert.ok(addButton instanceof dom.window.HTMLButtonElement);
+  addButton.click();
+
+  // Without the document marker each copy attaches its own click listener,
+  // and one click adds two rows and fires every hook twice.
+  assert.equal(document.querySelectorAll("[data-sequence-row]").length, 1);
+  assert.equal(
+    document.querySelector("[data-sequence-total]").value,
+    "1",
+  );
+  assert.equal(adds, 1);
+  assert.deepEqual(changes, ["add"]);
+});

@@ -1,9 +1,17 @@
 ((): void => {
-  // The server renders every per-row name, id, and reference with this
-  // placeholder, in place of the row index. SequenceWidget.get_context
-  // builds the row under the "__prefix__" index. This file only
-  // substitutes the placeholder. It never rebuilds the
-  // "<field>-<index>" convention itself.
+  // A page can load this file more than once. Each form adds it through
+  // form.media, and the browser runs each script tag. Each file load has a
+  // separate scope. Without this document marker, each load adds a click
+  // handler and one click adds two rows. Set the marker before waiting for
+  // DOMContentLoaded because another load can run before that event.
+  if (document.documentElement.dataset.nestingdollsSequence !== undefined) {
+    return;
+  }
+  document.documentElement.dataset.nestingdollsSequence = "";
+
+  // The server puts this value in every row-specific name, ID, and reference.
+  // It builds the row with __prefix__ instead of a row number. Replace that
+  // value only. Do not rebuild Django's field-index naming rule here.
   const prefix = "__prefix__";
   const sequenceWidgetSelector = '[data-widget="sequence"]';
   const enhancedWidgets = new WeakSet<HTMLElement>();
@@ -43,6 +51,8 @@
     parent: ParentNode,
     selector: string,
   ): E[] {
+    // A nested sequence has the same controls. Keep only controls that belong
+    // to this root so an outer sequence cannot manage an inner sequence.
     return Array.from(parent.querySelectorAll<E>(selector)).filter(
       (element) => element.closest(sequenceWidgetSelector) === root,
     );
@@ -57,6 +67,11 @@
       ownedElements<E>(root, parent, selector)[0],
       selector,
     );
+  }
+
+  function cloneTemplate(root: HTMLElement, selector: string): DocumentFragment {
+    const template = ownedElement<HTMLTemplateElement>(root, root, selector);
+    return template.content.cloneNode(true) as DocumentFragment;
   }
 
   function parseRequiredInteger(
@@ -85,20 +100,14 @@
     if (ownedElements(root, row, "[data-sequence-remove]").length > 0) {
       return;
     }
-    const template = ownedElement<HTMLTemplateElement>(
-      root,
-      root,
-      "[data-sequence-remove-button]",
-    );
-    const fragment = template.content.cloneNode(true) as DocumentFragment;
+    const fragment = cloneTemplate(root, "[data-sequence-remove-button]");
     const index = parseRequiredInteger(
       row.dataset.sequenceIndex,
       "data-sequence-index",
     );
     replacePrefixAttributes(fragment, index);
-    // The row template renders an explicit slot. Appending directly to
-    // the row places a <button> inside a <tr>. The HTML content model
-    // forbids that placement.
+    // A table row can contain cells, not a button. The template has an action
+    // slot for table layouts. Use it when present; other layouts use the row.
     const slot = ownedElements<HTMLElement>(
       root,
       row,
@@ -116,12 +125,7 @@
     if (existing) {
       return existing;
     }
-    const template = ownedElement<HTMLTemplateElement>(
-      root,
-      root,
-      "[data-sequence-add-button]",
-    );
-    const fragment = template.content.cloneNode(true) as DocumentFragment;
+    const fragment = cloneTemplate(root, "[data-sequence-add-button]");
     const button = requiredElement(
       fragment.querySelector<HTMLButtonElement>("[data-sequence-add]"),
       "[data-sequence-add]",
@@ -130,9 +134,9 @@
     return button;
   }
 
-  // These limits are a hint for the browser only. The server re-checks
-  // every limit in SequenceField.Limits. SequenceField.Limits is the
-  // authority. Nothing in this file guarantees correctness.
+  // These values improve the browser interface only. The server checks all
+  // limits in SequenceField.Limits and is the source of truth. Client checks
+  // cannot make a submitted value safe.
   function canAddRow(
     root: HTMLElement,
     rowCount: number,
@@ -170,9 +174,10 @@
       totalInput.value,
       "data-sequence-total",
     );
-    // Disable the button, instead of hiding it. A hidden control
-    // leaves the accessibility tree entirely. A screen-reader user
-    // cannot tell unavailable from absent.
+    // Keep an unavailable button visible and disabled. Hiding it removes it
+    // from the accessibility tree, so a screen reader cannot tell why it is
+    // not available. See https://www.w3.org/WAI/ARIA/apg/practices/
+    // keyboard-interface/#disabling-a-button
     setAvailability(
       ensureAddButton(root),
       canAddRow(root, rows.length, nextIndex),
@@ -204,25 +209,34 @@
     return true;
   }
 
-  // A host page already has its own way to show a message: a toast
-  // library, a live region, or something else. This file must not
-  // force one choice on every page that uses it. So this function
-  // fires a bubbling "nestingdolls:sequence-change" event instead.
-  // The host page can listen for the event and show its own message.
-  function dispatchSequenceChange(
+  interface SequenceAddDetail {
+    index: number;
+  }
+
+  interface SequenceRemoveDetail {
+    index: number;
+    row: HTMLElement;
+  }
+
+  interface SequenceChangeDetail {
+    action: "add" | "remove";
+    index: number;
+    row: HTMLElement;
+  }
+
+  // The host page chooses how to tell a user about a change. It may use a
+  // toast, a live region, or another method. Send bubbling events instead of
+  // adding one message system here. A listener can cancel an event when it
+  // must stop the requested add or remove action.
+  // Returns false if a listener cancels the event.
+  function dispatch<Detail>(
     root: HTMLElement,
-    row: HTMLElement,
-    action: "add" | "remove",
-  ): void {
-    const index = parseRequiredInteger(
-      row.dataset.sequenceIndex,
-      "data-sequence-index",
-    );
-    root.dispatchEvent(
-      new CustomEvent("nestingdolls:sequence-change", {
-        bubbles: true,
-        detail: { action, index },
-      }),
+    type: string,
+    detail: Detail,
+    cancelable = false,
+  ): boolean {
+    return root.dispatchEvent(
+      new CustomEvent(type, { bubbles: true, cancelable, detail }),
     );
   }
 
@@ -230,6 +244,20 @@
     const rows = activeRows(root);
     const rowPosition = rows.indexOf(row);
     if (rowPosition < 0 || rows.length <= minimumRows(root)) {
+      return;
+    }
+    const index = parseRequiredInteger(
+      row.dataset.sequenceIndex,
+      "data-sequence-index",
+    );
+    if (
+      !dispatch<SequenceRemoveDetail>(
+        root,
+        "nestingdolls:sequence-remove",
+        { index, row },
+        true,
+      )
+    ) {
       return;
     }
     const focusRow = rows[rowPosition + 1] ?? rows[rowPosition - 1];
@@ -240,16 +268,16 @@
     );
     deleteInput.value = "1";
     row.hidden = true;
-    // [hidden] is only a UA `display: none` rule. Any framework
-    // selector with higher specificity can override it. This line
-    // also sets the inline style, so a removed row cannot stay
-    // visible with disabled inputs.
+    // A style rule can override the browser's default [hidden] display rule.
+    // Set the inline display too. A removed row must not stay visible with
+    // disabled controls. See https://html.spec.whatwg.org/multipage/
+    //rendering.html#hidden-elements.
     row.style.display = "none";
     for (const control of row.querySelectorAll<
       HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
     >("input, select, textarea, button")) {
-      // Deletion flags are the only fields the server still needs from a
-      // removed row, so they keep posting while the stale values stop.
+      // The delete flag tells the server to remove this row. Keep it enabled.
+      // Disable every other control so stale row values are not submitted.
       if (!control.matches("[data-sequence-delete]")) {
         control.disabled = true;
       }
@@ -258,7 +286,11 @@
     if (!focusRow || !focusFirstControl(focusRow)) {
       ensureAddButton(root).focus();
     }
-    dispatchSequenceChange(root, row, "remove");
+    dispatch<SequenceChangeDetail>(root, "nestingdolls:sequence-change", {
+      action: "remove",
+      index,
+      row,
+    });
   }
 
   function replacePrefixAttributes(
@@ -272,8 +304,9 @@
       for (const attribute of prefixAttributes) {
         const value = element.getAttribute(attribute);
         if (value) {
-          // Replace one placeholder in each space-separated value. Later
-          // placeholders belong to nested rows.
+          // Attribute values can contain several tokens. Change only the first
+          // placeholder in each token. Later placeholders identify nested rows
+          // and must remain for their own sequence controller.
           element.setAttribute(
             attribute,
             value.replace(/\S+/g, (part) =>
@@ -283,6 +316,8 @@
         }
       }
     }
+    // Nested row templates keep their own prefix. Walk template content too,
+    // but replace only this sequence level in each token.
     for (const template of fragment.querySelectorAll<HTMLTemplateElement>(
       "template",
     )) {
@@ -300,13 +335,18 @@
     if (!canAddRow(root, activeRows(root).length, index)) {
       return;
     }
+    if (
+      !dispatch<SequenceAddDetail>(
+        root,
+        "nestingdolls:sequence-add",
+        { index },
+        true,
+      )
+    ) {
+      return;
+    }
 
-    const template = ownedElement<HTMLTemplateElement>(
-      root,
-      root,
-      "[data-sequence-empty-row]",
-    );
-    const fragment = template.content.cloneNode(true) as DocumentFragment;
+    const fragment = cloneTemplate(root, "[data-sequence-empty-row]");
     replacePrefixAttributes(fragment, index);
     const row = requiredElement(
       fragment.querySelector<HTMLElement>("[data-sequence-row]"),
@@ -314,9 +354,9 @@
     );
     row.dataset.sequenceIndex = String(index);
     ownedElement(root, root, "[data-sequence-rows]").append(fragment);
-    // This call must come after the append. ownedElements() filters
-    // with closest(). closest() returns null for a detached subtree.
-    // So the duplicate guard cannot work before this point.
+    // Attach the row before creating its remove button. ownedElements() uses
+    // closest() to enforce widget ownership, and closest() returns null for a
+    // detached row. Before attachment, the duplicate check cannot work.
     ensureRemoveButton(root, row);
     totalInput.value = String(index + 1);
     row
@@ -324,7 +364,11 @@
       .forEach(enhanceWidget);
     syncButtons(root);
     focusFirstControl(row);
-    dispatchSequenceChange(root, row, "add");
+    dispatch<SequenceChangeDetail>(root, "nestingdolls:sequence-change", {
+      action: "add",
+      index,
+      row,
+    });
   }
 
   function enhanceWidget(root: HTMLElement): void {
@@ -335,7 +379,9 @@
       ensureRemoveButton(root, row);
     }
     syncButtons(root);
-    root.addEventListener("click", (event: MouseEvent): void => {
+    // One handler covers controls in rows added later. Check the nearest
+    // sequence root so a nested sequence keeps control of its own buttons.
+    root.addEventListener("click", (event) => {
       if (!(event.target instanceof Element)) {
         return;
       }
@@ -356,6 +402,7 @@
       removeRow(root, row);
     });
     enhancedWidgets.add(root);
+    dispatch(root, "nestingdolls:sequence-ready", null);
   }
 
   function start(): void {

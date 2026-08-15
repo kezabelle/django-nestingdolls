@@ -415,8 +415,7 @@ class HostileClientTestCase(SimpleTestCase):
 
     def post_raw(self, url, pairs):
         """Send an ordered URL-encoded body, which a dict payload cannot spell."""
-        return self.client.generic(
-            "POST",
+        return self.client.post(
             url,
             data=urlencode(pairs, doseq=True),
             content_type="application/x-www-form-urlencoded",
@@ -427,12 +426,8 @@ class HostileClientTestCase(SimpleTestCase):
 class HostileSequenceCrashTestCase(HostileClientTestCase):
     """Prove that no submitted key makes a sequence view raise."""
 
-    def test_client_survives_a_forged_whole_value_for_compound_child_rows(self):
-        """A scalar in a compound row must not cause an HTTP 500.
-
-        A compound child widget receives a decomposed value or ``None``,
-        never a raw string, so ``MultiWidget.decompress`` does not raise.
-        """
+    def test_client_accepts_a_managed_compound_child_row(self):
+        """A managed compound child row returns a valid response."""
         managed = self.client.post(
             "/hostile-split-datetime-list/",
             {
@@ -445,10 +440,17 @@ class HostileSequenceCrashTestCase(HostileClientTestCase):
         self.assertEqual(managed.status_code, 200)
         self.assertIs(managed.json()["valid"], True)
 
-        for body in ({"values": "abc"}, {"values": ["a", "b"]}):
-            with self.subTest(body=body):
-                response = self.client.post("/hostile-split-datetime-list/", body)
-                self.assertEqual(response.status_code, 200)
+    def assertCompoundChildWholeValueDoesNotRaise(self, body):
+        response = self.client.post("/hostile-split-datetime-list/", body)
+        self.assertEqual(response.status_code, 200)
+
+    def test_client_survives_a_scalar_whole_value_for_compound_child_rows(self):
+        """A scalar whole value for a compound row does not return HTTP 500."""
+        self.assertCompoundChildWholeValueDoesNotRaise({"values": "abc"})
+
+    def test_client_survives_a_list_whole_value_for_compound_child_rows(self):
+        """A list whole value for a compound row does not return HTTP 500."""
+        self.assertCompoundChildWholeValueDoesNotRaise({"values": ["a", "b"]})
 
     def test_client_survives_deeply_nested_bracket_row_keys(self):
         """A key with thousands of bracket groups gives an ordinary response."""
@@ -464,21 +466,38 @@ class HostileSequenceCrashTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["value"], ["kept"])
 
-    def test_client_survives_unbalanced_and_empty_bracket_row_keys(self):
-        """A malformed bracket key names no row and raises nothing."""
-        for key in ("values[", "values[]", "values[]0", "values]0[", "values[-1]"):
-            with self.subTest(key=key):
-                response = self.client.post(
-                    "/hostile-integer-list/",
-                    {
-                        f"values-{TOTAL_FORM_COUNT}": "1",
-                        f"values-{INITIAL_FORM_COUNT}": "0",
-                        key: "9",
-                        "values-0": "1",
-                    },
-                )
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.json()["value"], [1])
+    def assertMalformedBracketKeyDoesNotBind(self, key):
+        response = self.client.post(
+            "/hostile-integer-list/",
+            {
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                key: "9",
+                "values-0": "1",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["value"], [1])
+
+    def test_client_ignores_open_bracket_row_key(self):
+        """An open bracket row key does not bind a row."""
+        self.assertMalformedBracketKeyDoesNotBind("values[")
+
+    def test_client_ignores_empty_bracket_row_key(self):
+        """An empty bracket row key does not bind a row."""
+        self.assertMalformedBracketKeyDoesNotBind("values[]")
+
+    def test_client_ignores_bracket_then_text_row_key(self):
+        """A bracket then text row key does not bind a row."""
+        self.assertMalformedBracketKeyDoesNotBind("values[]0")
+
+    def test_client_ignores_unbalanced_bracket_row_key(self):
+        """An unbalanced bracket row key does not bind a row."""
+        self.assertMalformedBracketKeyDoesNotBind("values]0[")
+
+    def test_client_ignores_negative_bracket_row_key(self):
+        """A negative bracket row key does not bind a row."""
+        self.assertMalformedBracketKeyDoesNotBind("values[-1]")
 
     def test_client_survives_a_row_index_longer_than_the_digit_limit(self):
         """A row index with more digits than the limit names no row."""
@@ -592,8 +611,7 @@ class HostileSequenceCrashTestCase(HostileClientTestCase):
 
     def test_client_survives_a_malformed_multipart_body(self):
         """A truncated multipart body gives a client error, never a server error."""
-        response = self.client.generic(
-            "POST",
+        response = self.client.post(
             "/hostile-row-upload-list/",
             data=b"--frontier\r\nContent-Disposition: form-data; name=",
             content_type="multipart/form-data; boundary=frontier",
@@ -649,35 +667,32 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["value"], [1, 2])
 
-    def test_client_rejects_a_junk_management_control_like_django(self):
-        """A junk management control rejects the submission, as Django does.
+    def assertJunkManagementControlIsRejected(self, name):
+        response = self.client.post(
+            "/hostile-integer-list/",
+            {
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                f"values-{name}": "not a number",
+                "values-0": "5",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIs(body["valid"], False)
+        self.assertEqual(body["errors"], {"values": ["missing_management_form"]})
+        message = " ".join(body["messages"]["values"])
+        self.assertIn(
+            "ManagementForm data is missing or has been tampered with", message
+        )
 
-        This package uses Django's own management-form validation. A
-        tampered ``MIN_NUM_FORMS`` or ``MAX_NUM_FORMS`` value fails the
-        ManagementForm and rejects the complete submission.
-        """
-        for name in (MIN_NUM_FORM_COUNT, MAX_NUM_FORM_COUNT):
-            with self.subTest(name=name):
-                response = self.client.post(
-                    "/hostile-integer-list/",
-                    {
-                        f"values-{TOTAL_FORM_COUNT}": "1",
-                        f"values-{INITIAL_FORM_COUNT}": "0",
-                        f"values-{name}": "not a number",
-                        "values-0": "5",
-                    },
-                )
-                self.assertEqual(response.status_code, 200)
-                body = response.json()
-                self.assertIs(body["valid"], False)
-                self.assertEqual(
-                    body["errors"], {"values": ["missing_management_form"]}
-                )
-                message = " ".join(body["messages"]["values"])
-                self.assertIn(
-                    "ManagementForm data is missing or has been tampered with",
-                    message,
-                )
+    def test_client_rejects_junk_minimum_forms_control(self):
+        """A junk minimum forms control rejects the submission."""
+        self.assertJunkManagementControlIsRejected(MIN_NUM_FORM_COUNT)
+
+    def test_client_rejects_junk_maximum_forms_control(self):
+        """A junk maximum forms control rejects the submission."""
+        self.assertJunkManagementControlIsRejected(MAX_NUM_FORM_COUNT)
 
     def test_client_keeps_the_last_of_two_duplicate_row_values(self):
         """Two values under one row key give the last value, as Django does."""
@@ -889,18 +904,22 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
 class HostileRenderCostTestCase(HostileClientTestCase):
     """Measure the page that a hostile submission makes the server build."""
 
-    def test_client_does_not_split_a_forged_text_row_into_one_row_per_letter(self):
-        """A forged text row must not render one row per character.
-
-        ``initial_values`` rejects text, so rendering shows the raw value
-        as one row. It does not iterate the characters.
-        """
+    def assertForgedTextRowDoesNotRender(self, letter):
         response = self.client.post("/hostile-nested-text-list/", {"values": "abc"})
         self.assertEqual(response.status_code, 200)
-        html = response.json()["html"]
-        for letter in ("a", "b", "c"):
-            with self.subTest(letter=letter):
-                self.assertNotIn(f'value="{letter}"', html)
+        self.assertNotIn(f'value="{letter}"', response.json()["html"])
+
+    def test_forged_text_row_does_not_render_letter_a(self):
+        """A forged text row does not render the letter a as a row."""
+        self.assertForgedTextRowDoesNotRender("a")
+
+    def test_forged_text_row_does_not_render_letter_b(self):
+        """A forged text row does not render the letter b as a row."""
+        self.assertForgedTextRowDoesNotRender("b")
+
+    def test_forged_text_row_does_not_render_letter_c(self):
+        """A forged text row does not render the letter c as a row."""
+        self.assertForgedTextRowDoesNotRender("c")
 
     def test_client_cannot_expand_one_text_key_into_thousands_of_rendered_rows(self):
         """A single text key must not create thousands of rows.
