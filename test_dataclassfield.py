@@ -50,6 +50,21 @@ class DataclassFieldConstructionTestCase(SimpleTestCase):
         with self.assertRaises(ImproperlyConfigured):
             nestingdolls.DataclassField(WrongForm, output=Point)
 
+    def test_rejects_an_output_with_non_constructor_fields(self):
+        @dataclasses.dataclass
+        class PointWithDerivedValue:
+            x: int
+            y: int
+            distance: int = dataclasses.field(init=False, default=0)
+
+        class Form(forms.Form):
+            x = forms.IntegerField()
+            y = forms.IntegerField()
+            distance = forms.IntegerField(required=False)
+
+        with self.assertRaises(ImproperlyConfigured):
+            nestingdolls.DataclassField(Form, output=PointWithDerivedValue)
+
     def test_infers_type_from_base_fields_and_fills_removed_fields(self):
         class Form(forms.Form):
             x = forms.IntegerField()
@@ -74,6 +89,24 @@ class DataclassFieldCleaningTestCase(SimpleTestCase):
         cleaned = field.clean({"x": "1", "y": "2"})
 
         self.assertEqual(cleaned, Point(x=1, y=2))
+
+    def test_required_field_rejects_missing_submission(self):
+        class Form(forms.Form):
+            point = nestingdolls.DataclassField(PointForm, output=Point)
+
+        form = Form({})
+
+        self.assertIs(form.is_valid(), False)
+        self.assertIn("point", form.errors)
+
+    def test_optional_field_cleans_missing_submission_to_none(self):
+        class Form(forms.Form):
+            point = nestingdolls.DataclassField(PointForm, output=Point, required=False)
+
+        form = Form({})
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertIsNone(form.cleaned_data["point"])
 
     def test_validators_receive_the_compressed_dataclass(self):
         seen = []

@@ -218,12 +218,13 @@ test("the added row keeps the placeholder for the inner row", () => {
 test("mapping and nested sequence actions stay with their owning sequence", () => {
   const dom = build(
     `
+      <form>
       <div
         data-widget="sequence"
         data-sequence-maximum="5"
         data-sequence-absolute-maximum="5"
       >
-        <input id="outer-total" type="hidden" value="1" data-sequence-total>
+        <input id="outer-total" type="hidden" name="values-TOTAL_FORMS" value="1" data-sequence-total>
         <div id="outer-rows" data-sequence-rows>
           <div data-sequence-row data-sequence-index="0">
             <div data-widget="mapping">
@@ -292,15 +293,18 @@ test("mapping and nested sequence actions stay with their owning sequence", () =
         </template>
         <button id="outer-add" type="button" data-sequence-add>Add</button>
       </div>
+      </form>
     `,
   );
 
+  const form = dom.window.document.querySelector("form");
   const outerTotal = dom.window.document.querySelector("#outer-total");
   const innerTotal = dom.window.document.querySelector("#inner-total");
   const outerRows = dom.window.document.querySelector("#outer-rows");
   const innerRows = dom.window.document.querySelector("#inner-rows");
   const innerAdd = dom.window.document.querySelector("#inner-add");
   const outerAdd = dom.window.document.querySelector("#outer-add");
+  assert.ok(form instanceof dom.window.HTMLFormElement);
   assert.ok(outerTotal instanceof dom.window.HTMLInputElement);
   assert.ok(innerTotal instanceof dom.window.HTMLInputElement);
   assert.ok(outerRows);
@@ -347,6 +351,12 @@ test("mapping and nested sequence actions stay with their owning sequence", () =
   assert.equal(newInnerRows.children.length, 2);
   assert.equal(outerTotal.value, "2");
   assert.equal(outerRows.children.length, 2);
+  const submission = new dom.window.FormData(form);
+  assert.equal(submission.get("values-TOTAL_FORMS"), "2");
+  assert.equal(submission.get("values-0-TOTAL_FORMS"), "2");
+  assert.equal(submission.get("values-1-TOTAL_FORMS"), "2");
+  assert.equal(submission.get("values-1-0"), "");
+  assert.equal(submission.get("values-1-1"), "");
 });
 
 function assertAddAndRemoveManageLimitsFocusAndEvents(layout) {
@@ -491,12 +501,13 @@ function assertAddAndRemoveManageLimitsFocusAndEvents(layout) {
 function assertRemovingRowMarksDeletionAndDisablesStaleControls(layout) {
   const dom = build(
     `
+      <form>
       <${layout.rootTag}
         data-widget="sequence"
         data-sequence-maximum="3"
         data-sequence-absolute-maximum="4"
       >
-        <input type="hidden" value="2" data-sequence-total>
+        <input type="hidden" name="values-TOTAL_FORMS" value="2" data-sequence-total>
         ${rowsContainer(
           layout,
           row(
@@ -551,15 +562,18 @@ function assertRemovingRowMarksDeletionAndDisablesStaleControls(layout) {
           <button type="button" data-sequence-add id="values_add">Add</button>
         </template>
       </${layout.rootTag}>
+      </form>
     `,
   );
 
   const { document } = dom.window;
+  const form = document.querySelector("form");
   const totalInput = document.querySelector("[data-sequence-total]");
   const deletedRow = document.querySelector("[data-sequence-deleted-row]");
   const firstRow = document.querySelector('[data-sequence-index="0"]');
   const secondRow = document.querySelector('[data-sequence-index="1"]');
   const addButton = document.querySelector("[data-sequence-add]");
+  assert.ok(form instanceof dom.window.HTMLFormElement);
   assert.ok(totalInput instanceof dom.window.HTMLInputElement);
   assert.ok(deletedRow instanceof dom.window.HTMLInputElement);
   assert.ok(firstRow instanceof dom.window.HTMLElement);
@@ -607,7 +621,14 @@ function assertRemovingRowMarksDeletionAndDisablesStaleControls(layout) {
   assert.equal(document.activeElement, document.querySelector("#value-1"));
   // Removing never renumbers: the total form count stays the high-water mark.
   assert.equal(totalInput.value, "2");
-
+  const submission = new dom.window.FormData(form);
+  assert.deepEqual([...submission.entries()], [
+    ["values-TOTAL_FORMS", "2"],
+    ["values-0-DELETE", "1"],
+    ["values-1-DELETE", ""],
+    ["values-1", "second"],
+    ["values-9-DELETE", "1"],
+  ]);
   const secondRemove = secondRow.querySelector("[data-sequence-remove]");
   assert.ok(secondRemove instanceof dom.window.HTMLButtonElement);
 
@@ -1088,4 +1109,46 @@ test("a second copy of the script leaves the first copy in charge", () => {
   );
   assert.equal(adds, 1);
   assert.deepEqual(changes, ["add"]);
+});
+
+test("an added multipart row serializes its data and file", () => {
+  const dom = build(
+    `
+      <form>
+        <div
+          data-widget="sequence"
+          data-sequence-maximum="2"
+          data-sequence-absolute-maximum="2"
+        >
+          <input type="hidden" name="rows-TOTAL_FORMS" value="0" data-sequence-total>
+          <div data-sequence-rows></div>
+          <template data-sequence-empty-row>
+            <div data-sequence-row>
+              <input name="rows-__prefix__-label">
+              <input type="file" name="rows-__prefix__-upload">
+            </div>
+          </template>
+          <template data-sequence-remove-button>
+            <button type="button" data-sequence-remove>Remove</button>
+          </template>
+          <button type="button" data-sequence-add>Add</button>
+        </div>
+      </form>
+    `,
+  );
+
+  const { document } = dom.window;
+  const addButton = document.querySelector("[data-sequence-add]");
+  assert.ok(addButton instanceof dom.window.HTMLButtonElement);
+  addButton.click();
+
+  const label = document.querySelector('input[name="rows-0-label"]');
+  const upload = document.querySelector('input[name="rows-0-upload"]');
+  assert.ok(label instanceof dom.window.HTMLInputElement);
+  assert.ok(upload instanceof dom.window.HTMLInputElement);
+  label.value = "report";
+  const submission = new dom.window.FormData(document.querySelector("form"));
+  assert.equal(submission.get("rows-0-label"), "report");
+  assert.equal(upload.type, "file");
+  assert.equal(upload.name, "rows-0-upload");
 });

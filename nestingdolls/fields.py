@@ -397,6 +397,10 @@ class DataclassField(MappingField):
             raise ImproperlyConfigured(
                 "output argument for DataclassField must be a dataclass"
             )
+        if any(not field.init for field in dataclasses.fields(output)):
+            raise ImproperlyConfigured(
+                "output argument for DataclassField must not have init=False fields"
+            )
         if frozenset(self.widget.fields) != frozenset(
             field.name for field in dataclasses.fields(output)
         ):

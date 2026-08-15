@@ -217,6 +217,9 @@ class ListProbeFixtures(SimpleTestCase):
             nestingdolls.DictField(PointForm), max_length=5, absolute_max=10
         )
 
+    class SetForm(forms.Form):
+        values = nestingdolls.SetField(forms.IntegerField(), min_length=2, max_length=2)
+
 
 class NestedListProbeFixtures(SimpleTestCase):
     class ExactSubmissionForm(forms.Form):
@@ -257,6 +260,16 @@ class SparseAssetProbeView(ProbeView):
         }
 
 
+class SetProbeView(ProbeView):
+    form_class = ListProbeFixtures.SetForm
+
+    def response_data(self, form, valid, errors):
+        data = super().response_data(form, valid, errors)
+        if valid:
+            data["values"] = sorted(data["values"])
+        return data
+
+
 class RedisplayProbeView(ProbeView):
     def response_data(self, form, valid, errors):
         data = super().response_data(form, valid, errors)
@@ -271,6 +284,7 @@ urlpatterns = [
         "list-submission-probe/",
         ProbeView.as_view(form_class=ListProbeFixtures.SubmissionForm),
     ),
+    path("set-submission-probe/", SetProbeView.as_view()),
     path(
         "disabled-list-probe/",
         ProbeView.as_view(form_class=ListProbeFixtures.DisabledForm),
@@ -1257,6 +1271,7 @@ class TupleFieldTestCase(SimpleTestCase):
         self.assertEqual(context.exception.code, "max_length")
 
 
+@override_settings(ROOT_URLCONF=__name__)
 class SetFieldTestCase(SimpleTestCase):
     def test_cardinality_is_checked_after_deduplication(self):
         """It checks set cardinality after removing duplicates."""
@@ -1268,6 +1283,38 @@ class SetFieldTestCase(SimpleTestCase):
 
         field = nestingdolls.SetField(forms.IntegerField(), max_length=1)
         self.assertEqual(field.clean(["1", "1"]), {1})
+
+    def test_client_deduplicates_before_cardinality_validation(self):
+        def submit(*values):
+            return self.client.post(
+                "/set-submission-probe/",
+                {
+                    f"values-{TOTAL_FORM_COUNT}": str(len(values)),
+                    f"values-{INITIAL_FORM_COUNT}": "0",
+                    **{f"values-{index}": value for index, value in enumerate(values)},
+                },
+            )
+
+        duplicate = submit("1", "1")
+        self.assertEqual(duplicate.status_code, 200)
+        self.assertEqual(
+            duplicate.json(),
+            {"valid": False, "values": None, "errors": {"values": ["min_length"]}},
+        )
+
+        deduplicated = submit("1", "1", "2")
+        self.assertEqual(deduplicated.status_code, 200)
+        self.assertEqual(
+            deduplicated.json(),
+            {"valid": True, "values": [1, 2], "errors": {}},
+        )
+
+        too_many = submit("1", "2", "3")
+        self.assertEqual(too_many.status_code, 200)
+        self.assertEqual(
+            too_many.json(),
+            {"valid": False, "values": None, "errors": {"values": ["max_length"]}},
+        )
 
     def test_frozen_set_field_is_an_immutable_set_variant(self):
         """It exposes a frozenset variant of the set field."""

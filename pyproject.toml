@@ -45,7 +45,6 @@ dev = [
     "mypy",
     "django-stubs",
     "twine",
-    "prek>=0.4.13",
 ]
 
 [tool.setuptools]
