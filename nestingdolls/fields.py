@@ -154,8 +154,8 @@ class MappingField(CompositeField):
             raise TypeError("bound_field_class must inherit from MappingBoundField")
         super().__init__(
             required=required,
-            # Django accepts a widget class and copies the instance. The call
-            # to configure() below makes that copy match this field.
+            # Django accepts a widget class and copies the instance. The
+            # assignment below makes that copy match this field.
             widget=widget or MappingWidget,
             label=label,  # type: ignore[arg-type]
             initial=initial,
@@ -173,7 +173,7 @@ class MappingField(CompositeField):
             raise TypeError("widget must be a MappingWidget instance or subclass")
         # Configure the copy that Django made, not the widget that the caller
         # gave.
-        self.widget.configure(form_class)
+        self.widget.form_class = form_class
         self.output = self._build_output(output)
 
     def initial_value(self, value: object) -> dict[str, object]:
@@ -584,8 +584,8 @@ class SequenceField(CompositeField):
             raise TypeError("bound_field_class must inherit from SequenceBoundField")
         super().__init__(
             required=required,
-            # Django accepts a widget class and copies the instance. The call
-            # to configure() below makes that copy match this field.
+            # Django accepts a widget class and copies the instance. The
+            # assignments below make that copy match this field.
             widget=widget or SequenceWidget,
             label=label,  # type: ignore[arg-type]
             initial=initial,
@@ -602,36 +602,23 @@ class SequenceField(CompositeField):
         if not isinstance(self.widget, SequenceWidget):
             raise TypeError("widget must be a SequenceWidget instance or subclass")
         # Configure the copy that Django made, not the widget that the caller
-        # gave.
-        self.widget.configure(self.child_field, self.limits)
+        # gave. Assign limits before child_field: the child_field setter
+        # drops the cached row formset class, and the next build reads these
+        # limits.
+        self.widget.limits = self.limits
+        self.widget.child_field = self.child_field
 
     def __deepcopy__(self, memo: dict[int, object]) -> Self:
-        """Copy this field, its child field, and the link between them.
+        """Copy this field and keep it linked to its widget's child copy.
 
-        Django deep-copies each field for each form. ``Widget.__deepcopy__``
-        makes only a shallow copy. It does not follow ``child_field``.
-        ``Field.__deepcopy__`` alone returns a widget that still points
-        at the original child field. Two forms then share one child
-        field and its widget. This method re-points the copy, to break
-        that sharing.
-
-        ``result.widget.limits`` needs no such fix. It is a frozen
-        ``slots`` dataclass and holds no per-form state.
+        ``Field.__deepcopy__`` makes a shallow copy of the field, so the
+        copy still names the source child field. The widget deep-copies
+        its child through ``memo`` (``SequenceWidget.__deepcopy__``), so
+        the deepcopy below returns that same object, and the field and
+        its widget copy share one new child.
         """
         result = super().__deepcopy__(memo)
         result.child_field = copy.deepcopy(self.child_field, memo)
-        # Point the widget copy at the new child directly. Do not call
-        # configure() here: it removes the cached formset class, and this
-        # copy must keep that cache. The cache is only for speed; the code
-        # is correct with configure() and a rebuilt class. The cached class
-        # names the field that the new child was deep-copied from. Each row
-        # form deep-copies that field again, so the shared class moves no
-        # state between forms. Without the cache, each nested row form
-        # builds two new classes. pathological.py measured that cost: about
-        # 15 percent of the widest hostile request's wall time and about 20
-        # percent of its peak memory. The widget copy keeps limits: the
-        # shallow copy carries the same frozen object.
-        result.widget.child_field = result.child_field
         return result
 
     def initial_values(

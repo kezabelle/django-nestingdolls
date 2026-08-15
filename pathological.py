@@ -121,8 +121,9 @@ separates it: both cases build 2,000 rows and both pay it. It is bounded by the
 row budget, which is what bounds rows built. Do not try to flatten it by
 sharing fields across rows. ``get_context`` writes to a management field's
 widget attributes, ``_row_context`` assigns each row's ``render_state``, and
-``configure`` writes to the widget; sharing widgets between rows is the
-cross-request contamination ``MappingWidget.__deepcopy__`` exists to prevent.
+the field writes its configuration to the widget; sharing widgets between
+rows is the cross-request contamination ``MappingWidget.__deepcopy__`` exists
+to prevent.
 
 What was reduced, and what is left
 ----------------------------------
@@ -212,14 +213,14 @@ One row formset class per level, not two per row
 Every nested row form deep-copies its sequence field, and Django's
 ``Field.__deepcopy__`` copies the widget with ``copy.copy``, so each copy
 already carried the formset class its source widget had cached -- and then
-``configure()`` discarded it. Every outer row therefore built two fresh
-classes, a ``Row`` form class and its formset class: about 1,000 classes for
-the 998-key spread case and about 4,000 for the eight-sibling case, per
-request. ``cProfile`` undersold this cost, because class creation runs mostly
-in C; the wall clock and ``tracemalloc`` did not.
+the old reconfiguration step discarded it. Every outer row therefore built
+two fresh classes, a ``Row`` form class and its formset class: about 1,000
+classes for the 998-key spread case and about 4,000 for the eight-sibling
+case, per request. ``cProfile`` undersold this cost, because class creation
+runs mostly in C; the wall clock and ``tracemalloc`` did not.
 
-``SequenceField.__deepcopy__`` now puts the carried class back after
-``configure()``, and ``formset_class`` builds the child sequence's class
+``SequenceWidget.__deepcopy__`` now copies the child field and keeps the
+carried class, and ``formset_class`` builds the child sequence's class
 before any row form copies the child field. The class only names the deepcopy
 source of each row's field, and nothing writes to that field, so the shared
 class moves no mutable state between rows. The sharing also cannot cross a

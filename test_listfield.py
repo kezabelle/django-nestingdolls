@@ -2132,13 +2132,14 @@ class SequenceFieldCopyTestCase(SimpleTestCase):
         self.assertIsNot(first.child_field, second.child_field)
         self.assertIs(first.widget.formset_class, second.widget.formset_class)
 
-    def test_configure_with_a_new_child_field_rebuilds_the_class(self):
-        """A widget configured with a new child field builds a new class.
+    def test_a_new_child_field_assignment_rebuilds_the_class(self):
+        """A widget assigned a new child field builds a new class.
 
         The deep-copy path keeps the cached class only because its new
-        child is a copy of the field that the class names. ``configure()``
-        gets a child with no such relation, so it must remove the cache,
-        or the widget builds rows from the old child field.
+        child is a copy of the field that the class names. A
+        ``child_field`` assignment brings a child with no such relation,
+        so the setter must remove the cache, or the widget builds rows
+        from the old child field.
         """
         field = nestingdolls.ListField(forms.CharField(), required=False)
         widget = field.widget
@@ -2146,7 +2147,7 @@ class SequenceFieldCopyTestCase(SimpleTestCase):
         self.assertIs(old_class.form.base_fields["value"], field.child_field)
 
         new_child = forms.IntegerField()
-        widget.configure(new_child, field.limits)
+        widget.child_field = new_child
 
         self.assertIsNot(widget.formset_class, old_class)
         self.assertIs(widget.formset_class.form.base_fields["value"], new_child)
@@ -2982,6 +2983,21 @@ class PublicApiTestCase(SimpleTestCase):
         self.assertEqual(field.widget.limits.max_length, 2)
         self.assertEqual(field.absolute_max, 3)
         self.assertEqual(field.widget.limits.absolute_max, field.absolute_max)
+
+    def test_a_reused_widget_rebuilds_for_its_new_field(self):
+        """A reused widget's new field builds a class from its own child."""
+        first = nestingdolls.ListField(forms.CharField(), required=False)
+        stale = first.widget.formset_class
+
+        second = nestingdolls.ListField(
+            forms.IntegerField(), required=False, widget=first.widget
+        )
+
+        self.assertIsNot(second.widget.formset_class, stale)
+        self.assertIs(
+            second.widget.formset_class.form.base_fields["value"], second.child_field
+        )
+        self.assertIs(first.widget.formset_class, stale)
 
 
 if __name__ == "__main__":  # pragma: no cover

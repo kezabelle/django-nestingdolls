@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar, Token
@@ -142,14 +143,6 @@ class MappingWidget(CompositeWidget):
         initial_error: str | None = None
 
     render_state: RenderState = RenderState()
-
-    def configure(self, form_class: type[BaseForm]) -> None:
-        """Store the configuration of the field that owns this widget.
-
-        Django copies a widget before a field uses it, so the field calls this
-        method on its own copy.
-        """
-        self.form_class = form_class
 
     @cached_property
     def fields(self) -> dict[str, Field]:
@@ -333,7 +326,7 @@ class SequenceWidget(CompositeWidget):
 
     _template_name = "nestingdolls/sequence/{layout}.html"
     use_fieldset = True
-    child_field: Field
+    _child_field: Field
     limits: SequenceField.Limits
 
     class RowForm(Form):
@@ -555,11 +548,54 @@ class SequenceWidget(CompositeWidget):
 
         js = ("nestingdolls/sequence.js",)
 
-    def configure(self, child_field: Field, limits: SequenceField.Limits) -> None:
-        """Store the configuration of this field's private widget copy."""
-        self.child_field = child_field
-        self.limits = limits
+    @property
+    def child_field(self) -> Field:
+        """Return the field that builds each row."""
+        return self._child_field
+
+    @child_field.setter
+    def child_field(self, value: Field) -> None:
+        """Point this widget at a new child field and drop the cached class.
+
+        The cached row formset class names the old child field and its
+        old limits, so assign ``limits`` before ``child_field``: the
+        next build after this pop must read the new values.
+        ``__deepcopy__`` writes ``_child_field`` directly to keep the
+        cache; its docstring says why that one path is safe.
+        """
+        self._child_field = value
         self.__dict__.pop("formset_class", None)
+
+    def __deepcopy__(self, memo: dict[int, object]) -> Self:
+        """Copy this widget, its child field, and the cached class together.
+
+        ``Widget.__deepcopy__`` makes only a shallow ``copy.copy``. It
+        does not follow ``child_field``, so two forms would share one
+        child field and its widget. Copy the child through ``memo``
+        here, so a field copy that deep-copies its own child in the
+        same pass gets this same object back and stays linked to its
+        widget.
+
+        Write ``_child_field`` directly: the ``child_field`` setter
+        drops the cached row formset class, and this copy must keep it.
+        The class only names the deepcopy source of the new child, and
+        each row form deep-copies that field again, so the shared class
+        moves no mutable state between forms. A rebuild instead costs
+        about 15 percent of the widest hostile request's wall time and
+        2.6 MB of its peak allocation; pathological.py records the
+        measurement. ``limits`` needs no copy: it is a frozen slots
+        dataclass with no per-form state, and the shallow copy already
+        carries it. A widget with no child field yet copies clean,
+        because ``Field.__init__`` deep-copies a supplied widget
+        instance before the field assigns its configuration.
+        """
+        result = super().__deepcopy__(memo)
+        try:
+            child_field = self._child_field
+        except AttributeError:
+            return result
+        result._child_field = copy.deepcopy(child_field, memo)  # noqa: SLF001
+        return result
 
     @cached_property
     def formset_class(self) -> type[RowFormSet]:
