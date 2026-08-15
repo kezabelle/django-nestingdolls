@@ -35,7 +35,7 @@ claims that must hold live in the ``Case`` entries below and in
 ``HostileCleanCostTestCase`` in ``test_hostile.py``.
 
 Provenance of the recorded run: Apple M1 Pro, macOS 24.3.0, CPython 3.12.12,
-Django 6.1, 2026-08-13. The "before" figures came from commit acb16e4, the last
+Django 6.1, 2026-08-15. The "before" figures came from commit acb16e4, the last
 commit before the row budget covered extraction. Rebuild that comparison rather
 than trusting the figures:
 
@@ -44,9 +44,10 @@ than trusting the figures:
     cd /tmp/before && BENCH_ABORT=6 uv run --group dev python pathological.py
 
 The timing figures have their own "before", the commit preceding the one that
-removed the per-key work described under "What was reduced, and what is left".
-Rebuild it the same way. Row counts and verdicts are identical across that
-change, so only the seconds column moves.
+removed the repeated work described under "Two repeats that change detection
+and the mapping render paid". Rebuild it the same way. Verdicts are identical
+across that change, and so is every built figure except the mapping render's,
+which fell from two budgets of rows to one.
 
 What the recorded run showed
 ----------------------------
@@ -55,12 +56,12 @@ nine reach rows through change detection, an ``empty_permitted`` form, a render,
 a hidden initial, or a mapping, and every one of them was still building rows
 when the abort timer killed it, at 6s and again at 20s.
 
-    a claim 498x wider  ->  rows built x1.0,  wall time x3.0
+    a claim 498x wider  ->  rows built x1.0,  wall time x2.6
 
 Rows built stayed flat at one budget per entry point. A 998-key claim for 996,498
 rows was answered with 2,000 rows in about 0.08s, and the same claim spread over
 three or five levels cost no more, because levels share one budget instead of
-each getting a fresh one. Peak allocation stayed between 5 and 71 MB.
+each getting a fresh one. Peak allocation stayed between 5 and 45 MB.
 
 Verdicts differ by shape and all three are correct. A plain nested sequence
 reports ``too_many_forms``. A sequence inside a mapping reports ``item_invalid``,
@@ -75,7 +76,7 @@ cannot raise either bound:
 - About 0.08s for the widest single-field case, against 0.03s for a 4-key claim
   asking for the same number of rows. Rows built are identical, so what is left
   of the difference is per-key work. See the next section.
-- About 0.61s and 16,000 rows for a form with eight sibling nested sequence
+- About 0.33s and 16,000 rows for a form with eight sibling nested sequence
   fields, which is budget x fields x entry points. The field count is fixed by
   the form's author, the same position Django takes for ``absolute_max`` per
   formset. Quote this number, not the 0.08s, as the per-request ceiling.
@@ -112,7 +113,7 @@ On the recorded run no function in this package appears in the top ten of
 either contrast profile, and ``str.startswith`` is down from 2.7 million calls
 to about 2,000. What is left in both is Django's own per-row form construction:
 ``copy.deepcopy`` of ``base_fields`` in ``BaseForm.__init__`` and the
-``Field.__deepcopy__`` chain under it, about 0.41s of the 1.16s profiled
+``Field.__deepcopy__`` chain under it, about 0.45s of the 0.88s profiled
 ``8 sibling`` request.
 
 That is per-row cost, not per-key cost, so the contrast pair no longer
@@ -173,6 +174,62 @@ index preserves it by excluding each row's own delete key and nothing else, so
 a nested row's delete key, ``values-3-0-DELETE``, still counts as content for
 row ``values-3`` exactly as the scan did. Verify with ``make test`` and this
 script, then re-record the numbers above.
+
+Two repeats that change detection and the mapping render paid
+-------------------------------------------------------------
+Both fixes live in ``boundfield.py``. Both remove work whose result nothing
+read, partly for performance and efficiency, and neither moves a verdict. The
+only built figure that moves is the mapping render's.
+
+``SequenceBoundField._has_changed`` read ``formset.deleted_forms`` on every
+bound sequence, and Django's ``deleted_forms`` answers by running
+``is_valid()`` first: a full validation pass over every row form, during
+change detection. Only the deletion of an initial row can make that read
+report a change, so a field with no initial rows now returns before it. A
+hostile submission carries no initial rows, so that pass was waste on every
+entry order this script measures: cleaning either raises ``too_many_forms``
+before it reads row errors, or an ``empty_permitted`` form skips its fields
+entirely. A field with initial rows still pays it, and must: deleting an
+initial row is a change that nothing else reports.
+
+The mapping render built a row formset it never read. ``BoundField.as_widget``
+always computes ``value()``, and the base behavior extracts the whole mapping
+to compute it -- for a nested sequence, a fresh row formset holding a full
+budget of rows -- while ``MappingWidget.get_context`` renders from
+``render_state.subform`` and ignores the computed value.
+``MappingBoundField.value()`` now returns the initial value when the subform
+owns the bound data, the same decision ``SequenceBoundField.value()`` already
+made for rows. A scalar or missing submission binds no subform and keeps the
+base behavior, because the user must see that submission again;
+``test_dictfield`` holds that line. ``inside a mapping, changed + render``
+therefore builds one budget of rows, not two.
+
+Verify both with ``make test`` and this script, then re-record the numbers
+above.
+
+One row formset class per level, not two per row
+------------------------------------------------
+Every nested row form deep-copies its sequence field, and Django's
+``Field.__deepcopy__`` copies the widget with ``copy.copy``, so each copy
+already carried the formset class its source widget had cached -- and then
+``configure()`` discarded it. Every outer row therefore built two fresh
+classes, a ``Row`` form class and its formset class: about 1,000 classes for
+the 998-key spread case and about 4,000 for the eight-sibling case, per
+request. ``cProfile`` undersold this cost, because class creation runs mostly
+in C; the wall clock and ``tracemalloc`` did not.
+
+``SequenceField.__deepcopy__`` now puts the carried class back after
+``configure()``, and ``formset_class`` builds the child sequence's class
+before any row form copies the child field. The class only names the deepcopy
+source of each row's field, and nothing writes to that field, so the shared
+class moves no mutable state between rows. The sharing also cannot cross a
+request: a cache is warm only on per-request field copies, never on a form
+class's own field. Classes per request fell from two per row to two per
+level, 998 -> 2 on the spread case. That was worth about 15 percent of the
+spread case's wall time (0.068s -> 0.057s minimum over nine posts) and 2.6 MB
+of every wide case's peak allocation (11.6 -> 9.0 MB), and the wall-time
+amplification fell from x3.0 to x2.6. Verdicts and every ``built`` figure are
+unchanged, which ``make test`` and this script confirmed.
 
 Slice comparisons, not startswith
 ---------------------------------

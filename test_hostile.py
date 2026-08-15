@@ -1338,6 +1338,71 @@ class HostileCleanCostTestCase(HostileClientTestCase):
         # rows it was sent, and change detection does not double the work.
         self.assertLessEqual(len(built), 16, len(built))
 
+    def test_change_detection_without_initial_rows_validates_no_row_form(self):
+        """Change detection answers from extracted values alone.
+
+        ``SequenceBoundField._has_changed`` compares extracted values, and
+        only the deletion of an initial row can report a change beyond
+        that comparison. Django's ``deleted_forms`` validates every row
+        form before it answers. With no initial rows that validation
+        cannot change the answer, so the bound field returns before the
+        read, partly for performance and efficiency: Django calls
+        ``has_changed()`` itself for every ``empty_permitted`` form, and
+        a hostile submission carries no initial rows, so the validation
+        pass would be unread work on every rejection this class measures.
+        ``test_listfield`` holds the other side of the boundary: with
+        initial rows, a delete mark must still report a change.
+        """
+        payload = self._amplified_sequence_payload(
+            "values", outer_total=2, inner_total=3
+        )
+        form = SequenceHostileFixtures.NestedTextListForm(payload)
+
+        validations = []
+        formset_class = nestingdolls.SequenceWidget.RowFormSet
+        original = formset_class.full_clean
+
+        def counting(inner_self, *args, **kwargs):
+            validations.append(inner_self.prefix)
+            return original(inner_self, *args, **kwargs)
+
+        # full_clean is inherited, so remove the wrapper to restore it.
+        formset_class.full_clean = counting
+        self.addCleanup(delattr, formset_class, "full_clean")
+
+        self.assertIs(form.has_changed(), False)
+        self.assertEqual(validations, [])
+
+    def test_rendering_a_bound_mapping_builds_no_second_row_formset(self):
+        """Rendering a bound mapping reuses the rows that cleaning built.
+
+        ``BoundField.as_widget`` always computes ``value()``, and the base
+        behavior extracts the whole mapping to compute it, which builds a
+        fresh row formset for each nested sequence.
+        ``MappingWidget.get_context`` renders from the bound child Form
+        and never reads that value, so ``MappingBoundField.value()``
+        returns the initial value when the child Form owns the bound
+        data, partly for performance and efficiency: the render of a
+        rejected submission would otherwise pay a second full row budget,
+        and ``pathological.py`` measures that page.
+        """
+        payload = {
+            f"value-rows-{TOTAL_FORM_COUNT}": "2",
+            f"value-rows-{INITIAL_FORM_COUNT}": "0",
+            "value-rows-0": "1",
+            "value-rows-1": "2",
+        }
+        form = MappingHostileFixtures.MappingListForm(payload)
+        built = self._count_rows_built()
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        rows_from_cleaning = len(built)
+        self.assertGreater(rows_from_cleaning, 0)
+
+        form.as_p()
+
+        self.assertEqual(len(built), rows_from_cleaning)
+
 
 @override_settings(ROOT_URLCONF=__name__)
 class HostileMappingSpellingTestCase(HostileClientTestCase):

@@ -35,18 +35,16 @@ class ReminderForm(forms.Form):
 
 
 # These names match the rendered inputs.
-browser_form = ReminderForm(
-    QueryDict('window-start_hour=9&window-duration_minutes=45')
-)
+browser_form = ReminderForm(QueryDict("window-start_hour=9&window-duration_minutes=45"))
 
 # A worker, API adapter, or test can pass the whole value instead.
-python_form = ReminderForm({'window': {'start_hour': 9, 'duration_minutes': 45}})
+python_form = ReminderForm({"window": {"start_hour": 9, "duration_minutes": 45}})
 
 for form in (browser_form, python_form):
     assert form.is_valid()
-    assert form.cleaned_data['window'] == {
-        'start_hour': 9,
-        'duration_minutes': 45,
+    assert form.cleaned_data["window"] == {
+        "start_hour": 9,
+        "duration_minutes": 45,
     }
 ```
 
@@ -67,15 +65,15 @@ class ReorderForm(forms.Form):
 
 browser_form = ReorderForm(
     QueryDict(
-        'quantities-TOTAL_FORMS=2&quantities-INITIAL_FORMS=0&'
-        'quantities-0=2&quantities-1=3'
+        "quantities-TOTAL_FORMS=2&quantities-INITIAL_FORMS=0&"
+        "quantities-0=2&quantities-1=3"
     )
 )
-python_form = ReorderForm({'quantities': [2, '3']})
+python_form = ReorderForm({"quantities": [2, "3"]})
 
 for form in (browser_form, python_form):
     assert form.is_valid()
-    assert form.cleaned_data['quantities'] == [2, 3]
+    assert form.cleaned_data["quantities"] == [2, 3]
 ```
 
 ### Validate decoded JSON, YAML, or CSV
@@ -91,12 +89,12 @@ import yaml
 
 
 json_form = ReorderForm(json.loads('{"quantities": [2, 3]}'))
-yaml_form = ReorderForm(yaml.safe_load('quantities:\n  - 2\n  - 3'))
-csv_form = ReorderForm({'quantities': next(csv.reader(['2,3']))})
+yaml_form = ReorderForm(yaml.safe_load("quantities:\n  - 2\n  - 3"))
+csv_form = ReorderForm({"quantities": next(csv.reader(["2,3"]))})
 
 for form in (json_form, yaml_form, csv_form):
     assert form.is_valid()
-    assert form.cleaned_data['quantities'] == [2, 3]
+    assert form.cleaned_data["quantities"] == [2, 3]
 ```
 
 Use `yaml.safe_load`, not `yaml.load`. The decoder owns input-size and
@@ -112,9 +110,9 @@ class TagsForm(forms.Form):
     tags = nestingdolls.FrozenSetField(forms.IntegerField(), min_length=1)
 
 
-form = TagsForm({'tags': [1, '2', 1]})
+form = TagsForm({"tags": [1, "2", 1]})
 assert form.is_valid()
-assert form.cleaned_data['tags'] == frozenset({1, 2})
+assert form.cleaned_data["tags"] == frozenset({1, 2})
 ```
 
 Use `output=` when your application wants a domain type rather than a plain
@@ -146,13 +144,11 @@ class PlotForm(forms.Form):
     origin = nestingdolls.NamedTupleField(PointForm, output=PointTuple)
 
 
-form = PlotForm(
-    {'point': {'x': 2, 'y': '3'}, 'origin': {'x': 0, 'y': 0}}
-)
+form = PlotForm({"point": {"x": 2, "y": "3"}, "origin": {"x": 0, "y": 0}})
 
 assert form.is_valid()
-assert form.cleaned_data['point'] == Point(x=2, y=3)
-assert form.cleaned_data['origin'] == PointTuple(x=0, y=0)
+assert form.cleaned_data["point"] == Point(x=2, y=3)
+assert form.cleaned_data["origin"] == PointTuple(x=0, y=0)
 ```
 
 ### Compose fields and show an initial value
@@ -180,19 +176,19 @@ class ConferenceForm(forms.Form):
 
 
 agenda = {
-    'host': 'Ada',
-    'sessions': [
-        {'room': 'Aster', 'seats': 20},
-        {'room': 'Birch', 'seats': '35'},
+    "host": "Ada",
+    "sessions": [
+        {"room": "Aster", "seats": 20},
+        {"room": "Birch", "seats": "35"},
     ],
 }
 
-bound = ConferenceForm({'agenda': agenda})
-redisplay = ConferenceForm(initial={'agenda': agenda})
+bound = ConferenceForm({"agenda": agenda})
+redisplay = ConferenceForm(initial={"agenda": agenda})
 
 assert bound.is_valid()
-assert bound.cleaned_data['agenda']['sessions'][1]['seats'] == 35
-assert redisplay['agenda'].initial == agenda
+assert bound.cleaned_data["agenda"]["sessions"][1]["seats"] == 35
+assert redisplay["agenda"].initial == agenda
 ```
 
 ### Keep files with their row metadata
@@ -290,7 +286,7 @@ Add `'nestingdolls'` to `INSTALLED_APPS` for the normal setup:
 ```python
 INSTALLED_APPS = [
     # ...
-    'nestingdolls',
+    "nestingdolls",
 ]
 ```
 
@@ -308,26 +304,26 @@ from pathlib import Path
 import nestingdolls
 
 
-NESTINGDOLLS_TEMPLATE_DIR = Path(nestingdolls.__file__).parent / 'templates'
+NESTINGDOLLS_TEMPLATE_DIR = Path(nestingdolls.__file__).parent / "templates"
 
 INSTALLED_APPS = [
     # ...
-    'django.forms',
+    "django.forms",
 ]
 
 TEMPLATES = [
     {
-        'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [
-            BASE_DIR / 'templates',
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [
+            BASE_DIR / "templates",
             NESTINGDOLLS_TEMPLATE_DIR,
         ],
-        'APP_DIRS': True,
+        "APP_DIRS": True,
         # Keep existing OPTIONS and other configuration here.
     },
 ]
 
-FORM_RENDERER = 'django.forms.renderers.TemplatesSetting'
+FORM_RENDERER = "django.forms.renderers.TemplatesSetting"
 ```
 
 ### Display errors

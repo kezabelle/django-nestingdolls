@@ -564,6 +564,14 @@ class SequenceWidget(CompositeWidget):
     @cached_property
     def formset_class(self) -> type[RowFormSet]:
         """Build the row formset class from this widget's child and limits."""
+        child_widget = self.child_field.widget
+        if isinstance(child_widget, SequenceWidget):
+            # This read is only for speed. The code is correct without it.
+            # The read builds the child sequence's class and caches it
+            # before any row form deep-copies the child field.
+            # SequenceField.__deepcopy__ then gives each copy that one
+            # cached class. Without this, each row builds two new classes.
+            _ = child_widget.formset_class
         row_form = type("Row", (self.RowForm,), {"value": self.child_field})
         return cast(
             "type[SequenceWidget.RowFormSet]",

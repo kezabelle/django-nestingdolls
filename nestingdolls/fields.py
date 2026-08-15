@@ -616,7 +616,18 @@ class SequenceField(CompositeField):
         """
         result = super().__deepcopy__(memo)
         result.child_field = copy.deepcopy(self.child_field, memo)
-        result.widget.configure(result.child_field, result.limits)
+        # Point the widget copy at the new child directly. Do not call
+        # configure() here: it removes the cached formset class, and this
+        # copy must keep that cache. The cache is only for speed; the code
+        # is correct with configure() and a rebuilt class. The cached class
+        # names the field that the new child was deep-copied from. Each row
+        # form deep-copies that field again, so the shared class moves no
+        # state between forms. Without the cache, each nested row form
+        # builds two new classes. pathological.py measured that cost: about
+        # 15 percent of the widest hostile request's wall time and about 20
+        # percent of its peak memory. The widget copy keeps limits: the
+        # shallow copy carries the same frozen object.
+        result.widget.child_field = result.child_field
         return result
 
     def initial_values(

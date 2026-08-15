@@ -1035,6 +1035,34 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
 
         self.assertIs(ErrorForm({"values": ["1"]}).has_changed(), True)
 
+    def test_deleting_an_initial_row_is_a_change(self):
+        """A delete mark on an initial row reports a change on its own.
+
+        The resubmitted values match the initial values, so value
+        comparison reports no change. Only ``formset.deleted_forms`` can
+        report the deletion, and ``SequenceBoundField._has_changed``
+        reads it only when initial rows exist, because that read
+        validates every row form. This test holds the boundary of that
+        skip: a deletion missed here would skip the save that removes
+        the row.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        data = {
+            f"values-{TOTAL_FORM_COUNT}": "2",
+            f"values-{INITIAL_FORM_COUNT}": "2",
+            "values-0": "1",
+            "values-1": "2",
+        }
+        initial = {"values": [1, 2]}
+        self.assertIs(Form(data, initial=initial).has_changed(), False)
+
+        deleted = dict(data)
+        deleted[f"values-1-{DELETION_FIELD_NAME}"] = "1"
+        self.assertIs(Form(deleted, initial=initial).has_changed(), True)
+
     def test_to_python_rejects_errors_as_values(self):
         """It rejects validation errors passed in as raw values."""
         field = nestingdolls.ListField(forms.IntegerField())
@@ -2011,6 +2039,106 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
         error = context.exception.error_list[0]
         self.assertEqual(error.code, "item_invalid")
         self.assertEqual(error.params["child_code"], "too_many_forms")
+
+
+class SequenceFieldCopyTestCase(SimpleTestCase):
+    """What a deep copy of a nested sequence field shares, and what it does not.
+
+    ``SequenceField.__deepcopy__`` keeps the row formset class that the
+    source widget cached, instead of a rebuild of two classes for each
+    row. These tests hold the lines that make that sharing safe.
+    """
+
+    def test_row_field_copies_share_one_row_formset_class(self):
+        """Every row's field copy shares one cached row formset class.
+
+        The shared class is the performance contract: without it, each
+        nested row form builds two new classes. The row fields and their
+        widgets must stay distinct objects, so no row shares mutable
+        state with another row.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(required=False)),
+                required=False,
+            )
+
+        form = Form(
+            {
+                "values-TOTAL_FORMS": "2",
+                "values-INITIAL_FORMS": "0",
+                "values-0-TOTAL_FORMS": "1",
+                "values-0-INITIAL_FORMS": "0",
+                "values-0-0": "a",
+                "values-1-TOTAL_FORMS": "1",
+                "values-1-INITIAL_FORMS": "0",
+                "values-1-0": "b",
+            }
+        )
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["values"], [["a"], ["b"]])
+
+        first, second = (row.fields["value"] for row in form["values"].formset.forms)
+        self.assertIsNot(first, second)
+        self.assertIsNot(first.widget, second.widget)
+        self.assertIsNot(first.child_field, second.child_field)
+        self.assertIs(first.widget.formset_class, second.widget.formset_class)
+
+    def test_configure_with_a_new_child_field_rebuilds_the_class(self):
+        """A widget configured with a new child field builds a new class.
+
+        The deep-copy path keeps the cached class only because its new
+        child is a copy of the field that the class names. ``configure()``
+        gets a child with no such relation, so it must remove the cache,
+        or the widget builds rows from the old child field.
+        """
+        field = nestingdolls.ListField(forms.CharField(), required=False)
+        widget = field.widget
+        old_class = widget.formset_class
+        self.assertIs(old_class.form.base_fields["value"], field.child_field)
+
+        new_child = forms.IntegerField()
+        widget.configure(new_child, field.limits)
+
+        self.assertIsNot(widget.formset_class, old_class)
+        self.assertIs(widget.formset_class.form.base_fields["value"], new_child)
+
+    def test_a_child_field_change_on_one_form_reaches_its_rows(self):
+        """A change to one form's child field changes that form's own rows.
+
+        The shared class must not cross form instances. Each form's rows
+        must come from that form's own child field chain, so a per-form
+        change stays visible, and one form cannot leak configuration
+        into another form of the same class.
+
+        The form class is local to this test. The scope of the sharing is
+        what this test measures, so no other test may touch this class.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(required=False)),
+                required=False,
+            )
+
+        payload = {
+            "values-TOTAL_FORMS": "1",
+            "values-INITIAL_FORMS": "0",
+            "values-0-TOTAL_FORMS": "1",
+            "values-0-INITIAL_FORMS": "0",
+            "values-0-0": "  padded  ",
+        }
+        # Complete one form lifecycle first. Sharing that crossed form
+        # instances would then be observable in the second form.
+        first = Form(payload)
+        self.assertIs(first.is_valid(), True, first.errors)
+        self.assertEqual(first.cleaned_data["values"], [["padded"]])
+
+        second = Form(payload)
+        second.fields["values"].child_field.child_field.strip = False
+        self.assertIs(second.is_valid(), True, second.errors)
+        self.assertEqual(second.cleaned_data["values"], [["  padded  "]])
 
 
 class SequenceScalarRowTestCase(FormBindingUnitTestCase):

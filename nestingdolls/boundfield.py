@@ -251,6 +251,24 @@ class MappingBoundField(CompositeBoundField):
             ),
         )
 
+    def value(self) -> object:
+        """Let the child Form, not Field.bound_data(), prepare bound values.
+
+        ``MappingWidget.get_context`` renders bound values from ``subform``
+        and does not read the value from this method. The base behavior
+        extracts the whole mapping to compute that unread value, and the
+        extraction builds a second row formset for each nested sequence.
+        Return the initial value instead to remove that unnecessary work,
+        partly for performance and efficiency. ``SequenceBoundField.value``
+        makes the same decision for rows.
+
+        A scalar or missing submission binds no subform. Keep the base
+        behavior for it: the user must see that submission again.
+        """
+        if self.is_bound_subform:
+            return self.initial
+        return super().value()
+
 
 class SequenceBoundField(CompositeBoundField):
     """Bind one sequence to its Django row formset."""
@@ -414,6 +432,13 @@ class SequenceBoundField(CompositeBoundField):
         )
         if changed or self.field.disabled:
             return changed
+        if not self.initial:
+            # Only the deletion of an initial row is a change, and this
+            # field has no initial rows. Django's deleted_forms validates
+            # every row form before it answers, and here that validation
+            # cannot change the answer. Return early to remove that
+            # unnecessary work, partly for performance and efficiency.
+            return False
         deleted_forms = set(self.formset.deleted_forms)
         return any(
             index < len(self.initial)
