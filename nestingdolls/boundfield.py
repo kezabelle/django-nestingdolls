@@ -12,7 +12,12 @@ from django.utils.datastructures import MultiValueDict
 from django.utils.functional import cached_property
 
 from nestingdolls.errors import InvalidInitialValueError, ItemValidationError
-from nestingdolls.widgets import CompositeWidget, MappingWidget, SequenceWidget
+from nestingdolls.widgets import (
+    CompositeWidget,
+    MappingWidget,
+    SequenceWidget,
+    row_value_name,
+)
 
 if TYPE_CHECKING:
     from django.core.files.uploadedfile import UploadedFile
@@ -73,16 +78,15 @@ class CompositeBoundField(BoundField):
     ) -> SafeString:
         """Give the widget the submitted state, then let Django render it."""
         widget = widget or self.field.widget
-        if isinstance(widget, CompositeWidget):
-            if only_initial:
-                # Django propagates a hidden initial only when the exact
-                # html_initial_name key was submitted. A composite hidden
-                # initial spans many keys, so rebuild it here instead.
-                widget.render_state = widget.RenderState(
-                    hidden_initial_value=self._hidden_initial_value(widget)
-                )
-            else:
-                self.prepare_widget(widget)
+        if isinstance(widget, CompositeWidget) and only_initial:
+            # Django propagates a hidden initial only when the exact
+            # html_initial_name key was submitted. A composite hidden
+            # initial spans many keys, so rebuild it here instead.
+            widget.render_state = widget.RenderState(
+                hidden_initial_value=self._hidden_initial_value(widget)
+            )
+        elif isinstance(widget, CompositeWidget):
+            self.prepare_widget(widget)
         return super().as_widget(widget, attrs, only_initial)
 
     def prepare_widget(self, widget: CompositeWidget) -> None:
@@ -170,8 +174,8 @@ class MappingBoundField(CompositeBoundField):
         """Report whether the child Form must bind the data and the files.
 
         A browser sends no file input when the user selects no file. If the
-        initial data holds files, the Form still binds, so that the child
-        ``FileField`` can keep the file or clear it.
+        mapping accepts files and has initial data, the Form still binds.
+        A child ``FileField`` can then keep its file or clear it.
 
         A value that is not a ``Mapping`` means the caller sent a scalar
         under this field's name. There are no children to distribute that
@@ -206,14 +210,16 @@ class MappingBoundField(CompositeBoundField):
         """Return the child Form for the clean step and for the render."""
         is_bound = self.is_bound_subform
         initial = self.initial
-        data, files = self.field.widget.expand_whole_values(
-            self.form.data, self.form.files, self.html_name
-        )
+        data: Mapping[str, object] | None = None
+        files: MultiValueDict[str, UploadedFile[bytes]] | None = None
+        if is_bound:
+            data, expanded_files = self.field.widget.expand_whole_values(
+                self.form.data, self.form.files, self.html_name
+            )
+            files = cast("MultiValueDict[str, UploadedFile[bytes]]", expanded_files)
         subform = self.field.form_class(
-            data=data if is_bound else None,
-            files=cast("MultiValueDict[str, UploadedFile[bytes]]", files)
-            if is_bound
-            else None,
+            data=data,
+            files=files,
             initial=initial if isinstance(initial, dict) else {},
             prefix=self.html_name,
             auto_id=self.form.auto_id,
@@ -258,9 +264,8 @@ class MappingBoundField(CompositeBoundField):
         and does not read the value from this method. The base behavior
         extracts the whole mapping to compute that unread value, and the
         extraction builds a second row formset for each nested sequence.
-        Return the initial value instead to remove that unnecessary work,
-        partly for performance and efficiency. ``SequenceBoundField.value``
-        makes the same decision for rows.
+        Return the initial value instead to remove that unnecessary work.
+        ``SequenceBoundField.value`` makes the same decision for rows.
 
         A scalar or missing submission binds no subform. Keep the base
         behavior for it: the user must see that submission again.
@@ -285,21 +290,12 @@ class SequenceBoundField(CompositeBoundField):
 
     @cached_property
     def is_bound_formset(self) -> bool:
-        """Report whether the browser submission binds the row formset.
-
-        Test the management keys before the row keys. Either one binds the
-        formset, so the answer is the same, but a management-key test is
-        four lookups while a row-key test reads every submitted key.
-        """
+        """Report whether the browser submission binds the row formset."""
         if not self.form.is_bound or self.field.disabled or self.has_whole_value:
             return False
-        widget = self.field.widget
-        for source in (self.form.data, self.form.files):
-            if widget.has_management_keys(
-                source, self.html_name
-            ) or widget.has_row_keys(source, self.html_name):
-                return True
-        return False
+        return self.field.widget.has_formset_keys(
+            self.form.data, self.form.files, self.html_name
+        )
 
     @cached_property
     def has_whole_value(self) -> bool:
@@ -325,14 +321,10 @@ class SequenceBoundField(CompositeBoundField):
     def formset(self) -> BaseFormSet[BaseForm]:
         """Return the cached, prefix-aware row formset for cleaning and rendering."""
         initial_values = self.data if self.has_whole_value else self.initial
-        initial = self.field.widget.initial_rows(initial_values)
-        if (
-            not initial
-            and self.field.required
-            and self.field.limits.min_length == 0
-            and not self.is_bound_formset
-        ):
-            initial = [self.field.widget.empty_initial_row()]
+        if self.is_bound_formset:
+            initial = self.field.widget.initial_rows(initial_values)
+        else:
+            initial = self.field.widget.default_initial_rows(initial_values)
         data: Mapping[str, object] | None
         files: MultiValueDict[str, UploadedFile[bytes]] | None
         if self.has_whole_value and self.form.is_bound and not self.field.disabled:
@@ -364,21 +356,26 @@ class SequenceBoundField(CompositeBoundField):
         formsets. A count of zero is not overflow: the next child must read its
         claim and can make the count negative. See ``pathological.py`` for the
         measured cost.
+
+        One scope covers the whole-value read and the formset read. An
+        earlier version let the whole-value branch return before this
+        scope, so a clipped whole value never recorded overflow and
+        cleaning accepted a submission that lost rows. Keep both reads
+        inside the scope.
         """
-        if self.has_whole_value:
-            return self.field.widget.value_from_datadict(
-                self.form.data, self.form.files, self.html_name
-            )
-        if not self.is_bound_formset:
+        if not self.has_whole_value and not self.is_bound_formset:
             return []
         with self.field.widget.submission_countdown(
             self.field.limits.submission_max
         ) as countdown:
-            remaining = countdown.remaining.get()
-            if remaining < 0:
+            if self.has_whole_value:
+                rows = self.field.widget.value_from_datadict(
+                    self.form.data, self.form.files, self.html_name
+                )
+            elif countdown.remaining.get() < 0:
                 rows = []
             else:
-                rows = [form["value"].data for form in self.formset.forms]
+                rows = [form[row_value_name].data for form in self.formset.forms]
         if countdown.owns_scope and countdown:
             # Extraction ran out. Only the scope that owns the shared
             # counter records it, so cleaning reports one error for the
@@ -417,7 +414,14 @@ class SequenceBoundField(CompositeBoundField):
 
     @cached_property
     def initial(self) -> list[object]:
-        """Return the initial rows of this field."""
+        """Return the initial value as a list of rows.
+
+        This replaces ``BoundField.initial`` because a sequence initial is
+        a collection, not one value. Read no more than ``absolute_max``
+        rows. Keep an unusable value as one row, as the render path does.
+        Remove microseconds from each row when the child widget does not
+        support them, as Django does for one value (ticket #22502).
+        """
         value: object = super().initial
         try:
             value = self.field.initial_values(
@@ -436,13 +440,15 @@ class SequenceBoundField(CompositeBoundField):
 
     def _has_changed(self) -> bool:
         """Report whole-value edits and row-formset deletions."""
+        if self.field.disabled:
+            return False
         changed = (
             self.field.has_changed(self.initial, self.data)
             if self.has_whole_value
             else super()._has_changed()
         )
-        if changed or self.field.disabled:
-            return changed
+        if changed:
+            return True
         if not self.initial:
             # Only the deletion of an initial row is a change, and this
             # field has no initial rows. Django's deleted_forms validates

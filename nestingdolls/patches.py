@@ -32,7 +32,7 @@ class FormLayout(StrEnum):
 
     The value of a member is the file name of the widget template for that
     layout, without the extension. ``CompositeWidget.template_name`` in
-    ``_shared.py`` puts the value into the template path.
+    ``widgets.py`` puts the value into the template path.
     """
 
     div = "div"
@@ -49,16 +49,6 @@ class FormLayout(StrEnum):
         templates.
         """
         return active_form_layout.get() or cls.div
-
-    @staticmethod
-    def set(value: FormLayout) -> object:
-        """Set the layout of the current context and return the reset token.
-
-        Code that renders a widget without a form can select a layout with this
-        method. Give the token to ``active_form_layout.reset()`` after the
-        render.
-        """
-        return active_form_layout.set(value)
 
     @classmethod
     def from_template_name(cls, t: str | None, /) -> FormLayout | None:

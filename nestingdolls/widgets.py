@@ -32,12 +32,20 @@ if TYPE_CHECKING:
     from nestingdolls.fields import SequenceField
 
 
-_MANAGEMENT_NAMES = (
+__all__ = ["MappingWidget", "SequenceWidget"]
+
+
+MANAGEMENT_NAMES = (
     TOTAL_FORM_COUNT,
     INITIAL_FORM_COUNT,
     MIN_NUM_FORM_COUNT,
     MAX_NUM_FORM_COUNT,
 )
+
+
+# The name of the one child field inside each row form. boundfield.py and
+# fields.py read row data under this name too, so it has no underscore.
+row_value_name = "value"
 
 
 def _getlist(data: Mapping[str, object], key: str) -> list[object]:
@@ -124,13 +132,23 @@ class CompositeWidget(Widget):
         files: Mapping[str, object],
         name: str,
     ) -> bool:
-        """Report whether no supported composite input was submitted."""
+        """Report whether no supported composite input was submitted.
+
+        This replaces ``Widget.value_omitted_from_data`` because Django
+        tests only the exact field name, and a composite reads many
+        prefixed keys.
+        """
         return not any(
             self._accepts_key(key, name) for source in (data, files) for key in source
         )
 
     def use_required_attribute(self, initial: object) -> bool:  # noqa: ARG002
-        """Disable the browser required attribute for composite values."""
+        """Report that the browser required attribute never applies.
+
+        This replaces ``Widget.use_required_attribute`` because the
+        composite renders no input of its own. The child Form and the row
+        forms set the attribute for their own inputs.
+        """
         return False
 
     def id_for_label(self, id_: str) -> str:  # noqa: ARG002
@@ -267,8 +285,9 @@ class MappingWidget(CompositeWidget):
 
         The bound field supplies the child Form when the outer form is bound.
         An unbound render gets no Form, and it builds one from the value that it
-        gets. The shared budget covers sequence descendants because Django
-        bounds each formset level, not aggregate nested rows.
+        gets. Each sequence descendant opens its own shared budget when it
+        renders. Django limits each formset level only, not the rows that
+        nesting multiplies.
         """
         context = super().get_context(name, value, attrs)
         widget_context = cast("dict[str, object]", context["widget"])
@@ -350,7 +369,7 @@ class SequenceWidget(CompositeWidget):
 
         def add_prefix(self, field_name: str) -> str:
             """Keep the value field on its row prefix."""
-            if field_name == "value" and self.prefix:
+            if field_name == row_value_name and self.prefix:
                 return self.prefix
             return super().add_prefix(field_name)
 
@@ -499,7 +518,7 @@ class SequenceWidget(CompositeWidget):
         )
 
         def __bool__(self) -> bool:
-            """Report whether this outer scope exceeded its shared allowance."""
+            """Report whether the shared budget ran out while this scope was open."""
             return self.ran_out
 
         @property
@@ -651,7 +670,7 @@ class SequenceWidget(CompositeWidget):
             # SequenceField.__deepcopy__ then gives each copy that one
             # cached class. Without this, each row builds two new classes.
             _ = child_widget.formset_class
-        row_form = type("Row", (self.RowForm,), {"value": self.child_field})
+        row_form = type("Row", (self.RowForm,), {row_value_name: self.child_field})
         return cast(
             "type[SequenceWidget.RowFormSet]",
             formset_factory(
@@ -722,7 +741,7 @@ class SequenceWidget(CompositeWidget):
         child_key = key.removeprefix(f"{name}-")
         if child_key == key or not child_key:
             return False
-        if child_key in _MANAGEMENT_NAMES:
+        if child_key in MANAGEMENT_NAMES:
             return True
         return "0" <= child_key[0] <= "9"
 
@@ -751,10 +770,30 @@ class SequenceWidget(CompositeWidget):
 
     def has_management_keys(self, source: Mapping[str, object], name: str) -> bool:
         """Report whether one source holds any formset management key."""
-        for field_name in _MANAGEMENT_NAMES:
+        for field_name in MANAGEMENT_NAMES:
             if f"{name}-{field_name}" in source:
                 return True
         return False
+
+    def has_formset_keys(
+        self,
+        data: Mapping[str, object],
+        files: Mapping[str, object],
+        name: str,
+    ) -> bool:
+        """Report whether any management or row key binds the row formset.
+
+        Test the management keys of both sources before any row keys.
+        Either kind binds the formset, so the answer is the same, but a
+        management-key test is four lookups for each source while a
+        row-key test reads every submitted key.
+        """
+        return (
+            self.has_management_keys(data, name)
+            or self.has_management_keys(files, name)
+            or self.has_row_keys(data, name)
+            or self.has_row_keys(files, name)
+        )
 
     def value_from_datadict(
         self,
@@ -768,40 +807,60 @@ class SequenceWidget(CompositeWidget):
         forged exact-name key cannot replace submitted rows. Without row
         keys, a whole value wins over management keys alone.
 
+        Read the exact name first. With no exact-name value, row keys
+        and management keys route to the same formset, so the
+        management lookups in ``has_formset_keys`` can answer before a
+        full key scan. An exact-name value needs only the row-key test,
+        because row keys are the one input that outranks it.
+
         One scope covers both ways out. The whole-value branch spends the
         budget on a Python list; the formset branch spends it on rows, and
         keeps it open while each row's value is read, because reading a
         row is what builds the next level down.
         """
         with self.submission_countdown(self.limits.submission_max) as countdown:
-            has_rows = self.has_row_keys(data, name) or self.has_row_keys(files, name)
-            if not has_rows:
-                whole_values = _getlist(data, name) or _getlist(files, name)
-                if whole_values:
-                    values = (
-                        whole_values[0]
-                        if len(whole_values) == 1 and isinstance(whole_values[0], list)
-                        else whole_values
-                    )
-                    return values[: countdown.take(len(values))]
-                if not self.has_management_keys(data, name) and not (
-                    self.has_management_keys(files, name)
-                ):
+            values = _getlist(data, name) or _getlist(files, name)
+            if not values:
+                if not self.has_formset_keys(data, files, name):
                     return []
+            elif not (self.has_row_keys(data, name) or self.has_row_keys(files, name)):
+                if len(values) == 1:
+                    if values[0] is None or values[0] == "":
+                        # A lone empty exact-name value is an empty submission,
+                        # not one blank row. A list such as [""] keeps its
+                        # blank row, so an exact Python whole value still
+                        # validates every row that the caller supplied.
+                        return []
+                    if isinstance(values[0], list):
+                        values = values[0]
+                return values[: countdown.take(len(values))]
             formset = self.new_formset(
                 data=data,
                 files=cast("MultiValueDict[str, UploadedFile[bytes]]", files),
                 prefix=name,
             )
-            return [form["value"].data for form in formset.forms]
+            return [form[row_value_name].data for form in formset.forms]
 
     def initial_rows(self, value: Sequence[object] | None) -> list[dict[str, object]]:
         """Adapt public sequence values to the concrete row form's initial data."""
-        return [{"value": row} for row in value or ()]
+        return [{row_value_name: row} for row in value or ()]
+
+    def default_initial_rows(
+        self, value: Sequence[object] | None
+    ) -> list[dict[str, object]]:
+        """Return initial rows, or one placeholder row for an empty required sequence.
+
+        A required sequence with ``min_length == 0`` must still show one
+        row, so the user can give a value.
+        """
+        initial = self.initial_rows(value)
+        if not initial and self.is_required and self.limits.min_length == 0:
+            initial = [self.empty_initial_row()]
+        return initial
 
     def empty_initial_row(self) -> dict[str, object]:
         """Return the placeholder data for one empty row."""
-        return {"value": None}
+        return {row_value_name: None}
 
     def get_context(
         self,
@@ -821,14 +880,12 @@ class SequenceWidget(CompositeWidget):
             if self.is_hidden and self.render_state.hidden_initial_value is not None:
                 value = cast("Sequence[object]", self.render_state.hidden_initial_value)
             formset = self.render_state.formset
-            if formset is None:
-                initial = self.initial_rows(value)
-                if not initial and self.is_required and self.limits.min_length == 0:
-                    initial = [self.empty_initial_row()]
-                formset = self.new_formset(initial=initial, prefix=name)
-
             if self.render_state.submission_overflow:
                 formset = self.new_formset(initial=[], prefix=name)
+            elif formset is None:
+                formset = self.new_formset(
+                    initial=self.default_initial_rows(value), prefix=name
+                )
 
             management_form = formset.management_form
             if not self.is_hidden:
@@ -894,7 +951,7 @@ class SequenceWidget(CompositeWidget):
             child_attrs["id"] = f"{id_}_{index}"
         if self.child_field.disabled:
             child_attrs["disabled"] = True
-        child = form["value"]
+        child = form[row_value_name]
         child_widget = self._child_widget(child.field)
         if isinstance(child, CompositeBoundField):
             child.prepare_widget(cast("CompositeWidget", child_widget))
@@ -915,7 +972,7 @@ class SequenceWidget(CompositeWidget):
         )
         errors = [
             message
-            for error in form.errors.as_data().get("value", [])
+            for error in form.errors.as_data().get(row_value_name, [])
             for message in error.messages
         ]
         row: dict[str, object] = {
@@ -924,13 +981,14 @@ class SequenceWidget(CompositeWidget):
             "subwidget": subwidget,
             "errors": errors,
         }
-        if errors:
-            child_attrs = cast("dict[str, object]", subwidget["attrs"])
-            child_id = child_attrs.get("id")
-            error_id = f"{child_id}_error" if child_id else None
-            if error_id:
-                row["error_id"] = error_id
-            self._mark_row_invalid(subwidget, error_id)
+        if not errors:
+            return row
+        child_attrs = cast("dict[str, object]", subwidget["attrs"])
+        child_id = child_attrs.get("id")
+        error_id = f"{child_id}_error" if child_id else None
+        if error_id:
+            row["error_id"] = error_id
+        self._mark_row_invalid(subwidget, error_id)
         return row
 
     def _mark_row_invalid(
@@ -955,7 +1013,7 @@ class SequenceWidget(CompositeWidget):
 
     @property
     def is_hidden(self) -> bool:
-        """Report whether the child widget is hidden."""
+        """Report whether the sequence or its child widget is hidden."""
         return super().is_hidden or bool(self.child_field.widget.is_hidden)
 
     @property

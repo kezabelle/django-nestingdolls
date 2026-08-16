@@ -384,9 +384,9 @@ present-key call on the spread payload's QueryDict, and the full pass fell
 406 -> 355 us, x1.14, most of the inline gap, with no special case. Two
 shapes measured worse and stay rejected. Dropping the miss guard entirely
 makes a missing key cost 304 ns against 82 through ``getlist``'s own
-``KeyError`` handling, which is fine where it landed -- only the
-whole-value branch of ``value_from_datadict`` can miss, at most twice per
-extraction, and every hot caller reads a present key -- but is the reason
+``KeyError`` handling, which is fine where it landed -- the
+exact-name read in ``value_from_datadict`` can miss, at most twice per
+extraction, and every per-row caller reads a present key -- but is the reason
 the plain-``dict`` path keeps its ``in`` test: ``try``/``except`` there
 costs 192 ns against 93 on a miss. And ``try``/``except AttributeError``
 instead of ``getattr`` wins 9 ns on ``MultiValueDict`` sources and loses

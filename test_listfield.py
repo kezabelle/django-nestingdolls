@@ -450,6 +450,61 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
             response.content, {"valid": True, "values": [1], "errors": {}}
         )
 
+    def test_exact_name_empty_scalar_has_no_rows(self):
+        """An empty exact-name scalar differs from a supplied blank row."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.CharField(), required=False)
+
+        for value in (None, ""):
+            form = Form({"values": value})
+            self.assertIs(form.is_valid(), True, form.errors)
+            self.assertEqual(form.cleaned_data["values"], [])
+
+        form = Form({"values": [""]})
+        self.assertIs(form.is_valid(), False)
+        self.assertEqual(form.errors.as_data()["values"][0].code, "item_invalid")
+
+    def test_exact_name_empty_mapping_is_one_row(self):
+        """An empty mapping under the exact name remains a supplied row."""
+
+        class Row(forms.Form):
+            value = forms.IntegerField()
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(nestingdolls.DictField(Row), required=False)
+
+        form = Form({"values": {}})
+        self.assertIs(form.is_valid(), False)
+        self.assertEqual(form.errors.as_data()["values"][0].code, "item_invalid")
+
+    def test_exact_name_file_whole_value_binds_rows(self):
+        """A files-only exact-name value supplies whole rows, as data does."""
+
+        class Form(forms.Form):
+            uploads = nestingdolls.ListField(forms.FileField(), required=False)
+
+        upload = SimpleUploadedFile("a.txt", b"a")
+        form = Form(data={}, files=MultiValueDict({"uploads": [upload]}))
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["uploads"], [upload])
+
+    def test_exact_name_list_wins_over_management_keys(self):
+        """A whole list under the exact name outranks management keys alone."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        form = Form(
+            {
+                "values": ["1", "2"],
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+            }
+        )
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["values"], [1, 2])
+
     def test_exact_name_scalar_rendering_normalizes_bound_and_initial_values(self):
         """Whole-value rendering exposes the scalar row as one indexed input."""
 
@@ -1215,6 +1270,42 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
 
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], ["kept"])
+
+    @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
+    def test_bound_whole_value_above_the_shared_cap_reports_too_many_forms(self):
+        """A clipped whole value reports overflow instead of losing rows."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.IntegerField(), required=False, max_length=10, absolute_max=10
+            )
+
+        form = Form({"values": list(range(11))})
+
+        self.assertIs(form.is_valid(), False)
+        error = form.errors.as_data()["values"][0]
+        self.assertEqual(error.code, "too_many_forms")
+        self.assertEqual(error.params["num"], 10)
+
+    def test_deleted_row_errors_stay_out_of_item_errors(self):
+        """A deleted row's errors do not become item errors of the field."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        form = Form(
+            {
+                "values-0": "bad0",
+                f"values-0-{DELETION_FIELD_NAME}": "on",
+                "values-1": "bad1",
+                f"values-{TOTAL_FORM_COUNT}": "2",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+            }
+        )
+
+        self.assertIs(form.is_valid(), False)
+        errors = form.errors.as_data()["values"]
+        self.assertEqual([error.params["item"] for error in errors], [1])
 
 
 class TupleFieldTestCase(SimpleTestCase):

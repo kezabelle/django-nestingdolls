@@ -13,7 +13,7 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.forms import BaseForm, BaseFormSet, Field
 from django.forms.fields import FileField
-from django.forms.formsets import DEFAULT_MAX_NUM, DEFAULT_MIN_NUM
+from django.forms.formsets import DEFAULT_MAX_NUM, DEFAULT_MIN_NUM, DELETION_FIELD_NAME
 from django.utils.functional import Promise, cached_property
 from django.utils.translation import gettext_lazy as _
 from django.utils.translation import ngettext_lazy
@@ -30,7 +30,12 @@ from nestingdolls.errors import (
     SequenceInputValidationError,
     TooManyFormsValidationError,
 )
-from nestingdolls.widgets import CompositeWidget, MappingWidget, SequenceWidget
+from nestingdolls.widgets import (
+    CompositeWidget,
+    MappingWidget,
+    SequenceWidget,
+    row_value_name,
+)
 
 if TYPE_CHECKING:
     from django.forms.boundfield import BoundField
@@ -94,7 +99,12 @@ class MappingField(CompositeField):
 
     @cached_property
     def _declared_field_names(self) -> tuple[str, ...]:
-        """Return the form's declared field names."""
+        """Return the field names that the child Form class declares.
+
+        Read ``base_fields``, not ``widget.fields``. A Form can remove a
+        field in ``__init__``; the output type still declares that name,
+        and ``_compress_with_defaults`` fills it with ``None``.
+        """
         return tuple(
             cast("Mapping[str, Field]", self.form_class.base_fields)  # type: ignore[attr-defined]
         )
@@ -214,15 +224,16 @@ class MappingField(CompositeField):
     def _compress_with_defaults(self, data: dict[str, object]) -> object | None:
         """Call ``self.output`` with every declared name filled from ``data``.
 
-        ``NamedTupleField`` and ``DataclassField`` both build their output this
-        way: every declared name gets ``None`` unless ``data`` supplies it.
+        Return ``None`` when ``data`` is empty. ``NamedTupleField`` and
+        ``DataclassField`` both build their output this way: every declared
+        name gets ``None`` unless ``data`` supplies it.
         """
         if not data:
             return None
         return self.output(**(dict.fromkeys(self._declared_field_names) | data))
 
     def _clean_child_form(self, form: BaseForm) -> object:
-        """Return the cleaned data of the child Form, or raise its errors.
+        """Build this field's output from the child Form, or raise item errors.
 
         Django keeps the leaf messages of a composite error only, so this
         method makes one ``ItemValidationError`` for each message. Each message
@@ -512,16 +523,6 @@ class SequenceField(CompositeField):
     limits: Limits
 
     @property
-    def min_length(self) -> int:
-        """Return the smallest number of items this field accepts."""
-        return self.limits.min_length
-
-    @property
-    def max_length(self) -> int:
-        """Return the largest number of items this field accepts."""
-        return self.limits.max_length
-
-    @property
     def absolute_max(self) -> int:
         """Return the limit on the number of submitted rows."""
         return self.limits.absolute_max
@@ -564,6 +565,7 @@ class SequenceField(CompositeField):
             # Limits does not know about `required`, so this check belongs
             # here.
             raise ValueError("max_length=0 requires required=False")
+        initial_values: list[object] = []
         if initial is not None and not callable(initial):
             try:
                 initial_values = self.initial_values(initial)
@@ -572,8 +574,8 @@ class SequenceField(CompositeField):
                 # into one row instead of raising an error during a
                 # render.
                 initial_values = [initial]
-            if len(initial_values) > max_length:
-                raise ValueError("initial must not contain more than max_length values")
+        if len(initial_values) > max_length:
+            raise ValueError("initial must not contain more than max_length values")
 
         # Copy the child field. Two fields must not share one field instance,
         # because a field holds its widget and its own configuration.
@@ -702,36 +704,44 @@ class SequenceField(CompositeField):
                 "Collection[object]",
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
-        if bound_field.has_whole_value:
-            return self._clean_values(bound_field.data, bound_field.initial)
-        if not bound_field.is_bound_formset:
-            if isinstance(self.child_field, FileField) and bound_field.initial:
-                return self._clean_values(
-                    [None] * len(bound_field.initial), bound_field.initial
-                )
-            return cast(
-                "Collection[object]",
-                super()._clean_bound_field(bound_field),  # type: ignore[misc]
-            )
-
         # Reserve rows once, at extraction, then clean what extraction
         # produced. Reading this flag performs that extraction, so cleaning
-        # is never the step that discovers a forged row count: Django's own
-        # has_changed() already reaches extraction first on any form that
-        # permits empty values. A second scope here would find every row
-        # list already built and could only take rows twice.
+        # is never the step that discovers a forged row count. Check the
+        # flag before the whole-value branch: an earlier version skipped
+        # it there, so a clipped whole value cleaned as valid and lost
+        # the rows past the budget.
         if bound_field.submission_overflow:
             raise TooManyFormsValidationError(
                 self.error_messages["submission_too_many_forms"],
                 num=self.limits.submission_max,
             )
+        if bound_field.has_whole_value:
+            return self._clean_values(bound_field.data, bound_field.initial)
+        if (
+            not bound_field.is_bound_formset
+            and isinstance(self.child_field, FileField)
+            and bound_field.initial
+        ):
+            return self._clean_values(
+                [None] * len(bound_field.initial), bound_field.initial
+            )
+        if not bound_field.is_bound_formset:
+            return cast(
+                "Collection[object]",
+                super()._clean_bound_field(bound_field),  # type: ignore[misc]
+            )
         formset = bound_field.formset
-        valid = formset.is_valid()
-        if not valid:
+        if not formset.is_valid():
             errors: list[ValidationError] = list(formset.non_form_errors().as_data())
             errors.extend(
                 item_error
                 for index, form in enumerate(formset.forms)
+                # A row the user marks for deletion is discarded below, so
+                # its errors must not become item errors. An earlier
+                # version reported them when another row was invalid.
+                # ``deleted_forms`` cannot answer here: Django returns an
+                # empty list from it when the formset is invalid.
+                if not getattr(form, "cleaned_data", {}).get(DELETION_FIELD_NAME)
                 for field_errors in form.errors.as_data().values()
                 for error in field_errors
                 for item_error in ItemValidationError.for_messages_of(index, error)
@@ -745,7 +755,7 @@ class SequenceField(CompositeField):
                 form.empty_permitted and not form.has_changed()
             ):
                 continue
-            cleaned_data.append(form.cleaned_data["value"])
+            cleaned_data.append(form.cleaned_data[row_value_name])
         result = self.compress(cleaned_data)
         self.validate(result)
         self.run_validators(result)
@@ -882,7 +892,7 @@ class SetField(SequenceField):
     """Collect cleaned rows into a deduplicated set-like value."""
 
     default_error_messages = {  # noqa: RUF012
-        "unhashable": _("Set items must be hashable."),
+        "unhashable": _("Enter items that can belong to a set."),
     }
 
     collection_type: Callable[[list[object]], set[object] | frozenset[object]] = set
@@ -896,7 +906,7 @@ class SetField(SequenceField):
                 self.error_messages["unhashable"], code="unhashable"
             ) from error
 
-    def has_changed(self, initial: object, data: object) -> bool:  # noqa: PLR0911
+    def has_changed(self, initial: object, data: object) -> bool:
         """Compare set members; anything ambiguous counts as a change.
 
         Pair each row with the member its converted value hashes to, then
@@ -928,13 +938,12 @@ class SetField(SequenceField):
                 member = paired.get(self.child_field.to_python(row), unmatched)
             except (TypeError, ValidationError):
                 return True
-            if member is unmatched:
-                if self.child_field.has_changed(None, row):
-                    return True
-                continue
-            if self.child_field.has_changed(member, row):
+            if self.child_field.has_changed(
+                None if member is unmatched else member, row
+            ):
                 return True
-            matched.add(member)
+            if member is not unmatched:
+                matched.add(member)
         return len(matched) != len(members)
 
 

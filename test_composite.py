@@ -115,6 +115,17 @@ class CompositeFieldAssertions:
         self.assertEqual(list(form[field_name].errors), ["Outer error."])
         self.assertEqual(form.as_p().count("Outer error."), 1)
 
+    def assertExactNameEmptyStringCleansEmpty(
+        self,
+        form_class: type[forms.Form],
+        field_name: str,
+        expected: object,
+    ) -> None:
+        form = form_class(QueryDict(f"{field_name}="))
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data[field_name], expected)
+
     def assertBoundFieldHidesChildErrors(
         self,
         form_class: type[forms.Form],
@@ -242,6 +253,10 @@ class SequenceCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCa
             [1],
             [3, 4],
         )
+
+    def test_exact_name_empty_string_cleans_empty(self):
+        """A lone empty ``values`` key cleans as an empty list."""
+        self.assertExactNameEmptyStringCleansEmpty(OptionalSequenceForm, "values", [])
 
     def test_outer_validator_error_stays_visible(self):
         """A sequence validator error remains visible at the outer field."""
@@ -430,6 +445,10 @@ class MappingCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCas
             {"a": 1},
             {"a": 3, "label": "whole"},
         )
+
+    def test_exact_name_empty_string_cleans_empty(self):
+        """A lone empty ``point`` key cleans as an empty mapping."""
+        self.assertExactNameEmptyStringCleansEmpty(OptionalMappingForm, "point", {})
 
     def test_outer_validator_error_stays_visible(self):
         """A mapping validator error remains visible at the outer field."""
