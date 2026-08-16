@@ -293,13 +293,11 @@ treatment. The rules the measurements produced:
   calls. Measured at 0.61x: it skips 202 of 998 calls and pays a slice and
   two comparisons on all 998.
 - Trust `getlist`. A mapping that offers it behaves like `MultiValueDict`:
-  it returns a fresh list and `[]` for a missing key, so `_getlist` returns
-  its result directly — no `list()` re-copy, no `in` pre-check on that
-  path, no `cast` frame. Measured 316 -> 237 ns per present-key call and
-  1.14x on the full `rows_with_submitted_values` pass. Do not inline the
-  read past the shared helper: the special case measured 1.21x against the
-  old helper, and the trusted helper closes most of that gap for every
-  caller. pathological.py records both measurements.
+  it returns a fresh list and `[]` for a missing key. Read it once at
+  the source boundary and return its result directly — no `list()` re-copy,
+  no `in` pre-check on that path, and no `cast` frame. A plain mapping has
+  no `getlist`. Read `get()` and retain its value shape. Do not wrap a
+  direct value in a one-item list just to scan it.
 
 `cProfile` counts `startswith` as a call and charges per-call overhead to it,
 while a slice is an opcode and is invisible. Swapping one for the other flatters

@@ -143,14 +143,14 @@ index cached there serves one user another user's POST; and not a module-level
 cache keyed by ``id(source)``, because an identity is reused once the first
 mapping is collected and entries would collide silently.
 
-``has_row_keys``'s repeats came from ``SequenceBoundField.has_whole_value`` and
+``has_row_keys``'s repeats came from ``SequenceBoundField.has_exact_input`` and
 ``is_bound_formset``, one bound field per row. Both are ``cached_property``,
 which is why the caching already there did not help. Both now answer in O(1)
-for a submission carrying management keys and no exact-name key, by testing the
-cheap predicate first: ``is_bound_formset`` tries the four management keys
-before scanning for a row key, and ``has_whole_value`` tries the field's own
-exact key before asking whether row keys outrank it. Neither reordering changes
-an answer, because both predicates are side-effect free.
+for a submission carrying management keys and no exact-name key, by testing
+the cheap predicate first: ``is_bound_formset`` tries the four management
+keys before scanning for a row key, and ``has_exact_input`` tries the field's
+own exact key first. Neither reordering changes an answer, because both
+predicates are side-effect free.
 
 A submission that sends a value under each row's own exact name still pays the
 scan, because then the exact-key test passes. That path is bounded by the row
@@ -366,32 +366,12 @@ every response body was sha256-identical, and rows built stayed at 2,000 and
 16,000. The win is small and real; the reason to record it is the memory
 conclusion above.
 
-One read in the same family was measured twice, and the two verdicts
-differ. Inlining the read into the loop body, past the shared ``_getlist``
-helper, measured x1.21 for the full ``rows_with_submitted_values`` pass and
-stays rejected: the pass runs once per bound formset, not per row, about
-0.14 ms of the 40 ms spread request, and the inlined read is safe only on
-facts local to that one loop. Optimizing the helper itself was worth it,
-because every caller gets it. The ``cast`` it carried was already trust,
-not a check -- the values can be anything, and the annotation asserts they
-arrive as a list -- so the helper stops paying to look defensive.
-``MultiValueDict.getlist`` returns a fresh list (``force_list=True``) and
-``[]`` for a missing key, so the old ``list()`` wrapper was a second copy,
-the old ``in`` pre-check re-tested a key ``getlist`` already handles, and
-the ``cast`` was one Python frame per call. ``_getlist`` now asks for
-``getlist`` first and returns its result directly: 316 -> 237 ns per
-present-key call on the spread payload's QueryDict, and the full pass fell
-406 -> 355 us, x1.14, most of the inline gap, with no special case. Two
-shapes measured worse and stay rejected. Dropping the miss guard entirely
-makes a missing key cost 304 ns against 82 through ``getlist``'s own
-``KeyError`` handling, which is fine where it landed -- the
-exact-name read in ``value_from_datadict`` can miss, at most twice per
-extraction, and every per-row caller reads a present key -- but is the reason
-the plain-``dict`` path keeps its ``in`` test: ``try``/``except`` there
-costs 192 ns against 93 on a miss. And ``try``/``except AttributeError``
-instead of ``getattr`` wins 9 ns on ``MultiValueDict`` sources and loses
-228 ns on every plain-``dict`` call, and Python data is a supported
-source.
+Exact input reads use ``getlist`` when a source offers it and otherwise use
+``get`` unchanged. ``rows_with_submitted_values`` reads ``getlist`` once per
+source. For a plain mapping, it reads the direct value instead of allocating a
+one-item list only to scan it. This keeps scalar and list values distinct for
+direct Python input. The measured spread path uses a ``QueryDict``, so re-run
+the direct-input workload before recording timing figures for that path.
 Verify with ``make test`` and this script, then re-record the numbers above.
 """
 

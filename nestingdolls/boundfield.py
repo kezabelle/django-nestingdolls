@@ -191,14 +191,14 @@ class MappingBoundField(CompositeBoundField):
             widget.has_child_keys(self.form.files, self.html_name)
         ):
             return True
-        # A whole value is the value under this field's own exact key.
-        whole_value = None
+        # An exact value is the value under this field's own name.
+        exact_value = None
         if self.html_name in self.form.data:
-            whole_value = self.form.data.get(self.html_name)
+            exact_value = self.form.data.get(self.html_name)
         elif self.html_name in self.form.files:
-            whole_value = self.form.files.get(self.html_name)
-        if whole_value is not None:
-            return isinstance(whole_value, Mapping)
+            exact_value = self.form.files.get(self.html_name)
+        if exact_value is not None:
+            return isinstance(exact_value, Mapping)
         return (
             isinstance(self.initial, dict)
             and bool(self.initial)
@@ -211,15 +211,14 @@ class MappingBoundField(CompositeBoundField):
         is_bound = self.is_bound_subform
         initial = self.initial
         data: Mapping[str, object] | None = None
-        files: MultiValueDict[str, UploadedFile[bytes]] | None = None
+        files: Mapping[str, object] | None = None
         if is_bound:
-            data, expanded_files = self.field.widget.expand_whole_values(
+            data, files = self.field.widget.expand_exact_inputs(
                 self.form.data, self.form.files, self.html_name
             )
-            files = cast("MultiValueDict[str, UploadedFile[bytes]]", expanded_files)
         subform = self.field.form_class(
             data=data,
-            files=files,
+            files=files,  # type: ignore[arg-type]  # Django accepts a Mapping here.
             initial=initial if isinstance(initial, dict) else {},
             prefix=self.html_name,
             auto_id=self.form.auto_id,
@@ -262,7 +261,7 @@ class MappingBoundField(CompositeBoundField):
 
         ``MappingWidget.get_context`` renders bound values from ``subform``
         and does not read the value from this method. The base behavior
-        extracts the whole mapping to compute that unread value, and the
+        extracts the exact mapping to compute that unread value, and the
         extraction builds a second row formset for each nested sequence.
         Return the initial value instead to remove that unnecessary work.
         ``SequenceBoundField.value`` makes the same decision for rows.
@@ -291,53 +290,42 @@ class SequenceBoundField(CompositeBoundField):
     @cached_property
     def is_bound_formset(self) -> bool:
         """Report whether the browser submission binds the row formset."""
-        if not self.form.is_bound or self.field.disabled or self.has_whole_value:
+        if not self.form.is_bound or self.field.disabled:
             return False
-        return self.field.widget.has_formset_keys(
+        return self.field.widget.is_bound_formset(
             self.form.data, self.form.files, self.html_name
         )
 
     @cached_property
-    def has_whole_value(self) -> bool:
-        """Report whether a whole value sits under this field's own exact key.
+    def has_exact_input(self) -> bool:
+        """Report whether input exists under this field's exact name.
 
-        Submitted row keys outrank the exact key, so a forged exact-name
-        key cannot replace real rows.
-
-        Test the exact key first. With no exact key there is nothing for
-        row keys to outrank, and a row-key test reads every submitted key
-        while this one is a single lookup.
+        Indexed row keys outrank exact input, but exact input still decides
+        whether management keys alone bind the formset.
         """
-        name = self.html_name
-        if name not in self.form.data and name not in self.form.files:
-            return False
-        widget = self.field.widget
-        return not (
-            widget.has_row_keys(self.form.data, name)
-            or widget.has_row_keys(self.form.files, name)
-        )
+        return self.html_name in self.form.data or self.html_name in self.form.files
 
     @cached_property
     def formset(self) -> BaseFormSet[BaseForm]:
         """Return the cached, prefix-aware row formset for cleaning and rendering."""
-        initial_values = self.data if self.has_whole_value else self.initial
-        if self.is_bound_formset:
-            initial = self.field.widget.initial_rows(initial_values)
+        is_bound_formset = self.is_bound_formset
+        initial: list[object] | list[dict[str, object]] = self.initial
+        data: Mapping[str, object] | None = None
+        files: MultiValueDict[str, UploadedFile[bytes]] | None = None
+        if self.has_exact_input and not is_bound_formset:
+            value = self.data
+            if isinstance(value, list):
+                initial = value
+                if self.form.is_bound and not self.field.disabled:
+                    data = self.field.widget.data_from_exact_list(value, self.html_name)
+                    files = MultiValueDict()
+        elif is_bound_formset:
+            data = self.form.data
+            files = self.form.files
+        if is_bound_formset:
+            initial = self.field.widget.initial_rows(initial)
         else:
-            initial = self.field.widget.default_initial_rows(initial_values)
-        data: Mapping[str, object] | None
-        files: MultiValueDict[str, UploadedFile[bytes]] | None
-        if self.has_whole_value and self.form.is_bound and not self.field.disabled:
-            # A whole value carries no prefixed row keys, so the row
-            # formset would otherwise stay unbound and could never show
-            # its own row errors: Django gives an unbound form empty
-            # errors, always, on purpose. Give each row its own key
-            # instead, so the formset binds for real.
-            data = self.field.widget.data_from_whole_value(self.data, self.html_name)
-            files = MultiValueDict()
-        else:
-            data = self.form.data if self.is_bound_formset else None
-            files = self.form.files if self.is_bound_formset else None
+            initial = self.field.widget.default_initial_rows(initial)
         return self.field.widget.new_formset(
             data=data,
             files=files,
@@ -348,34 +336,29 @@ class SequenceBoundField(CompositeBoundField):
         )
 
     @cached_property
-    def data(self) -> list[object]:
-        """Return a whole sequence value or formset row values.
+    def data(self) -> object:
+        """Return exact input or formset row values.
 
         After a child makes the shared submission count negative, later children
         cannot add a row or change the error. Do not construct their empty
         formsets. A count of zero is not overflow: the next child must read its
         claim and can make the count negative. See ``pathological.py`` for the
         measured cost.
-
-        One scope covers the whole-value read and the formset read. An
-        earlier version let the whole-value branch return before this
-        scope, so a clipped whole value never recorded overflow and
-        cleaning accepted a submission that lost rows. Keep both reads
-        inside the scope.
         """
-        if not self.has_whole_value and not self.is_bound_formset:
+        if not self.has_exact_input and not self.is_bound_formset:
             return []
         with self.field.widget.submission_countdown(
             self.field.limits.submission_max
         ) as countdown:
-            if self.has_whole_value:
+            rows: object
+            if self.is_bound_formset:
+                rows = []
+                if countdown.remaining.get() >= 0:
+                    rows = [form[row_value_name].data for form in self.formset.forms]
+            else:
                 rows = self.field.widget.value_from_datadict(
                     self.form.data, self.form.files, self.html_name
                 )
-            elif countdown.remaining.get() < 0:
-                rows = []
-            else:
-                rows = [form[row_value_name].data for form in self.formset.forms]
         if countdown.owns_scope and countdown:
             # Extraction ran out. Only the scope that owns the shared
             # counter records it, so cleaning reports one error for the
@@ -439,14 +422,13 @@ class SequenceBoundField(CompositeBoundField):
         return value
 
     def _has_changed(self) -> bool:
-        """Report whole-value edits and row-formset deletions."""
+        """Report exact-input edits and row-formset deletions."""
         if self.field.disabled:
             return False
-        changed = (
-            self.field.has_changed(self.initial, self.data)
-            if self.has_whole_value
-            else super()._has_changed()
-        )
+        if self.has_exact_input and not self.is_bound_formset:
+            changed = self.field.has_changed(self.initial, self.data)
+        else:
+            changed = super()._has_changed()
         if changed:
             return True
         if not self.initial:

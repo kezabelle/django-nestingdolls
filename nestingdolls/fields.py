@@ -642,13 +642,11 @@ class SequenceField(CompositeField):
         raise InvalidInitialValueError("initial must be a collection of values")
 
     def to_python(self, value: object) -> list[object]:
-        """Return the value as a list, and refuse a value of another type.
+        """Return a list, and refuse every other input shape.
 
-        The widget builds the list of rows. Another type shows that a caller
-        gave whole data of the wrong structure.
+        The widget builds browser rows as a list. Direct callers must supply
+        that same shape.
         """
-        if value is None or value == "":
-            return []
         if not isinstance(value, list):
             raise SequenceInputValidationError(self.error_messages["invalid"])
         return value
@@ -707,16 +705,18 @@ class SequenceField(CompositeField):
         # Reserve rows once, at extraction, then clean what extraction
         # produced. Reading this flag performs that extraction, so cleaning
         # is never the step that discovers a forged row count. Check the
-        # flag before the whole-value branch: an earlier version skipped
-        # it there, so a clipped whole value cleaned as valid and lost
-        # the rows past the budget.
+        # flag before exact-list cleaning: an earlier version skipped it
+        # there, so a clipped exact list cleaned as valid and lost the rows
+        # past the budget.
         if bound_field.submission_overflow:
             raise TooManyFormsValidationError(
                 self.error_messages["submission_too_many_forms"],
                 num=self.limits.submission_max,
             )
-        if bound_field.has_whole_value:
-            return self._clean_values(bound_field.data, bound_field.initial)
+        if bound_field.has_exact_input and not bound_field.is_bound_formset:
+            return self._clean_values(
+                self.to_python(bound_field.data), bound_field.initial
+            )
         if (
             not bound_field.is_bound_formset
             and isinstance(self.child_field, FileField)

@@ -48,32 +48,6 @@ MANAGEMENT_NAMES = (
 row_value_name = "value"
 
 
-def _getlist(data: Mapping[str, object], key: str) -> list[object]:
-    """Read repeated values through Django's mapping protocol.
-
-    Trust the protocol. A mapping that has ``getlist`` behaves like
-    ``MultiValueDict``: it returns a new list, and it returns an empty
-    list for a missing key. So this function returns that list
-    directly, with no copy and no key test. The type ignore states the
-    same trust: the values can be anything, and the annotation asserts,
-    without a check, that they arrive as a list. The trust is also a
-    performance tradeoff: a copy, a key test, or a cast frame here
-    costs work on every call of a hot read, and adds no safety. Do
-    not make this function defensive. A source that breaks the
-    protocol is a bug in that source, not here.
-
-    A plain mapping has no ``getlist``. A present key then holds one
-    value, which becomes a one-item list. A missing key gives the same
-    empty list that ``getlist`` gives.
-    """
-    getlist = getattr(data, "getlist", None)
-    if getlist is not None:
-        return getlist(key)  # type: ignore[no-any-return]
-    if key in data:
-        return [data[key]]
-    return []
-
-
 class CompositeWidget(Widget):
     """Base widget for composite mapping and sequence values."""
 
@@ -204,35 +178,36 @@ class MappingWidget(CompositeWidget):
         """Report whether one source holds any declared child key."""
         return any(key != name and self._accepts_key(key, name) for key in source)
 
-    def _data_from_whole_value(
+    def _data_from_exact_mapping(
         self, value: Mapping[str, object], name: str
-    ) -> MultiValueDict[str, object]:
-        """Give each member of a whole mapping value its own child key.
+    ) -> Mapping[str, object]:
+        """Give each member of an exact mapping its own child key."""
+        getlist = getattr(value, "getlist", None)
+        if getlist is not None:
+            expanded = MultiValueDict[str, object]()
+            for child_name in self.fields:
+                if child_name in value:
+                    expanded.setlist(f"{name}-{child_name}", getlist(child_name))
+            return expanded
+        return {
+            f"{name}-{child_name}": value[child_name]
+            for child_name in self.fields
+            if child_name in value
+        }
 
-        Every composite child already reads a value under its own exact key
-        as a whole value, so one expansion makes a whole-value submission bind
-        exactly like a browser submission. ``getlist`` semantics survive, so
-        repeated values still reach child widgets that consume all of them.
-        """
-        expanded = MultiValueDict[str, object]()
-        for child_name in self.fields:
-            if child_name in value:
-                expanded.setlist(f"{name}-{child_name}", _getlist(value, child_name))
-        return expanded
-
-    def expand_whole_values(
+    def expand_exact_inputs(
         self,
         data: Mapping[str, object],
         files: Mapping[str, object],
         name: str,
     ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        """Return the data and the files with whole values expanded to child keys."""
+        """Return data and files with exact mappings expanded to child keys."""
         data_value = data.get(name) if name in data else None
         if isinstance(data_value, Mapping):
-            data = self._data_from_whole_value(data_value, name)
+            data = self._data_from_exact_mapping(data_value, name)
         files_value = files.get(name) if name in files else None
         if isinstance(files_value, Mapping):
-            files = self._data_from_whole_value(files_value, name)
+            files = self._data_from_exact_mapping(files_value, name)
         return data, files
 
     def value_from_datadict(
@@ -241,12 +216,10 @@ class MappingWidget(CompositeWidget):
         files: Mapping[str, object],
         name: str,
     ) -> object:
-        """Extract child values, or return an unreadable whole value as it is."""
-        data, files = self.expand_whole_values(data, files, name)
+        """Extract child values, or return unreadable exact input unchanged."""
+        data, files = self.expand_exact_inputs(data, files, name)
         data_submitted = self.has_child_keys(data, name)
         if not data_submitted and name in data:
-            # A scalar under the exact name has no children to distribute.
-            # Return it, so that to_python() reports the "invalid" error.
             return data.get(name)
         if data_submitted or self.has_child_keys(files, name):
             return self._extract_children(data, files, name)
@@ -432,21 +405,24 @@ class SequenceWidget(CompositeWidget):
             start = len(prefix)
             found: set[str] = set()
             for source in (self.data, self.files):
+                getlist = getattr(source, "getlist", None)
                 for key in source:
                     if not isinstance(key, str) or key[:start] != prefix:
                         continue
                     end = key.find("-", start)
-                    if end < 0:
-                        row = key
-                    else:
-                        row = key[:end]
-                        if key[end + 1 :] == DELETION_FIELD_NAME:
-                            # The row's own delete key. A rendered row
-                            # always sends it, so it shows no content.
-                            continue
+                    if end >= 0 and key[end + 1 :] == DELETION_FIELD_NAME:
+                        # The row's own delete key. A rendered row
+                        # always sends it, so it shows no content.
+                        continue
+                    row = key if end < 0 else key[:end]
                     if row in found:
                         continue
-                    for value in _getlist(source, key):
+                    if getlist is None:
+                        value = source.get(key)
+                        if value is not None and value != "":
+                            found.add(row)
+                        continue
+                    for value in getlist(key):
                         if value is not None and value != "":
                             found.add(row)
                             break
@@ -708,25 +684,19 @@ class SequenceWidget(CompositeWidget):
         formset.sequence_widget = self
         return formset
 
-    def data_from_whole_value(
-        self, values: Sequence[object], name: str
-    ) -> MultiValueDict[str, object]:
-        """Give each row of a whole value its own key.
+    def data_from_exact_list(
+        self, values: list[object], name: str
+    ) -> dict[str, object]:
+        """Give each row of an exact list its own key.
 
-        A whole value is one Python list under this field's own name. It
-        carries no per-row prefixed keys. Build one key per row instead:
-        ``f"{name}-{index}"``. Every composite child already reads a
-        value under its own exact key as a whole value. A mapping or
-        scalar row therefore binds the normal way from this point on.
-
-        This lets the row formset bind for real, instead of staying
-        unbound with only initial rows. A bound row formset can carry
-        its own validation errors. An unbound row formset never can:
-        Django gives an unbound form empty errors, always, on purpose.
+        An exact list carries no per-row prefixed keys. Build one key per row
+        so the row formset binds and can render row errors. A plain mapping
+        keeps a nested list as one sequence value, instead of treating it as
+        repeated request input.
         """
-        rows = MultiValueDict[str, object]()
-        for index, value in enumerate(values):
-            rows.setlist(f"{name}-{index}", [value])
+        rows: dict[str, object] = {
+            f"{name}-{index}": value for index, value in enumerate(values)
+        }
         total = str(len(values))
         rows[f"{name}-{TOTAL_FORM_COUNT}"] = total
         rows[f"{name}-{INITIAL_FORM_COUNT}"] = total
@@ -775,19 +745,15 @@ class SequenceWidget(CompositeWidget):
                 return True
         return False
 
-    def has_formset_keys(
+    def is_bound_formset(
         self,
         data: Mapping[str, object],
         files: Mapping[str, object],
         name: str,
     ) -> bool:
-        """Report whether any management or row key binds the row formset.
-
-        Test the management keys of both sources before any row keys.
-        Either kind binds the formset, so the answer is the same, but a
-        management-key test is four lookups for each source while a
-        row-key test reads every submitted key.
-        """
+        """Report whether row or management keys bind the row formset."""
+        if name in data or name in files:
+            return self.has_row_keys(data, name) or self.has_row_keys(files, name)
         return (
             self.has_management_keys(data, name)
             or self.has_management_keys(files, name)
@@ -800,40 +766,34 @@ class SequenceWidget(CompositeWidget):
         data: Mapping[str, object],
         files: Mapping[str, object],
         name: str,
-    ) -> list[object]:
-        """Extract a whole value or bound formset rows.
+    ) -> object:
+        """Extract exact input, or bound formset rows when none exists.
 
-        Row keys outrank a value under the field's own exact name, so a
-        forged exact-name key cannot replace submitted rows. Without row
-        keys, a whole value wins over management keys alone.
-
-        Read the exact name first. With no exact-name value, row keys
-        and management keys route to the same formset, so the
-        management lookups in ``has_formset_keys`` can answer before a
-        full key scan. An exact-name value needs only the row-key test,
-        because row keys are the one input that outranks it.
-
-        One scope covers both ways out. The whole-value branch spends the
-        budget on a Python list; the formset branch spends it on rows, and
-        keeps it open while each row's value is read, because reading a
-        row is what builds the next level down.
+        Indexed row keys outrank exact input. Without indexed rows, exact
+        input outranks management keys and keeps its source shape: an ordinary
+        mapping supplies its value directly, and a Django multi-value mapping
+        supplies its repeated values through ``getlist``.
         """
+        source: Mapping[str, object] | None
+        if name in data:
+            source = data
+        elif name in files:
+            source = files
+        else:
+            source = None
         with self.submission_countdown(self.limits.submission_max) as countdown:
-            values = _getlist(data, name) or _getlist(files, name)
-            if not values:
-                if not self.has_formset_keys(data, files, name):
-                    return []
-            elif not (self.has_row_keys(data, name) or self.has_row_keys(files, name)):
-                if len(values) == 1:
-                    if values[0] is None or values[0] == "":
-                        # A lone empty exact-name value is an empty submission,
-                        # not one blank row. A list such as [""] keeps its
-                        # blank row, so an exact Python whole value still
-                        # validates every row that the caller supplied.
-                        return []
-                    if isinstance(values[0], list):
-                        values = values[0]
-                return values[: countdown.take(len(values))]
+            if source is not None:
+                has_rows = self.has_row_keys(data, name) or self.has_row_keys(
+                    files, name
+                )
+                getlist = getattr(source, "getlist", None)
+                values = source.get(name) if getlist is None else getlist(name)
+                if not has_rows:
+                    if isinstance(values, list):
+                        return values[: countdown.take(len(values))]
+                    return values
+            elif not self.is_bound_formset(data, files, name):
+                return []
             formset = self.new_formset(
                 data=data,
                 files=cast("MultiValueDict[str, UploadedFile[bytes]]", files),
@@ -955,13 +915,12 @@ class SequenceWidget(CompositeWidget):
         child_widget = self._child_widget(child.field)
         if isinstance(child, CompositeBoundField):
             child.prepare_widget(cast("CompositeWidget", child_widget))
-        child_value = (
-            None
-            if index == "__prefix__"
-            else child.initial
-            if isinstance(child, CompositeBoundField)
-            else child.value()
-        )
+        if index == "__prefix__":
+            child_value = None
+        elif isinstance(child, CompositeBoundField):
+            child_value = child.initial
+        else:
+            child_value = child.value()
         if isinstance(child_widget, MultiWidget) and isinstance(child_value, str):
             child_value = None
         subwidget = cast(

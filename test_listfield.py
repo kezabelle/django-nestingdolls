@@ -442,31 +442,37 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         )
         self.assertEqual(FieldInitialForm()["values"].value(), [1, 2])
 
-    def test_client_treats_an_exact_name_scalar_as_one_list_row(self):
-        """Client returns one list row for an exact-name scalar control."""
+    def test_client_treats_an_exact_name_request_value_as_one_list_row(self):
+        """A browser request value is one list row through ``getlist``."""
         response = self.client.post("/list-submission-probe/", {"values": "1"})
         self.assertEqual(response.status_code, 200)
         self.assertJSONEqual(
             response.content, {"valid": True, "values": [1], "errors": {}}
         )
 
-    def test_exact_name_empty_scalar_has_no_rows(self):
-        """An empty exact-name scalar differs from a supplied blank row."""
+    def test_exact_name_non_lists_are_invalid_sequence_input(self):
+        """A direct exact sequence input must be a Python list."""
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.CharField(), required=False)
 
+        for value in (None, "", "value", ("value",), {"value": "value"}):
+            with self.subTest(value=value):
+                form = Form({"values": value})
+                self.assertIs(form.is_valid(), False)
+                self.assertEqual(form.errors.as_data()["values"][0].code, "invalid")
+
+        field = nestingdolls.ListField(forms.CharField(), required=False)
         for value in (None, ""):
-            form = Form({"values": value})
-            self.assertIs(form.is_valid(), True, form.errors)
-            self.assertEqual(form.cleaned_data["values"], [])
+            with (
+                self.subTest(clean_value=value),
+                self.assertRaises(ValidationError) as error,
+            ):
+                field.clean(value)
+            self.assertEqual(error.exception.code, "invalid")
 
-        form = Form({"values": [""]})
-        self.assertIs(form.is_valid(), False)
-        self.assertEqual(form.errors.as_data()["values"][0].code, "item_invalid")
-
-    def test_exact_name_empty_mapping_is_one_row(self):
-        """An empty mapping under the exact name remains a supplied row."""
+    def test_exact_name_mapping_is_invalid_sequence_input(self):
+        """A direct mapping under a sequence name is not one row."""
 
         class Row(forms.Form):
             value = forms.IntegerField()
@@ -476,10 +482,10 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
 
         form = Form({"values": {}})
         self.assertIs(form.is_valid(), False)
-        self.assertEqual(form.errors.as_data()["values"][0].code, "item_invalid")
+        self.assertEqual(form.errors.as_data()["values"][0].code, "invalid")
 
-    def test_exact_name_file_whole_value_binds_rows(self):
-        """A files-only exact-name value supplies whole rows, as data does."""
+    def test_exact_name_file_list_binds_rows(self):
+        """A files-only exact-name list supplies rows, as data does."""
 
         class Form(forms.Form):
             uploads = nestingdolls.ListField(forms.FileField(), required=False)
@@ -489,8 +495,21 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["uploads"], [upload])
 
+    def test_exact_empty_data_list_masks_files(self):
+        """An exact data key wins over files even when its list is empty."""
+
+        class Form(forms.Form):
+            uploads = nestingdolls.ListField(forms.FileField(), required=False)
+
+        data = MultiValueDict()
+        data.setlist("uploads", [])
+        upload = SimpleUploadedFile("a.txt", b"a")
+        form = Form(data=data, files=MultiValueDict({"uploads": [upload]}))
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["uploads"], [])
+
     def test_exact_name_list_wins_over_management_keys(self):
-        """A whole list under the exact name outranks management keys alone."""
+        """A direct list under the exact name outranks management keys alone."""
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), required=False)
@@ -505,17 +524,16 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], [1, 2])
 
-    def test_exact_name_scalar_rendering_normalizes_bound_and_initial_values(self):
-        """Whole-value rendering exposes the scalar row as one indexed input."""
+    def test_invalid_exact_scalar_is_not_redisplayed_as_a_row(self):
+        """An invalid direct scalar is not converted into a row."""
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField())
 
         bound = Form({"values": "1"})
-        self.assertInHTML(
-            '<input type="number" name="values-0" value="1" id="id_values_0">',
-            bound.as_p(),
-        )
+        self.assertIs(bound.is_valid(), False)
+        self.assertEqual(bound.errors.as_data()["values"][0].code, "invalid")
+        self.assertNotIn('name="values-0" value="1"', bound.as_p())
         unbound = Form(initial={"values": 1})
         self.assertEqual(unbound["values"].value(), [1])
 
@@ -2559,6 +2577,24 @@ class SequenceNestedListRowTestCase(FormBindingUnitTestCase):
                 },
             )
         )
+
+    def test_nested_list_direct_scalar_is_invalid_sequence_input(self):
+        """A direct nested scalar is not coerced into one inner row."""
+
+        class Form(forms.Form):
+            outer = nestingdolls.ListField(nestingdolls.ListField(forms.IntegerField()))
+
+        form = Form(
+            {
+                f"outer-{TOTAL_FORM_COUNT}": "1",
+                f"outer-{INITIAL_FORM_COUNT}": "0",
+                "outer-0": "1",
+            }
+        )
+        self.assertIs(form.is_valid(), False)
+        error = form.errors.as_data()["outer"][0]
+        self.assertEqual(error.code, "item_invalid")
+        self.assertEqual(error.child_code, "invalid")
 
 
 @override_settings(ROOT_URLCONF=__name__, DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
