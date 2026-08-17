@@ -1152,3 +1152,207 @@ test("an added multipart row serializes its data and file", () => {
   assert.equal(upload.type, "file");
   assert.equal(upload.name, "rows-0-upload");
 });
+
+test("a p-layout row error keeps the widget intact and enhanceable", () => {
+  // as_p puts the widget inside Django's <p>. The row error markup must stay
+  // phrasing content: a <ul> start tag would close the open <p> during
+  // parsing and reparent the rest of the widget outside its root.
+  const errorSpan =
+    '<span class="errorlist" id="error-0">Enter a whole number.</span>';
+  const widget = (errorMarkup) => `
+    <form>
+      <p>
+        <span
+          data-widget="sequence"
+          data-sequence-maximum="2"
+          data-sequence-absolute-maximum="2"
+        >
+          <input type="hidden" value="1" data-sequence-total>
+          <span data-sequence-rows>
+            <span data-sequence-row data-sequence-index="0">
+              <input name="values-0" value="bad" aria-describedby="error-0">
+              ${errorMarkup}
+            </span>
+          </span>
+          <template data-sequence-empty-row>
+            <span data-sequence-row>
+              <input name="values-__prefix__">
+            </span>
+          </template>
+          <template data-sequence-remove-button>
+            <button type="button" data-sequence-remove>Remove</button>
+          </template>
+          <template data-sequence-add-button>
+            <button type="button" data-sequence-add>Add</button>
+          </template>
+        </span>
+      </p>
+    </form>
+  `;
+
+  const dom = new JSDOM(widget(errorSpan), { runScripts: "outside-only" });
+  const { document } = dom.window;
+  const readyTargets = [];
+  document.addEventListener("nestingdolls:sequence-ready", (event) => {
+    readyTargets.push(event.target);
+  });
+  dom.window.eval(controller);
+  document.dispatchEvent(new dom.window.Event("DOMContentLoaded"));
+
+  const root = document.querySelector('[data-widget="sequence"]');
+  assert.ok(root);
+  assert.deepEqual(readyTargets, [root]);
+  // The error span and the templates all stay inside the widget root.
+  assert.ok(root.querySelector(".errorlist"));
+  assert.ok(root.querySelector("[data-sequence-empty-row]"));
+
+  // The pre-fix <ul> markup shows why: the parser moves everything after the
+  // error outside the widget, and enhancement fails loudly.
+  const failure = enhancementFailure(
+    widget('<ul class="errorlist" id="error-0"><li>Enter a whole number.</li></ul>'),
+  );
+  assert.match(failure, /Missing required element/u);
+});
+
+test("an outer add keeps the inner remove button's own aria-label", () => {
+  const dom = build(
+    `
+      <div
+        data-widget="sequence"
+        data-sequence-maximum="3"
+        data-sequence-absolute-maximum="3"
+      >
+        <input type="hidden" value="1" data-sequence-total>
+        <div data-sequence-rows></div>
+        <template data-sequence-empty-row>
+          <div data-sequence-row>
+            <div
+              data-widget="sequence"
+              data-sequence-field="values-__prefix__"
+              data-sequence-maximum="2"
+              data-sequence-absolute-maximum="2"
+            >
+              <input
+                type="hidden"
+                name="values-__prefix__-TOTAL_FORMS"
+                value="0"
+                data-sequence-total
+              >
+              <div data-sequence-rows></div>
+              <template data-sequence-empty-row>
+                <div data-sequence-row>
+                  <input name="values-__prefix__-__prefix__">
+                </div>
+              </template>
+              <template data-sequence-remove-button>
+                <button
+                  type="button"
+                  data-sequence-remove
+                  aria-label="Remove row __prefix__"
+                >Remove</button>
+              </template>
+              <button type="button" data-sequence-add>Add</button>
+            </div>
+          </div>
+        </template>
+        <template data-sequence-remove-button>
+          <button
+            type="button"
+            data-sequence-remove
+            aria-label="Remove row __prefix__"
+          >Remove</button>
+        </template>
+        <button type="button" data-sequence-add>Add</button>
+      </div>
+    `,
+  );
+
+  const { document } = dom.window;
+  const outerRoot = document.querySelector('[data-widget="sequence"]');
+  assert.ok(outerRoot);
+  const outerAdd = document.querySelector("[data-sequence-add]");
+  assert.ok(outerAdd instanceof dom.window.HTMLButtonElement);
+  outerAdd.click();
+
+  // The outer clone replaced only its own level: the inner remove-button
+  // template keeps its bare placeholder for the inner controller.
+  const innerRoot = document.querySelector('[data-sequence-field="values-1"]');
+  assert.ok(innerRoot);
+  const innerTemplate = innerRoot.querySelector(
+    "template[data-sequence-remove-button]",
+  );
+  assert.ok(innerTemplate instanceof dom.window.HTMLTemplateElement);
+  assert.equal(
+    innerTemplate.content.querySelector("button").getAttribute("aria-label"),
+    "Remove row __prefix__",
+  );
+
+  const outerRemove = Array.from(
+    document.querySelectorAll("[data-sequence-remove]"),
+  ).find((button) => button.closest('[data-widget="sequence"]') === outerRoot);
+  assert.ok(outerRemove);
+  assert.equal(outerRemove.getAttribute("aria-label"), "Remove row 1");
+
+  const innerAdd = Array.from(
+    document.querySelectorAll("[data-sequence-add]"),
+  ).find((button) => button.closest('[data-widget="sequence"]') === innerRoot);
+  assert.ok(innerAdd instanceof dom.window.HTMLButtonElement);
+  innerAdd.click();
+
+  const innerRemove = innerRoot.querySelector("[data-sequence-remove]");
+  assert.ok(innerRemove);
+  assert.equal(innerRemove.getAttribute("aria-label"), "Remove row 0");
+});
+
+test("a disabled widget is not enhanced and keeps its controls disabled", () => {
+  const dom = new JSDOM(
+    `
+      <div
+        data-widget="sequence"
+        data-sequence-disabled
+        data-sequence-maximum="3"
+        data-sequence-absolute-maximum="3"
+      >
+        <input type="hidden" value="1" data-sequence-total disabled>
+        <div data-sequence-rows>
+          <div data-sequence-row data-sequence-index="0">
+            <input name="values-0" disabled>
+          </div>
+        </div>
+        <template data-sequence-empty-row>
+          <div data-sequence-row>
+            <input name="values-__prefix__" disabled>
+          </div>
+        </template>
+        <template data-sequence-remove-button>
+          <button type="button" data-sequence-remove disabled>Remove</button>
+        </template>
+        <button type="button" data-sequence-add disabled>Add</button>
+      </div>
+    `,
+    { runScripts: "outside-only" },
+  );
+
+  const { document } = dom.window;
+  const readyTargets = [];
+  document.addEventListener("nestingdolls:sequence-ready", (event) => {
+    readyTargets.push(event.target);
+  });
+  dom.window.eval(controller);
+  document.dispatchEvent(new dom.window.Event("DOMContentLoaded"));
+
+  // The server disabled every control and ignores this widget's input.
+  // Enhancement must not run: no ready event, no injected remove button,
+  // and a forced click must add nothing.
+  assert.equal(readyTargets.length, 0);
+  assert.equal(document.querySelectorAll("[data-sequence-remove]").length, 0);
+  const addButton = document.querySelector("[data-sequence-add]");
+  assert.ok(addButton instanceof dom.window.HTMLButtonElement);
+  assert.equal(addButton.disabled, true);
+  addButton.disabled = false;
+  addButton.click();
+  assert.equal(document.querySelectorAll("[data-sequence-row]").length, 1);
+  const totalInput = document.querySelector("[data-sequence-total]");
+  assert.ok(totalInput instanceof dom.window.HTMLInputElement);
+  assert.equal(totalInput.value, "1");
+});

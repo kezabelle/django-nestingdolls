@@ -30,6 +30,8 @@ guide for the directory you edit.
 # Commands
 
 Every command below is a `make` target. Run `make help` for the list.
+A fresh clone needs one `npm ci` before the JavaScript targets
+(`tscheck`, `jsdrift`, `jstest`, `js`) and therefore before `make check`.
 
 - `make check` runs everything and leaves every file as it was, so it is
   also the CI gate: `tscheck`, `jsdrift`, `jstest`, `ruff`, `formatcheck`,

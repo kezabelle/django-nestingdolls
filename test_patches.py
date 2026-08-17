@@ -310,3 +310,47 @@ class FormRenderingPatchTestCase(SimpleTestCase):
 
         self.assertIn('<div data-widget="sequence"', html)
         self.assertNotIn('<table role="presentation">', html)
+
+    def test_custom_template_render_keeps_the_active_layout(self):
+        """``form.render("custom.html")`` inside ``as_p()`` uses the ``p`` layout.
+
+        A custom template can contain a form in any layout.
+        Keep the active layout during this render.
+        Do not reset the layout to ``div``.
+        """
+
+        class CustomTemplateRenderer(DjangoTemplates):
+            def get_template(self, template_name: str) -> object:
+                if template_name == "example/detail.html":
+                    return self.engine.from_string("{{ form.values }}")
+                return super().get_template(template_name)
+
+        class InnerForm(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), min_length=1)
+
+        inner_form = InnerForm(renderer=CustomTemplateRenderer())
+
+        class EmbeddingWidget(forms.TextInput):
+            def render(self, *args: object, **kwargs: object) -> str:
+                return inner_form.render("example/detail.html")
+
+        class OuterForm(forms.Form):
+            embedded = forms.CharField(widget=EmbeddingWidget)
+
+        html = squashed(OuterForm().as_p())
+
+        self.assertIn('<span data-widget="sequence"', html)
+        self.assertNotIn('<div data-widget="sequence"', html)
+
+    def test_patch_is_a_pass_through_for_forms_without_composite_fields(self):
+        """The patch does not change HTML for a form without composite fields."""
+
+        class PlainForm(forms.Form):
+            name = forms.CharField()
+            count = forms.IntegerField()
+
+        patched_html = PlainForm().as_p()
+        with without_form_rendering_patch():
+            unpatched_html = PlainForm().as_p()
+
+        self.assertEqual(patched_html, unpatched_html)

@@ -15,15 +15,24 @@
     const prefix = "__prefix__";
     const sequenceWidgetSelector = '[data-widget="sequence"]';
     const enhancedWidgets = new WeakSet();
-    const prefixAttributes = [
+    // Hierarchical attributes embed the full prefix path in one token, so the
+    // first-placeholder-per-token replacement is safe at every nesting level.
+    // aria-label carries a bare placeholder that belongs to its own level only,
+    // so replace it at the level being cloned, never inside nested template
+    // content, or an outer add would consume an inner button's placeholder.
+    const hierarchicalPrefixAttributes = [
         "name",
         "id",
         "for",
         "aria-describedby",
         "aria-labelledby",
         "aria-controls",
-        "aria-label",
         "data-sequence-field",
+    ];
+    const localPrefixAttributes = ["aria-label"];
+    const prefixAttributes = [
+        ...hierarchicalPrefixAttributes,
+        ...localPrefixAttributes,
     ];
     const prefixAttributeSelector = prefixAttributes
         .map((attribute) => `[${attribute}]`)
@@ -51,6 +60,8 @@
     }
     function cloneTemplate(root, selector) {
         const template = ownedElement(root, root, selector);
+        // cloneNode is typed as returning Node. For a template's content, the DOM
+        // specification returns the fragment itself, so this cast is exact.
         return template.content.cloneNode(true);
     }
     function parseRequiredInteger(value, description) {
@@ -174,11 +185,12 @@
             row,
         });
     }
-    function replacePrefixAttributes(fragment, index) {
+    function replacePrefixAttributes(fragment, index, nested = false) {
         const replacement = String(index);
+        const attributes = nested ? hierarchicalPrefixAttributes : prefixAttributes;
         const elements = fragment.querySelectorAll(prefixAttributeSelector);
         for (const element of elements) {
-            for (const attribute of prefixAttributes) {
+            for (const attribute of attributes) {
                 const value = element.getAttribute(attribute);
                 if (value) {
                     // Attribute values can contain several tokens. Change only the first
@@ -191,7 +203,7 @@
         // Nested row templates keep their own prefix. Walk template content too,
         // but replace only this sequence level in each token.
         for (const template of fragment.querySelectorAll("template")) {
-            replacePrefixAttributes(template.content, index);
+            replacePrefixAttributes(template.content, index, true);
         }
     }
     function addRow(root) {
@@ -225,6 +237,12 @@
         });
     }
     function enhanceWidget(root) {
+        // SequenceWidget.get_context disables every control when the field is
+        // disabled or the submission overflowed. The server ignores this widget's
+        // input, so enhancement must not re-enable its buttons.
+        if (root.dataset.sequenceDisabled !== undefined) {
+            return;
+        }
         if (enhancedWidgets.has(root)) {
             return;
         }

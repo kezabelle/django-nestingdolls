@@ -222,15 +222,18 @@ class MappingField(CompositeField):
         return self.output(data)
 
     def _compress_with_defaults(self, data: dict[str, object]) -> object | None:
-        """Call ``self.output`` with every declared name filled from ``data``.
+        """Build output with the field names declared by the Form.
 
-        Return ``None`` when ``data`` is empty. ``NamedTupleField`` and
-        ``DataclassField`` both build their output this way: every declared
-        name gets ``None`` unless ``data`` supplies it.
+        Return ``None`` if ``data`` is empty.
+        For each declared name, use the value in ``data``.
+        Use ``None`` if ``data`` does not contain the name.
+        Ignore names for fields that ``__init__`` adds to the Form.
         """
         if not data:
             return None
-        return self.output(**(dict.fromkeys(self._declared_field_names) | data))
+        return self.output(
+            **{name: data.get(name) for name in self._declared_field_names}
+        )
 
     def _clean_child_form(self, form: BaseForm) -> object:
         """Build this field's output from the child Form, or raise item errors.
@@ -368,7 +371,7 @@ class NamedTupleField(MappingField):
             raise ImproperlyConfigured(
                 "output argument for NamedTupleField must be a named tuple class"
             )
-        if frozenset(self.widget.fields) != frozenset(
+        if frozenset(self._declared_field_names) != frozenset(
             cast("tuple[str, ...]", output._fields)
         ):
             raise ImproperlyConfigured(
@@ -412,7 +415,7 @@ class DataclassField(MappingField):
             raise ImproperlyConfigured(
                 "output argument for DataclassField must not have init=False fields"
             )
-        if frozenset(self.widget.fields) != frozenset(
+        if frozenset(self._declared_field_names) != frozenset(
             field.name for field in dataclasses.fields(output)
         ):
             raise ImproperlyConfigured(
@@ -690,8 +693,13 @@ class SequenceField(CompositeField):
         return result
 
     def clean(self, value: object) -> Collection[object]:
-        """Clean caller-supplied values with this field's normal row rules."""
-        return self._clean_values(self.to_python(value), [])
+        """Clean direct input with the normal row rules.
+
+        Treat ``None`` as an empty submission in this method.
+        A bound ``{"values": None}`` input remains invalid.
+        ``to_python`` rejects that bound input.
+        """
+        return self._clean_values(self.to_python([] if value is None else value), [])
 
     def _clean_bound_field(self, bound_field: BoundField) -> Collection[object]:
         """Clean browser submissions through Django's real row formset."""

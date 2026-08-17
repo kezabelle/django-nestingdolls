@@ -326,6 +326,14 @@ TEMPLATES = [
 FORM_RENDERER = "django.forms.renderers.TemplatesSetting"
 ```
 
+This alternative covers template discovery only. The layout matching for
+`as_p()`, `as_table()`, and `as_ul()` is installed by the app config, so with
+these settings every composite renders its `div` layout regardless of the
+form helper — silently, because the templates all resolve. To keep layout
+matching without the app, call
+`nestingdolls.patches.install_form_rendering_patch()` once at startup, for
+example from your own `AppConfig.ready()`.
+
 ### Display errors
 
 You do not need a package-specific template or a form rendering helper. A normal
@@ -369,6 +377,10 @@ these bubbling `CustomEvent`s:
 A sequence nested in a freshly added row sends its own
 `nestingdolls:sequence-ready` before the outer sequence sends
 `nestingdolls:sequence-change`.
+
+A disabled sequence widget is not enhanced at all: the server renders every
+control disabled and ignores the widget's input, so the script leaves it
+alone and sends no `nestingdolls:sequence-ready` event for it.
 
 ## Why two field types?
 

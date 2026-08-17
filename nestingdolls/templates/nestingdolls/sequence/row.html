@@ -1,7 +1,7 @@
 {% comment %}
-row_tag and body_tag become HTML tags directly. Every caller must pass
-a fixed value from a closed set, set in Python. Never take them from
-widget.attrs or from data passed in by the caller.
+row_tag and body_tag become HTML tags directly. The only callers are the four
+layout templates in this directory, and each passes a fixed literal from a
+closed set. Never take these from widget.attrs or from submitted data.
 {% endcomment %}
 <{{ row_tag }}
   data-sequence-row
@@ -10,7 +10,7 @@ widget.attrs or from data passed in by the caller.
   {% if widget_id %}id="{{ widget_id }}_row_{{ row.index }}"{% endif %}
 >
   {% if body_tag %}<{{ body_tag }}>{% endif %}
-  {% include "nestingdolls/sequence/row_content.html" with row=row widget_name=widget_name delete_id=widget_id delete_disabled=delete_disabled only %}
+  {% include "nestingdolls/sequence/row_content.html" with row=row row_tag=row_tag widget_name=widget_name delete_id=widget_id delete_disabled=delete_disabled only %}
   {% comment %}
   The browser script puts this row's remove button here. Without this
   slot, the script would add the button as a direct child of the row

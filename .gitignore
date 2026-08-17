@@ -12,3 +12,7 @@ build/
 .mypy_cache
 .ruff_cache
 .hypothesis
+*.drift
+REVIEW.md
+TONE.md
+.review-scratch/

@@ -17,6 +17,7 @@ from django.forms.formsets import (
     TOTAL_FORM_COUNT,
     formset_factory,
 )
+from django.forms.utils import ErrorList
 from django.forms.widgets import Media as WidgetMedia
 from django.forms.widgets import MultiWidget, Widget
 from django.utils.datastructures import MultiValueDict
@@ -216,12 +217,18 @@ class MappingWidget(CompositeWidget):
         files: Mapping[str, object],
         name: str,
     ) -> object:
-        """Extract child values, or return unreadable exact input unchanged."""
+        """Extract child values. Return exact input when the widget cannot read it.
+
+        Check child keys in ``data`` and ``files`` before exact scalar input.
+        Use the same check as ``MappingBoundField.is_bound_subform``.
+        This keeps change detection and cleaning on the same input.
+        """
         data, files = self.expand_exact_inputs(data, files, name)
         data_submitted = self.has_child_keys(data, name)
-        if not data_submitted and name in data:
+        files_submitted = self.has_child_keys(files, name)
+        if not data_submitted and not files_submitted and name in data:
             return data.get(name)
-        if data_submitted or self.has_child_keys(files, name):
+        if data_submitted or files_submitted:
             return self._extract_children(data, files, name)
         if name in files:
             return files.get(name)
@@ -943,10 +950,9 @@ class SequenceWidget(CompositeWidget):
         if not errors:
             return row
         child_attrs = cast("dict[str, object]", subwidget["attrs"])
-        child_id = child_attrs.get("id")
+        child_id: str | None = child_attrs.get("id")  # type: ignore[assignment]
+        row["errors"] = ErrorList(errors, field_id=child_id)
         error_id = f"{child_id}_error" if child_id else None
-        if error_id:
-            row["error_id"] = error_id
         self._mark_row_invalid(subwidget, error_id)
         return row
 

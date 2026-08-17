@@ -44,6 +44,15 @@ That's the whole thing, hopefully. Django's normal DTL form renderer finds
 the package templates and the matching composite wrappers for the  `as_div()`, 
 `as_p()`, `as_table()`, and `as_ul()` form helpers.
 
+Installing the app patches `django.forms.BaseForm.render` (and with it
+`__str__` and `__html__`) process-wide at startup: the wrapper records which
+form helper is rendering so composite widgets can pick the matching layout
+template, and it is a pass-through for forms without composite fields.
+Without the app installed, Django's default renderer fails loudly with
+`TemplateDoesNotExist` at the first composite render; a `TemplatesSetting`
+renderer with the package templates on `DIRS` renders, but every composite
+falls back to its `div` layout regardless of the form helper.
+
 ## A quick tutorial
 
 Let's make a `CheckoutForm`. The browser will send ordinary Django input
@@ -200,9 +209,8 @@ json_form = ProductImportForm(json.loads('{"product_ids": [42, 73]}'))
 yaml_form = ProductImportForm(
     yaml.safe_load('product_ids:\n  - 42\n  - 73')
 )
-csv_form = ProductImportForm( 
-    {'product_ids': next(csv.reader(['42,73']))}. # could be from a DictReader etc too!
-)
+# The list could come from a csv.DictReader row etc. too.
+csv_form = ProductImportForm({'product_ids': next(csv.reader(['42,73']))})
 
 for form in (json_form, yaml_form, csv_form):
     assert form.is_valid()

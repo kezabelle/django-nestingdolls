@@ -463,13 +463,13 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
                 self.assertEqual(form.errors.as_data()["values"][0].code, "invalid")
 
         field = nestingdolls.ListField(forms.CharField(), required=False)
-        for value in (None, ""):
-            with (
-                self.subTest(clean_value=value),
-                self.assertRaises(ValidationError) as error,
-            ):
-                field.clean(value)
-            self.assertEqual(error.exception.code, "invalid")
+        # ``None`` is the one non-list input ``clean`` accepts directly: it is
+        # the field's own default initial, and ``MappingField.clean`` already
+        # treats it as empty. Everything else must be a Python list.
+        self.assertEqual(field.clean(None), [])
+        with self.assertRaises(ValidationError) as error:
+            field.clean("")
+        self.assertEqual(error.exception.code, "invalid")
 
     def test_exact_name_mapping_is_invalid_sequence_input(self):
         """A direct mapping under a sequence name is not one row."""
@@ -958,9 +958,16 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
             '<input type="number" name="values-1" value="bad" id="id_values_1" aria-invalid="true" aria-describedby="id_values_1_error">',
             html,
         )
-        self.assertInHTML("<li>Enter a whole number.</li>", html)
-        self.assertNotInHTML("<li>Item 1: Enter a whole number.</li>", html)
-        self.assertNotInHTML("<li>Item 2: Enter a whole number.</li>", html)
+        self.assertInHTML(
+            '<span class="errorlist" id="id_values_1_error">Enter a whole number.</span>',
+            html,
+        )
+        self.assertInHTML(
+            '<span class="errorlist" id="id_values_2_error">Enter a whole number.</span>',
+            html,
+        )
+        self.assertNotIn("Item 1: Enter a whole number.", html)
+        self.assertNotIn("Item 2: Enter a whole number.", html)
 
         class EmailForm(forms.Form):
             emails = nestingdolls.ListField(forms.EmailField(), min_length=4)
@@ -987,8 +994,11 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertEqual(list(blanks["emails"].errors), [])
 
         blank_html = blanks.as_p()
-        self.assertNotInHTML("<li>Item 0: This field is required.</li>", blank_html)
-        self.assertInHTML("<li>This field is required.</li>", blank_html)
+        self.assertNotIn("Item 0: This field is required.", blank_html)
+        self.assertInHTML(
+            '<span class="errorlist" id="id_emails_0_error">This field is required.</span>',
+            blank_html,
+        )
 
     def test_item_invalid_errors_preserve_child_codes(self):
         """It preserves child error codes inside item errors."""
@@ -2124,7 +2134,7 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
 
         self.assertEqual(response.status_code, 200)
         html = response.json()["html"]
-        self.assertIn('<ul class="errorlist" id="id_values_0_1_error">', html)
+        self.assertIn('<span class="errorlist" id="id_values_0_1_error">', html)
         self.assertIn('aria-describedby="id_values_0_1_error"', html)
 
     def test_row_bucketing_runs_once_for_each_input_source(self):
@@ -2319,7 +2329,10 @@ class SequenceScalarRowTestCase(FormBindingUnitTestCase):
         self.assertEqual(html.count('aria-invalid="true"'), 1)
         self.assertIn('name="values-1" value="bad"', html)
         self.assertIn('aria-describedby="id_values_1_error"', html)
-        self.assertInHTML("<li>Enter a whole number.</li>", html)
+        self.assertInHTML(
+            '<span class="errorlist" id="id_values_1_error">Enter a whole number.</span>',
+            html,
+        )
 
     def assertScalarRowsValid(self, form):
         """Assert a valid 3-row int list renders every row with no error markup."""
@@ -2405,7 +2418,10 @@ class SequenceMappingRowTestCase(FormBindingUnitTestCase):
         self.assertEqual(error.params["item"], 1)
         self.assertEqual(error.params["child_code"], "required")
         html = form.as_p()
-        self.assertInHTML("<li>This field is required.</li>", html)
+        self.assertInHTML(
+            '<span class="errorlist" id="id_a-1-b_error">This field is required.</span>',
+            html,
+        )
         self.assertIn('name="a-0-b" value="2"', html)
         self.assertIn('aria-describedby="id_a-1-b_error"', html)
         self.assertIn('name="a-1-c" value="3"', html)
@@ -2432,7 +2448,10 @@ class SequenceMappingRowTestCase(FormBindingUnitTestCase):
         """
         self.assertIs(form.is_valid(), False)
         self.assertEqual(form.errors.as_data()["a"][0].code, "item_invalid")
-        self.assertInHTML("<li>This field is required.</li>", form.as_p())
+        self.assertInHTML(
+            '<span class="errorlist" id="id_a_0_error">This field is required.</span>',
+            form.as_p(),
+        )
 
     def test_mapping_row_error_via_whole_value(self):
         """A missing required child in a whole-value mapping row shows its error."""
@@ -2545,7 +2564,10 @@ class SequenceNestedListRowTestCase(FormBindingUnitTestCase):
         """Assert the bad leaf at outer row 0, inner row 1 shows its own error."""
         self.assertIs(form.is_valid(), False)
         html = form.as_p()
-        self.assertInHTML("<li>Enter a whole number.</li>", html)
+        self.assertInHTML(
+            '<span class="errorlist" id="id_outer_0_1_error">Enter a whole number.</span>',
+            html,
+        )
         self.assertIn('name="outer-0-1" value="bad"', html)
 
     def test_nested_list_leaf_error_via_whole_value(self):
@@ -2898,7 +2920,29 @@ class WidgetIntegrationTestCase(SimpleTestCase):
         self.assertIn("<span", invalid_html)
         self.assertIn("Enter a whole number.", invalid_html)
 
-    def assertRowErrorMarkup(self, form_kwargs, expected_input, expected_errors):
+    def test_disabled_field_renders_the_disabled_widget_marker(self):
+        """A disabled sequence marks its root element. The script does not change it.
+
+        The server disables controls and ignores submitted input.
+        Without the marker, the script adds enabled controls and can lose the user's work.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.IntegerField(), disabled=True, required=False
+            )
+
+        html = Form(initial={"values": [1]}).as_div()
+        self.assertIn("data-sequence-disabled", html)
+
+        class EnabledForm(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        self.assertNotIn("data-sequence-disabled", EnabledForm().as_div())
+
+    def assertRowErrorMarkup(
+        self, form_kwargs, expected_input, expected_errors, render_method="as_div"
+    ):
         class Form(forms.Form):
             values = nestingdolls.ListField(
                 forms.IntegerField(
@@ -2917,7 +2961,7 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             **form_kwargs,
         )
         self.assertIs(form.is_valid(), False)
-        html = form.as_div()
+        html = getattr(form, render_method)()
         self.assertInHTML(expected_input, html)
         self.assertInHTML(expected_errors, html)
 
@@ -2936,6 +2980,49 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             '<input type="number" name="values-0" value="bad" aria-describedby="existing-description" aria-invalid="true">',
             '<ul class="errorlist"><li>Enter a whole number.</li></ul>',
         )
+
+    def test_table_row_error_markup_uses_djangos_list_template(self):
+        """An ``as_table()`` row error uses Django's list template."""
+        self.assertRowErrorMarkup(
+            {},
+            '<input type="number" name="values-0" value="bad" aria-describedby="existing-description id_values_0_error" aria-invalid="true" id="id_values_0">',
+            '<ul class="errorlist" id="id_values_0_error"><li>Enter a whole number.</li></ul>',
+            render_method="as_table",
+        )
+
+    def test_ul_row_error_markup_uses_djangos_list_template(self):
+        """An ``as_ul()`` row error uses Django's list template."""
+        self.assertRowErrorMarkup(
+            {},
+            '<input type="number" name="values-0" value="bad" aria-describedby="existing-description id_values_0_error" aria-invalid="true" id="id_values_0">',
+            '<ul class="errorlist" id="id_values_0_error"><li>Enter a whole number.</li></ul>',
+            render_method="as_ul",
+        )
+
+    def test_p_layout_row_error_markup_stays_phrasing_content(self):
+        """An ``as_p`` row error does not contain ``ul``. The widget stays in its ``p`` element.
+
+        A ``ul`` start tag closes an open ``p`` element during HTML parsing.
+        This moves the remaining widget content outside the widget root.
+        The moved content includes the empty-row template.
+        The script cannot enhance that content.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        form = Form(
+            {
+                "values-0": "bad",
+                "values-TOTAL_FORMS": "1",
+                "values-INITIAL_FORMS": "0",
+            }
+        )
+
+        self.assertIs(form.is_valid(), False)
+        html = form.as_p()
+        self.assertNotIn("<ul", html)
+        self.assertIn("data-sequence-empty-row", html)
 
     def test_compound_row_error_markup_describes_each_child_widget(self):
         """A compound row error describes each child input."""

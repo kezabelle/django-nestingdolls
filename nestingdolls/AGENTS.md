@@ -37,7 +37,11 @@ normal Django behavior and uses JavaScript only for progressive enhancement.
 ### Input handling
 
 - Preserve whole-value and prefixed input forms.
-- Preserve whole-value priority over prefixed input names.
+- Preserve the input precedence each widget documents in
+  `value_from_datadict`. For a mapping, an exact mapping value under the
+  field's own name expands and replaces prefixed child keys. For a sequence,
+  indexed row keys outrank an exact value; without indexed rows, an exact
+  value outranks bare management keys.
 - Preserve all input forms through mapping and sequence nesting.
 - Do not copy or canonicalize submission keys. A subform or row formset binds
   to the raw request data with a Django prefix and reads only its own keys.

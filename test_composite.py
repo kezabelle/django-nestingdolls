@@ -425,6 +425,27 @@ class SequenceCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCa
                 error = form.errors.as_data()["values"][0]
                 self.assertEqual(error.code, "invalid")
 
+    def test_direct_none_cleans_empty_when_optional(self):
+        """An optional field treats ``clean(None)`` as an empty submission.
+
+        ``MappingField.clean(None)`` returns ``{}``.
+        The sequence field has the same direct-call behavior.
+        Only ``clean`` makes this conversion.
+        Bound ``{"values": None}`` input remains invalid.
+        """
+        field = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        self.assertEqual(field.clean(None), [])
+
+    def test_direct_none_reports_required(self):
+        """A required field reports ``required`` for ``clean(None)``."""
+        field = nestingdolls.ListField(forms.IntegerField())
+
+        with self.assertRaises(ValidationError) as caught:
+            field.clean(None)
+
+        self.assertEqual(caught.exception.code, "required")
+
     def test_prefixed_data_cleans(self):
         """A prefixed sequence submission cleans its row."""
         form = SequenceForm(

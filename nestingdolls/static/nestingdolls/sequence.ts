@@ -15,15 +15,24 @@
   const prefix = "__prefix__";
   const sequenceWidgetSelector = '[data-widget="sequence"]';
   const enhancedWidgets = new WeakSet<HTMLElement>();
-  const prefixAttributes = [
+  // Hierarchical attributes embed the full prefix path in one token, so the
+  // first-placeholder-per-token replacement is safe at every nesting level.
+  // aria-label carries a bare placeholder that belongs to its own level only,
+  // so replace it at the level being cloned, never inside nested template
+  // content, or an outer add would consume an inner button's placeholder.
+  const hierarchicalPrefixAttributes = [
     "name",
     "id",
     "for",
     "aria-describedby",
     "aria-labelledby",
     "aria-controls",
-    "aria-label",
     "data-sequence-field",
+  ] as const;
+  const localPrefixAttributes = ["aria-label"] as const;
+  const prefixAttributes = [
+    ...hierarchicalPrefixAttributes,
+    ...localPrefixAttributes,
   ] as const;
   const prefixAttributeSelector = prefixAttributes
     .map((attribute) => `[${attribute}]`)
@@ -71,6 +80,8 @@
 
   function cloneTemplate(root: HTMLElement, selector: string): DocumentFragment {
     const template = ownedElement<HTMLTemplateElement>(root, root, selector);
+    // cloneNode is typed as returning Node. For a template's content, the DOM
+    // specification returns the fragment itself, so this cast is exact.
     return template.content.cloneNode(true) as DocumentFragment;
   }
 
@@ -296,12 +307,14 @@
   function replacePrefixAttributes(
     fragment: DocumentFragment,
     index: number,
+    nested = false,
   ): void {
     const replacement = String(index);
+    const attributes = nested ? hierarchicalPrefixAttributes : prefixAttributes;
     const elements =
       fragment.querySelectorAll<HTMLElement>(prefixAttributeSelector);
     for (const element of elements) {
-      for (const attribute of prefixAttributes) {
+      for (const attribute of attributes) {
         const value = element.getAttribute(attribute);
         if (value) {
           // Attribute values can contain several tokens. Change only the first
@@ -321,7 +334,7 @@
     for (const template of fragment.querySelectorAll<HTMLTemplateElement>(
       "template",
     )) {
-      replacePrefixAttributes(template.content, index);
+      replacePrefixAttributes(template.content, index, true);
     }
   }
 
@@ -372,6 +385,12 @@
   }
 
   function enhanceWidget(root: HTMLElement): void {
+    // SequenceWidget.get_context disables every control when the field is
+    // disabled or the submission overflowed. The server ignores this widget's
+    // input, so enhancement must not re-enable its buttons.
+    if (root.dataset.sequenceDisabled !== undefined) {
+      return;
+    }
     if (enhancedWidgets.has(root)) {
       return;
     }

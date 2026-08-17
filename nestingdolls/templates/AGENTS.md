@@ -38,8 +38,10 @@ Keep the top-level template names stable. Python selects them by name.
 Three templates carry two invariants that a refactor can silently break. Each
 is commented in place; do not remove those comments.
 
-- `sequence/row.html` interpolates `row_tag` and `body_tag` into markup. Every
-  caller must pass a hard-coded literal resolved in Python from a closed set.
+- `sequence/row.html` interpolates `row_tag` and `body_tag` into markup. The
+  only callers are the four layout templates in `sequence/`, and each passes
+  a hard-coded literal from a closed set (`div`, `span`, `li`, `tr` and
+  `td` or empty). Never add a caller that passes a non-literal value.
 - `sequence/row_content.html` and `sequence/hidden.html` `{% include %}` a
   variable template path. The value always comes from `Widget.template_name`,
   i.e. developer code. A data-derived value there is a path traversal.

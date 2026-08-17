@@ -65,7 +65,11 @@ distcheck: ## Build both distributions from the tracked tree and check their met
 	git archive --format=tar $$(git write-tree) | tar -xf - -C $$tmp && \
 	uv build --out-dir $$tmp/dist $$tmp >$$tmp/build.log 2>&1 && \
 	$(UV_RUN) twine check --strict $$tmp/dist/* && \
-	tar -tzf $$tmp/dist/*.tar.gz | grep -q '/LICENSE$$' || status=1 ; \
+	sdist_files=$$(tar -tzf $$tmp/dist/*.tar.gz) && \
+	echo "$$sdist_files" | grep -q '/LICENSE$$' && \
+	echo "$$sdist_files" | grep -q '/nestingdolls/templates/nestingdolls/sequence/row.html$$' && \
+	echo "$$sdist_files" | grep -q '/nestingdolls/static/nestingdolls/sequence.js$$' && \
+	echo "$$sdist_files" | grep -q '/nestingdolls/py.typed$$' || status=1 ; \
 	if [ $$status -ne 0 ]; then \
 		cat $$tmp/build.log ; \
 		echo "packaging metadata incomplete: the tracked tree does not build a publishable distribution."; \

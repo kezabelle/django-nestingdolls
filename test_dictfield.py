@@ -678,6 +678,23 @@ class MappingFieldUnitTestCase(FormBindingUnitTestCase):
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["point"], {"a": 1, "label": "kept"})
 
+    def test_file_child_keys_outrank_an_exact_data_scalar_in_extraction(self):
+        """Extraction reads child file input before exact scalar input."""
+
+        class ChildForm(forms.Form):
+            document = forms.FileField()
+
+        field = nestingdolls.MappingField(ChildForm)
+        upload = SimpleUploadedFile("real.txt", b"real")
+
+        value = field.widget.value_from_datadict(
+            QueryDict("asset=forged"),
+            MultiValueDict({"asset-document": [upload]}),
+            "asset",
+        )
+
+        self.assertEqual(value, {"document": upload})
+
     def test_invalid_mapping_shapes_stay_in_djangos_bound_data_path(self):
         """It redisplays hostile submitted data and disabled hostile initials."""
         enabled = nestingdolls.MappingField(
@@ -1059,7 +1076,10 @@ class MappingNestedSequenceChildTestCase(FormBindingUnitTestCase):
         self.assertEqual(html.count('aria-invalid="true"'), 1)
         self.assertIn('name="point-tags-1" value="bad"', html)
         self.assertIn('aria-describedby="id_point-tags_1_error"', html)
-        self.assertInHTML("<li>Enter a whole number.</li>", html)
+        self.assertInHTML(
+            '<span class="errorlist" id="id_point-tags_1_error">Enter a whole number.</span>',
+            html,
+        )
 
     def assertNestedSequenceChildValid(self, form):
         """Assert a valid nested int list cleans and renders every row."""
@@ -1156,7 +1176,14 @@ class MappingSequenceOfRecordsTestCase(FormBindingUnitTestCase):
         html = form.as_p()
         self.assertIn('name="payload-records-0-name" value="ok"', html)
         self.assertIn('aria-describedby="id_payload-records-1-name_error"', html)
-        self.assertInHTML("<li>This field is required.</li>", html)
+        self.assertInHTML(
+            '<span class="errorlist" id="id_payload-records-1-name_error">This field is required.</span>',
+            html,
+        )
+        self.assertInHTML(
+            '<span class="errorlist" id="id_payload-records_1_error">This field is required.</span>',
+            html,
+        )
 
     def assertRecordsAllValid(self, form):
         """Assert both valid records clean and render correctly."""
