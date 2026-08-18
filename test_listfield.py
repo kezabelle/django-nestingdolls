@@ -1989,13 +1989,40 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertEqual([len(rows) for rows in payload["values"]], [1999])
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
-    def test_nested_whole_values_keep_only_per_level_row_limits(self):
-        """A developer-supplied nested value bypasses request counting but each list caps itself."""
+    def test_nested_whole_values_share_one_row_limit(self):
+        """A decoded nested value can spend the shared cap exactly."""
 
         class Form(forms.Form):
             outer = nestingdolls.ListField(
                 nestingdolls.ListField(
                     forms.IntegerField(),
+                    max_length=10,
+                    absolute_max=10,
+                ),
+                max_length=10,
+                absolute_max=10,
+            )
+
+        form = Form({"outer": [list(range(9))]})
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["outer"], [list(range(9))])
+
+    @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
+    def test_nested_whole_values_reject_shared_row_limit_overflow(self):
+        """A decoded child list cannot overdraw its parent sequence budget."""
+
+        class CountingField(forms.IntegerField):
+            cleans = 0
+
+            def clean(self, value):
+                type(self).cleans += 1
+                return super().clean(value)
+
+        class Form(forms.Form):
+            outer = nestingdolls.ListField(
+                nestingdolls.ListField(
+                    CountingField(),
                     max_length=10,
                     absolute_max=10,
                 ),
@@ -2005,30 +2032,42 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
 
         form = Form({"outer": [list(range(10))]})
 
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["outer"], [list(range(10))])
+        self.assertIs(form.is_valid(), False)
+        error = form.errors.as_data()["outer"][0]
+        self.assertEqual(error.code, "too_many_forms")
+        self.assertEqual(CountingField.cleans, 0)
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
-    def test_nested_whole_values_reject_an_oversized_child_list(self):
-        """A nested whole value still gets the child list's user-visible hard-cap error."""
+    def test_nested_mapping_values_reject_shared_row_limit_overflow(self):
+        """A mapping row discovers its nested sequence under the parent cap."""
 
-        class Form(forms.Form):
-            outer = nestingdolls.ListField(
-                nestingdolls.ListField(
-                    forms.IntegerField(),
-                    max_length=10,
-                    absolute_max=10,
-                ),
+        class CountingField(forms.IntegerField):
+            cleans = 0
+
+            def clean(self, value):
+                type(self).cleans += 1
+                return super().clean(value)
+
+        class MappingForm(forms.Form):
+            values = nestingdolls.ListField(
+                CountingField(),
                 max_length=10,
                 absolute_max=10,
             )
 
-        form = Form({"outer": [list(range(11))]})
+        class Form(forms.Form):
+            outer = nestingdolls.ListField(
+                nestingdolls.MappingField(MappingForm),
+                max_length=10,
+                absolute_max=10,
+            )
+
+        form = Form({"outer": [{"values": list(range(10))}]})
 
         self.assertIs(form.is_valid(), False)
         error = form.errors.as_data()["outer"][0]
-        self.assertEqual(error.code, "item_invalid")
-        self.assertEqual(error.params["child_code"], "too_many_forms")
+        self.assertEqual(error.code, "too_many_forms")
+        self.assertEqual(CountingField.cleans, 0)
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
     def test_unbound_nested_initial_rendering_counts_parent_rows_before_children(self):

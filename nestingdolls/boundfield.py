@@ -234,6 +234,13 @@ class MappingBoundField(CompositeBoundField):
                 field.disabled = True
         return subform
 
+    @cached_property
+    def data(self) -> object:
+        """Read bound child values through the subform that owns them."""
+        if self.is_bound_subform:
+            return {name: self.subform[name].data for name in self.subform.fields}
+        return super().data
+
     def _has_changed(self) -> bool:
         """Delegate change detection to the mapping's own bound child Form."""
         if self.field.disabled:
@@ -308,75 +315,111 @@ class SequenceBoundField(CompositeBoundField):
     @cached_property
     def formset(self) -> BaseFormSet[BaseForm]:
         """Return the cached, prefix-aware row formset for cleaning and rendering."""
+        widget = self.field.widget
+        has_exact_input = self.has_exact_input
         is_bound_formset = self.is_bound_formset
-        initial: list[object] | list[dict[str, object]] = self.initial
-        data: Mapping[str, object] | None = None
-        files: MultiValueDict[str, UploadedFile[bytes]] | None = None
-        if self.has_exact_input and not is_bound_formset:
-            value = self.data
-            if isinstance(value, list):
-                initial = value
-                if self.form.is_bound and not self.field.disabled:
-                    data = self.field.widget.data_from_exact_list(value, self.html_name)
-                    files = MultiValueDict()
-        elif is_bound_formset:
-            data = self.form.data
-            files = self.form.files
-        if is_bound_formset:
-            initial = self.field.widget.initial_rows(initial)
-        else:
-            initial = self.field.widget.default_initial_rows(initial)
-        return self.field.widget.new_formset(
-            data=data,
-            files=files,
-            initial=initial,
-            prefix=self.html_name,
-            auto_id=cast("str", self.form.auto_id),
-            form_kwargs={"use_required_attribute": False},
-        )
+        # No input for this sequence exists. Render its initial rows.
+        if not has_exact_input and not is_bound_formset:
+            return widget.new_formset(
+                initial=widget.default_initial_rows(self.initial),
+                prefix=self.html_name,
+                auto_id=cast("str", self.form.auto_id),
+                form_kwargs={"use_required_attribute": False},
+            )
 
-    @cached_property
-    def data(self) -> object:
-        """Return exact input or formset row values.
-
-        After a child makes the shared submission count negative, later children
-        cannot add a row or change the error. Do not construct their empty
-        formsets. A count of zero is not overflow: the next child must read its
-        claim and can make the count negative. See ``pathological.py`` for the
-        measured cost.
-        """
-        if not self.has_exact_input and not self.is_bound_formset:
-            return []
-        with self.field.widget.submission_countdown(
-            self.field.limits.submission_max
-        ) as countdown:
-            rows: object
-            if self.is_bound_formset:
-                rows = []
-                if countdown.remaining.get() >= 0:
-                    rows = [form[row_value_name].data for form in self.formset.forms]
-            else:
-                rows = self.field.widget.value_from_datadict(
+        exact_values: list[object] | None = None
+        with widget.submission_countdown(self.field.limits.submission_max) as countdown:
+            data: Mapping[str, object] | None
+            files: MultiValueDict[str, UploadedFile[bytes]] | None
+            data = self.form.data if is_bound_formset else None
+            files = self.form.files if is_bound_formset else None
+            # We do this here to make sure we're within the submission countdown,
+            # even though we don't subsequently use it until `new_formset` call
+            # later on.
+            initial = (
+                widget.initial_rows(self.initial)
+                if is_bound_formset
+                else widget.default_initial_rows(self.initial)
+            )
+            value: object = None
+            if not is_bound_formset:
+                value = widget.value_from_datadict(
                     self.form.data, self.form.files, self.html_name
                 )
+            if (
+                isinstance(value, list)
+                and self.form.is_bound
+                and not self.field.disabled
+            ):
+                exact_values = value
+                data = widget.data_from_exact_list(value, self.html_name)
+                # Exact data wins over files. Copy files only from their source.
+                files = (
+                    cast(
+                        "MultiValueDict[str, UploadedFile[bytes]]",
+                        MultiValueDict(
+                            {
+                                f"{self.html_name}-{index}": [file]
+                                for index, file in enumerate(value)
+                            }
+                        ),
+                    )
+                    if self.html_name not in self.form.data
+                    and self.html_name in self.form.files
+                    else MultiValueDict()
+                )
+
+            formset = widget.new_formset(
+                data=data,
+                files=files,
+                initial=initial,
+                prefix=self.html_name,
+                auto_id=cast("str", self.form.auto_id),
+                form_kwargs={"use_required_attribute": False},
+            )
+            # Generated exact-list rows already use this budget.
+            if exact_values is not None:
+                formset.submission_total_form_count = len(exact_values)
+            for form in formset.forms:
+                # A nested row claim exhausted the budget. Do not read later rows.
+                if countdown.remaining.get() < 0:
+                    break
+                _ = form[row_value_name].data
+        self._extraction_ran_out = countdown.ran_out
+        # This scope opened the exhausted budget. Record one outer error.
         if countdown.owns_scope and countdown:
             # Extraction ran out. Only the scope that owns the shared
             # counter records it, so cleaning reports one error for the
             # whole submission instead of one child item error per row.
             self._submission_overflow = True
-        return rows
+        return formset
+
+    @cached_property
+    def data(self) -> object:
+        """Return exact input or formset row values.
+
+        The formset owns bound extraction and reads nested row data while its
+        countdown is active. These cached reads do not reserve the rows again.
+        """
+        if not self.has_exact_input and not self.is_bound_formset:
+            return []
+        formset = self.formset
+        if self._extraction_ran_out:
+            return []
+        if self.has_exact_input and not formset.is_bound:
+            return self.field.widget.value_from_datadict(
+                self.form.data, self.form.files, self.html_name
+            )
+        return [form[row_value_name].data for form in formset.forms]
 
     @property
     def submission_overflow(self) -> bool:
         """Report whether extracting this field's rows ran out of the budget.
 
-        Reading ``data`` is the step that reserves rows, so read it here.
-        Every caller therefore gets an answer about a finished extraction,
-        and no caller can clean or render rows that nothing reserved. The
-        read is cached, so asking twice costs nothing and reserves nothing
-        a second time.
+        Reading ``formset`` completes extraction once, so every caller gets an
+        answer about rows that the countdown already reserved.
         """
-        _ = self.data
+        _ = self.formset
         return self._submission_overflow
 
     def prepare_widget(self, widget: CompositeWidget) -> None:
@@ -429,7 +472,7 @@ class SequenceBoundField(CompositeBoundField):
             changed = self.field.has_changed(self.initial, self.data)
         else:
             changed = super()._has_changed()
-        if changed:
+        if changed or self._extraction_ran_out:
             return True
         if not self.initial:
             # Only the deletion of an initial row is a change, and this

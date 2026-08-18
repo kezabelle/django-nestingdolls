@@ -184,14 +184,15 @@ sequence nesting, not every collection configured by an application.
   does not build the rows inside it. Those appear only when something reads
   or renders that row's value, so the scope must stay open across the read,
   and the reader is the site that must hold it. That gives exactly five
-  sites, and any sixth is a duplicate. Three spend: `RowFormSet.
-  total_form_count` (a submitted `TOTAL_FORMS`), `SequenceWidget.
-  value_from_datadict` (a whole Python list, and it drives extraction),
-  and `SequenceField.prepare_value` (server initial rows, and it drives
-  preparation). Two only drive: `SequenceWidget.get_context` for a render
-  and `SequenceBoundField.data` for an extraction.
+  sites, and any sixth is a duplicate. Three spend: `RowFormSet.total_form_count`
+  (a submitted `TOTAL_FORMS`), the whole-value `SequenceWidget.value_from_datadict`
+  (a Python list, and it drives extraction), and `SequenceField.prepare_value`
+  (server initial rows, and it drives preparation). Two only drive:
+  `SequenceWidget.get_context` for a render
+  and `SequenceBoundField.formset` for an extraction. Its existing row-data
+  reads traverse nested sequence and mapping children before cleaning.
   Everything else inherits. Cleaning and change detection both reach rows
-  through `SequenceBoundField.data`, so `SequenceField._clean_bound_field`
+  through `SequenceBoundField.formset`, so `SequenceField._clean_bound_field`
   reads `bound_field.submission_overflow`, which performs that one
   extraction, instead of opening a scope of its own. A second scope there
   would find every row list already built and could only take rows twice.
@@ -200,7 +201,7 @@ sequence nesting, not every collection configured by an application.
   not one child item error per row.
   That list is closed, and a sixth site is not a harmless addition. Only the
   owning scope reports, so a scope opened anywhere above a sequence takes
-  ownership away from `SequenceBoundField.data` and silences the report.
+  ownership away from `SequenceBoundField.formset` and silences the report.
   Rows past the budget are then dropped from a submission that still cleans
   as valid. A sequence configured for 50 rows, extracted under an outer
   scope of 20, keeps 20 rows, raises nothing, and loses the other 10. The

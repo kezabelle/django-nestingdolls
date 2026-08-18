@@ -710,52 +710,39 @@ class SequenceField(CompositeField):
                 "Collection[object]",
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
-        # Reserve rows once, at extraction, then clean what extraction
-        # produced. Reading this flag performs that extraction, so cleaning
-        # is never the step that discovers a forged row count. Check the
-        # flag before exact-list cleaning: an earlier version skipped it
-        # there, so a clipped exact list cleaned as valid and lost the rows
-        # past the budget.
+        # Reserve rows once, at extraction, then clean what extraction produced.
+        # Reading this flag performs that extraction, so cleaning is never the step
+        # that discovers a forged row count.
         if bound_field.submission_overflow:
             raise TooManyFormsValidationError(
                 self.error_messages["submission_too_many_forms"],
                 num=self.limits.submission_max,
             )
-        if bound_field.has_exact_input and not bound_field.is_bound_formset:
-            return self._clean_values(
-                self.to_python(bound_field.data), bound_field.initial
-            )
-        if (
-            not bound_field.is_bound_formset
-            and isinstance(self.child_field, FileField)
-            and bound_field.initial
-        ):
-            return self._clean_values(
-                [None] * len(bound_field.initial), bound_field.initial
-            )
-        if not bound_field.is_bound_formset:
+        formset = bound_field.formset
+        if not formset.is_bound:
+            if bound_field.has_exact_input:
+                return self._clean_values(
+                    self.to_python(bound_field.data), bound_field.initial
+                )
+            if isinstance(self.child_field, FileField) and bound_field.initial:
+                return self._clean_values(
+                    [None] * len(bound_field.initial), bound_field.initial
+                )
             return cast(
                 "Collection[object]",
                 super()._clean_bound_field(bound_field),  # type: ignore[misc]
             )
-        formset = bound_field.formset
         if not formset.is_valid():
             errors: list[ValidationError] = list(formset.non_form_errors().as_data())
             errors.extend(
                 item_error
                 for index, form in enumerate(formset.forms)
-                # A row the user marks for deletion is discarded below, so
-                # its errors must not become item errors. An earlier
-                # version reported them when another row was invalid.
-                # ``deleted_forms`` cannot answer here: Django returns an
-                # empty list from it when the formset is invalid.
                 if not getattr(form, "cleaned_data", {}).get(DELETION_FIELD_NAME)
                 for field_errors in form.errors.as_data().values()
                 for error in field_errors
                 for item_error in ItemValidationError.for_messages_of(index, error)
             )
             raise ValidationError(errors)
-
         deleted_forms = {id(form) for form in formset.deleted_forms}
         cleaned_data: list[object] = []
         for form in formset.forms:
