@@ -175,14 +175,15 @@ submission.
 package. It protects attacker-controlled multiplication from recursive
 sequence nesting, not every collection configured by an application.
 
-- Enter `with submission_countdown(limits.submission_max)` only in sequence
-  parsing, extraction, or rendering. It starts one context-local counter at
-  the outer sequence; nested sequences reuse it. Do not open it in a
-  mapping, `clean()`, a shared composite base class, or a field-tree walk.
-  A site needs the scope only if it does one of two things: spend budget, or
+- Call `submission_countdown.open(limits.submission_max)` only in sequence
+  parsing, extraction, or rendering. The first `open()` of an operation
+  builds the context-local budget at the outer sequence; a nested `open()`
+  yields that same budget and owns nothing. Do not open it in a mapping,
+  `clean()`, a shared composite base class, or a field-tree walk.
+  A site needs the budget only if it does one of two things: spend it, or
   drive the lazy recursion that builds a nested level. Building a row form
   does not build the rows inside it. Those appear only when something reads
-  or renders that row's value, so the scope must stay open across the read,
+  or renders that row's value, so the budget must stay open across the read,
   and the reader is the site that must hold it. That gives exactly five
   sites, and any sixth is a duplicate. Three spend: `RowFormSet.total_form_count`
   (a submitted `TOTAL_FORMS`), the whole-value `SequenceWidget.value_from_datadict`
@@ -194,24 +195,33 @@ sequence nesting, not every collection configured by an application.
   Everything else inherits. Cleaning and change detection both reach rows
   through `SequenceBoundField.formset`, so `SequenceField._clean_bound_field`
   reads `bound_field.submission_overflow`, which performs that one
-  extraction, instead of opening a scope of its own. A second scope there
+  extraction, instead of opening a budget of its own. A second budget there
   would find every row list already built and could only take rows twice.
-  Only the scope that owns the shared counter (`owns_scope`) records
-  overflow, so one oversized submission reports one `too_many_forms` error,
-  not one child item error per row.
-  That list is closed, and a sixth site is not a harmless addition. Only the
-  owning scope reports, so a scope opened anywhere above a sequence takes
-  ownership away from `SequenceBoundField.formset` and silences the report.
-  Rows past the budget are then dropped from a submission that still cleans
-  as valid. A sequence configured for 50 rows, extracted under an outer
-  scope of 20, keeps 20 rows, raises nothing, and loses the other 10. The
-  first scope entered also fixes the budget for every sequence beneath it,
-  so an outer scope built from anything other than that sequence's own
-  `limits.submission_max` silently replaces the limit the application
-  chose. This is why the scope does not belong in `CompositeBoundField`: a
-  mapping reaches its children through a child `Form` and a sequence reaches
-  its rows through a `BaseFormSet`, so the shared base has no row-building
-  path to wrap, and it has no `absolute_max` from which to derive a budget.
+  `SequenceBoundField.formset` is the one site that opens with
+  `raises=True`: an overdraw anywhere in the nested tree raises
+  `submission_countdown.OverdrawError`, the exception unwinds every nested frame
+  without building another row, and only the owning `open()` catches it and
+  records `overflowed`. Extraction then swaps in a bound zero-row formset
+  and leaves `submission_overflow` behind as its single answer, so one
+  oversized submission reports one `too_many_forms` error, not one child
+  item error per row, and no later reader needs a second flag to know the
+  forged rows are void. Every other owner clips: rendering and preparation
+  show the prefix that fits, and a standalone `value_from_datadict` clips
+  because the child-form extraction path is the reporter.
+  That list is closed, and a sixth site is not a harmless addition. Only
+  the owning `open()` reports, so an `open()` anywhere above a sequence
+  takes ownership away from `SequenceBoundField.formset`, and a clip-mode
+  owner silences the report: rows past the budget are then dropped from a
+  submission that still cleans as valid. A sequence configured for 50 rows,
+  extracted under an outer budget of 20, keeps 20 rows, raises nothing, and
+  loses the other 10. The first `open()` also fixes the budget and its mode
+  for every sequence beneath it, so an outer budget built from anything
+  other than that sequence's own `limits.submission_max` silently replaces
+  the limit the application chose. This is why the budget does not belong
+  in `CompositeBoundField`: a mapping reaches its children through a child
+  `Form` and a sequence reaches its rows through a `BaseFormSet`, so the
+  shared base has no row-building path to wrap, and it has no
+  `absolute_max` from which to derive a budget.
 - Call `take(count)` at the earliest point a submitted row count turns into
   built rows. Two points qualify for a submitted count:
   `RowFormSet.total_form_count`, where a `TOTAL_FORMS` value becomes the
@@ -219,36 +229,47 @@ sequence nesting, not every collection configured by an application.
   `SequenceWidget.value_from_datadict`, where a Python list under the field's
   own name becomes rows. `SequenceField.prepare_value` also takes, but for
   server-provided initial rows rather than a submission. A row nested inside
-  an active countdown reserves from the same shared budget, so a total that
-  is legal on its own at every level still cannot multiply across sibling
-  rows. A step that waits until after row construction to call `take()` has
-  already paid to build every row a forged `TOTAL_FORMS` asked for, once for
-  every sibling row that reaches it. A formset that finds the shared budget
-  already overdrawn returns zero rows without reading its `ManagementForm`
-  or calling `take()`: the overflow flag is already set, only the sign of
-  the remaining value is ever read, and `take()` would return zero anyway.
-  The `ManagementForm` stays lazily available for a reader that wants it,
-  such as a render. `take(count)` returns only rows that
-  fit. Cleaning reports `too_many_forms` for the complete bound submission
-  when extraction ran out; rendering shows only the prefix that fits. Exact
-  use succeeds. Never put the limit in an overridable field `clean()`
-  method: bound extraction records overflow, bound cleaning reports the
-  error, and rendering clips.
+  an open budget reserves from that same budget, so a total that is legal
+  on its own at every level still cannot multiply across sibling rows. A
+  step that waits until after row construction to call `take()` has already
+  paid to build every row a forged `TOTAL_FORMS` asked for, once for every
+  sibling row that reaches it. `take(count)` reserves only rows that fit:
+  under a clip-mode owner it returns them, and under the raise-mode
+  extraction owner an overdraw raises `OverdrawError` at the first claim that
+  does not fit, so nothing after that claim is built. Cleaning reports
+  `too_many_forms` for the complete bound submission when extraction
+  overflowed; rendering shows only the prefix that fits. Exact use
+  succeeds. Never put the limit in an overridable field `clean()` method:
+  bound extraction records overflow, bound cleaning reports the error, and
+  rendering clips.
 - A step that reads an already-built row list, such as a bound field
   reading its cached formset's forms, must not call `take()` on that count
   again. It inherits the reservation, and a comment at that step must say
   so. A double `take()` on the same rows halves the effective budget and can
-  reject a submission that should pass.
+  reject a submission that should pass. An already-counted total travels
+  through `new_formset`'s `submission_total_form_count` parameter, which
+  pre-fills the memo `total_form_count` would otherwise write: extraction
+  uses it to pass an exact list's reservation to the formset it builds.
 - `Limits.submission_max` is `max(absolute_max, DATA_UPLOAD_MAX_NUMBER_FIELDS)`. The key limit covers populated rows and `absolute_max` covers empty rows. Read the setting for each submission.
-- Keep the class inside `SequenceWidget`, and use its normal
-  `__enter__`/`__exit__` lifecycle. Mappings and the shared composite base
-  classes must not import, start, inspect, or extend it. Its `ContextVar` is
-  a `ClassVar` containing only the remaining row count and overflow state,
-  and it has no default: a read outside an open scope raises `LookupError`
-  from the unset variable, and only `__enter__` passes a call-site default
-  to see the unset state. Do not give it a default back, store field
-  objects, add sentinels or marker values, or add lazy cap expansion or a
-  separate `scope()` API.
+- Keep the class inside `SequenceWidget`, and enter it only through
+  `open()`. Mappings and the shared composite base classes must not import,
+  open, inspect, or extend it. A countdown is the budget: `open()` builds
+  it whole, stores it in the `ClassVar` `ContextVar` while the owning scope
+  runs, and releases the variable on the way out, so no partially
+  initialized state ever exists. It carries three facts: the rows
+  remaining, the owner's raise-or-clip mode, and `overflowed`, which has
+  exactly one writer (the owning `open()`'s `except OverdrawError`) and one
+  reader (`SequenceBoundField.formset`, after its `with` block). Do not
+  give the variable a module default, store field objects, add sentinels or
+  marker values, or add lazy cap expansion. The stored object is the
+  countdown itself: it references no field, widget, or formset, and the
+  variable stops referencing it once the owning `open()` exits.
+- A claim of zero or less buys nothing and refunds nothing. Django's bound
+  `total_form_count` is `min(TOTAL_FORMS, absolute_max)` over a plain
+  `IntegerField` with no lower clamp, so a forged negative `TOTAL_FORMS`
+  reaches `take()`. It must not grow the budget or erase a recorded overflow;
+  an earlier version subtracted the full claim, and 42 keys then bought
+  8,005 rows and cleaned as valid.
 - The budget belongs to one field's own nested tree only. It does not
   reach a sibling field, on the same form or inside a mapping's child
   form. Django gives each formset on a page its own `absolute_max` with

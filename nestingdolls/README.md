@@ -417,8 +417,37 @@ Parent and child rows spend that budget before Django builds them. A submission
 right at the limit works; one over it gets `too_many_forms` for the whole
 submission. Sibling sequence fields get separate budgets because the form
 author chose how many siblings exist. Sharing a countdown across separate
-`ListField` definitions needs a custom `Form` subclass to open that context.
+`ListField` definitions needs a custom `Form` subclass that calls
+`submission_countdown.open()` around both fields.
 
 Python lists and decoded JSON never go through Django's request parser. The
 sequence field still applies its own row limits, but code accepting arbitrary
 decoded structures still needs its own total-size and depth limit.
+
+## Caveats and differences from Django
+
+Here is the one deliberate difference: nested row limits fail fast. Django
+reports an oversized formset through `formset.non_form_errors()` and still
+renders every row up to `absolute_max`. Two keys plus `TOTAL_FORMS=5000` can
+come back as 2,000 rows and roughly 300 KB of HTML. That is reasonable for one
+formset; nested sequences can turn a few row counts into a much larger tree.
+
+When the shared budget runs out, `nestingdolls` stops there. It puts
+`too_many_forms` on the outer sequence field and redisplays a zero-row,
+disabled widget: `TOTAL_FORMS=0`, disabled add and remove controls, and
+`data-sequence-disabled` so `sequence.js` politely stays out of the way. Rows
+after the overdraw are never built or echoed back. Building or returning them 
+is the amplification this limit exists to avoid. It's not ideal, but it is
+safer than accidentally DoSing yerself.
+
+The ordinary one-field limits stay Django-like. A `max_length` violation or a
+row count over that field's `absolute_max` redisplays the submitted rows,
+values, and working controls. Those errors use Django's `too_many_forms` code
+and Django's message. The shared-budget error reuses the code but has its own
+message, because it counts rows spent across nested sequences rather than rows
+in one formset.
+
+A render, including server-provided `initial` rows, shows the prefix that 
+fits because failing halfway through a page render helps nobody. Bound extraction
+raises on an overdraw instead, so an over-budget submission fails outright and 
+never looks like a saved value with rows quietly missing. Hopefully.

@@ -35,7 +35,7 @@ claims that must hold live in the ``Case`` entries below and in
 ``HostileCleanCostTestCase`` in ``test_hostile.py``.
 
 Provenance of the recorded run: Apple M1 Pro, macOS 24.3.0, CPython 3.12.12,
-Django 6.1, 2026-08-15. The "before" figures came from commit acb16e4, the last
+Django 6.1, 2026-08-18. The "before" figures came from commit acb16e4, the last
 commit before the row budget covered extraction. Rebuild that comparison rather
 than trusting the figures:
 
@@ -45,9 +45,10 @@ than trusting the figures:
 
 The timing figures have their own "before", the commit preceding the one that
 removed the repeated work described under "Two repeats that change detection
-and the mapping render paid". Rebuild it the same way. Verdicts are identical
-across that change, and so is every built figure except the mapping render's,
-which fell from two budgets of rows to one.
+and the mapping render paid". Rebuild it the same way. The run recorded here
+postdates the redesign under "Extraction stops at the first overdraw", which
+lowered every hostile case's built figure; verdicts are identical across all
+of these changes.
 
 What the recorded run showed
 ----------------------------
@@ -56,12 +57,16 @@ nine reach rows through change detection, an ``empty_permitted`` form, a render,
 a hidden initial, or a mapping, and every one of them was still building rows
 when the abort timer killed it, at 6s and again at 20s.
 
-    a claim 498x wider  ->  rows built x1.0,  wall time x2.0
+    a claim 498x wider  ->  rows built x498.0,  wall time x31.9
 
-Rows built stayed flat at one budget per entry point. A 998-key claim for 996,498
-rows was answered with 2,000 rows in 0.054s, and the same claim spread over
-three or five levels cost no more, because levels share one budget instead of
-each getting a fresh one. Peak allocation stayed between 4.9 and 39.3 MB.
+Rows built now follow the claim a request actually carries: extraction raises
+``submission_countdown.OverdrawError`` at the first claim that does not fit, so the
+998-key claim for 996,498 rows was answered with 498 rows in 0.032s, against
+2,000 rows and 0.054s before the abort, and the same claim spread over three
+or five levels cost less, because a deeper level overdraws sooner. The ratios
+above grew because the cheapest 4-key claim now builds one row instead of a
+full budget; every absolute figure fell. Peak allocation stayed at or below
+1.8 MB, against 4.9 to 39.3 MB before.
 
 Verdicts differ by shape and all three are correct. A plain nested sequence
 reports ``too_many_forms``. A sequence inside a mapping reports ``item_invalid``,
@@ -73,13 +78,16 @@ bounded in all three.
 Two costs remain. Both are ceilings rather than amplification, because a request
 cannot raise either bound:
 
-- 0.054s for the widest single-field case, against 0.027s for a 4-key claim
-  asking for the same number of rows. Rows built are identical, so what is left
-  of the difference is per-key work. See the next section.
-- 0.317s and 16,000 rows for a form with eight sibling nested sequence
-  fields, which is budget x fields x entry points. The field count is fixed by
-  the form's author, the same position Django takes for ``absolute_max`` per
-  formset. Quote this number, not the single-field total, as the per-request ceiling.
+- 0.032s for the widest single-field case, against 0.001s for a 4-key claim
+  asking for the same number of rows. The wide claim builds one outer row per
+  outer ``TOTAL_FORMS`` unit it carries, so its cost follows the request's
+  own key count plus per-key work. See the next section.
+- 0.027s and 488 rows for a form with eight sibling nested sequence fields.
+  The per-request ceiling is still budget x fields x entry points: a claim
+  that spends each budget down before its final overdraw still buys it, and
+  the field count is fixed by the form's author, the same position Django
+  takes for ``absolute_max`` per formset. Quote that ceiling, not this run's
+  total.
 
 Two ways this script had already misled its own author, both fixed here, both
 worth re-checking if the numbers ever look surprising. Measuring peak allocation
@@ -98,16 +106,18 @@ script does this itself, so there is no snippet here to fall out of date:
     uv run --group dev python pathological.py --profile
     uv run --group dev python pathological.py --profile "8 sibling"
 
-With no argument it profiles the pair named in ``CONTRAST``: two cases that build
-the same number of rows, one from 4 keys and one from 998. A label substring
+With no argument it profiles the pair named in ``CONTRAST``: the concentrated
+and spread two-level cases, one from 4 keys and one from 998. A label substring
 profiles a different case instead. ``PROFILE_HINT`` repeats how to read the
 output at the point of use.
 
 Sort by ``tottime``, not ``cumtime``. The question is which function burns the
 time itself, and the request path is deep enough that ``cumtime`` puts the test
-client and the view on top and tells you nothing. The contrast pair is the whole
-method: both build the same 2,000 rows, so whatever separates their profiles is
-per-key cost, and per-key cost is all that is left to win.
+client and the view on top and tells you nothing. When the pair was recorded,
+both cases built the same 2,000 rows, so whatever separated their profiles was
+per-key cost. Since extraction began aborting at the first overdraw they build
+1 and 498 rows, so the difference now mixes per-key work with per-row work;
+read the profiles with that in mind.
 
 No package function appears in the top ten of either final contrast profile.
 The 0.074s concentrated profile, 0.131s spread profile, and 0.705s sibling
@@ -117,14 +127,14 @@ profile, ``copy._deepcopy_dict`` takes 0.126s of self time, ``deepcopy`` takes
 form construction: ``copy.deepcopy`` of ``base_fields`` in
 ``BaseForm.__init__`` and the ``Field.__deepcopy__`` chain under it.
 
-That is per-row cost, not per-key cost, so the contrast pair no longer
-separates it: both cases build 2,000 rows and both pay it. It is bounded by the
-row budget, which is what bounds rows built. Do not try to flatten it by
-sharing fields across rows. ``get_context`` writes to a management field's
-widget attributes, ``_row_context`` assigns each row's ``render_state``, and
-the field writes its configuration to the widget; sharing widgets between
-rows is the cross-request contamination ``MappingWidget.__deepcopy__`` exists
-to prevent.
+That is per-row cost, not per-key cost, so the contrast pair never separated
+it: at that recording both cases built 2,000 rows and both paid it. It is
+bounded by the row budget, which is what bounds rows built. Do not try to
+flatten it by sharing fields across rows. ``get_context`` writes to a
+management field's widget attributes, ``_row_context`` assigns each row's
+``render_state``, and the field writes its configuration to the widget;
+sharing widgets between rows is the cross-request contamination
+``MappingWidget.__deepcopy__`` exists to prevent.
 
 What was reduced, and what is left
 ----------------------------------
@@ -162,39 +172,42 @@ comparisons rather than ``startswith`` and an index. Measured together on it,
 those two are worth about 6%. Both keep the prefix length in a local, which is
 the whole reason a slice is cheaper than a call here.
 
-``submission_countdown`` was not touched and did not need to be. The judgment
-call this section used to set up -- whether to widen the countdown scope to hold
-an index -- did not have to be made, so nothing was traded away. It still holds
-one integer, and that is still the only thing between a forged ``TOTAL_FORMS``
-and unbounded work. Keep it that way.
+``submission_countdown`` has since been redesigned around one ``open()``
+classmethod, so the two sections that followed here -- reading the budget's
+sticky overflow bit mid-scope to skip empty child formsets, and the whole-run
+comparison of that shortcut -- described mechanics that no longer exist and
+were replaced by the section below. The countdown still holds one budget, and
+that budget is still the only thing between a forged ``TOTAL_FORMS`` and
+unbounded work. Keep it that way.
 
-Empty child formsets after overflow
------------------------------------
-``SequenceBoundField.data`` now reads the active shared count after it enters
-``submission_countdown``. A strictly negative count means an earlier child has
-already overdrawn the budget. Later children cannot add a row or change the one
-error the owning outer field reports, so extraction returns their empty values
-without constructing their zero-row formsets. It does not alter the count, row
-budget, or error owner. Zero is not overflow: the next child still constructs
-its formset and reads its claim, which can make the count negative.
+Extraction stops at the first overdraw
+--------------------------------------
+``SequenceBoundField.formset`` opens the budget with ``raises=True``. The
+first claim that does not fit raises ``submission_countdown.OverdrawError`` inside
+``take()``, the exception unwinds every nested frame without building another
+row form, and only the owning ``open()`` catches it. Extraction then swaps in
+one bound zero-row formset and reports through ``submission_overflow``. Later
+siblings are not skipped; they are never reached. Exact use is not overflow:
+a claim that spends the budget down to zero raises nothing, so the next child
+still constructs its formset and reads its claim, which is the claim that
+raises.
 ``HostileCleanCostTestCase.test_claim_after_exact_budget_still_records_overflow``
 holds that boundary.
 
-The old eight-sibling request built 496 formsets: eight outer formsets and 61
-child formsets for each sibling. The strict-negative shortcut builds 16: each
-sibling's outer formset and its first child formset. It still builds 16,000 row
-forms and returns the same response body.
-
-Whole-run timings had more process-to-process variation than this package-side
-change: five pre-change runs measured 0.278, 0.270, 0.276, 0.277, and 0.274s
-(median 0.276s), while two later strict-negative batches had 0.334s and 0.321s
-medians. Those sequential batches do not establish a source comparison. The
-comparison therefore ran the actual ``pathological.measure`` sibling case in
-ten alternating pairs of independent Python processes, with a source-equivalent
-old ``data`` implementation in one process and the strict-negative source in
-the other. Every request returned the same body, ``too_many_forms``, and 16,000
-rows. The old median was 294.778ms; the strict-negative median was 291.440ms:
-3.338ms, or 1.132%, lower. Peak allocation also fell from 39.8 to 39.3 MB.
+The abort subsumes two optimizations this file used to record, kept here as
+the reason it is worth having. Dropping the void rows a forged claim had
+already bought was worth about 35% of the eight-sibling case's wall time and
+7x its peak memory (0.176 against 0.270s, 4.5 against 32.5 MB, measured in
+alternating pairs of independent processes because sequential batches do not
+establish a source comparison), for the same 16,000 rows built. Skipping the
+``ManagementForm`` of a formset already past the budget cut the spread case's
+management forms from 499 to 2, and its run from 0.081s to 0.058s: Django's
+``total_form_count`` builds and cleans one full four-field ``ManagementForm``
+per outer row just to read ``TOTAL_FORMS``. The abort removes the rows and
+the management forms themselves, not just their post-overflow reads: the
+recorded run above builds 488 rows on the eight-sibling case and 498 on the
+spread case, where those runs built 16,000 and 2,000, because nothing past
+the first overdraw is built at all.
 
 The behavior to watch is unchanged, and ``rows_with_submitted_values``'s own
 docstring is still where it is written down: a rendered row always sends its
@@ -260,37 +273,6 @@ spread case's wall time (0.068s -> 0.057s minimum over nine posts) and 2.6 MB
 of every wide case's peak allocation (11.6 -> 9.0 MB), and the wall-time
 amplification fell from x3.0 to x2.6. Verdicts and every ``built`` figure are
 unchanged, which ``make test`` and this script confirmed.
-
-No ManagementForm for a formset past the budget
------------------------------------------------
-Django's ``total_form_count`` builds and cleans the ``ManagementForm`` to read
-``TOTAL_FORMS``. ``RowFormSet.total_form_count`` called it before it asked the
-shared budget for rows, so a wide hostile submission paid for one full Django
-form per outer row -- 499 management forms on the 998-key spread case, about a
-quarter of its profiled time, four deep-copied fields and four bound fields
-each -- and then clipped every one of those claims to zero rows.
-
-``RowFormSet.total_form_count`` now reads the sign of the countdown's shared
-remaining value first and skips the ``ManagementForm`` when the budget is
-already overdrawn. The skip cannot change a result. Overflow is the sign of
-the remaining value, which is already negative, and the magnitude is never
-read, so the skipped ``take()`` subtraction changes no observable state. The
-first overdrawing claim still goes through ``take()``, so exact use still
-succeeds and a ``TOTAL_FORMS`` of zero on an exactly-spent budget stays
-legal. ``management_form`` is a ``cached_property``, so a later reader -- a
-render's ``get_context``, a formset ``full_clean`` -- still builds it on
-demand.
-
-On the recorded management-form comparison, management forms in the spread
-profile fell from 499 to 2: the outer formset and the first inner formset,
-which overdraws. That comparison reduced the spread case from 0.081s to
-0.058s and from 9.0 to 6.2 MB. The current clean full run reports 0.054s and
-5.7 MB for the spread case, 0.317s and 39.3 MB for the eight-sibling case, and
-x2.0 wall-time amplification. The concentrated case does not move: its single
-nested formset is the one that overdraws, so there is nothing to skip. Every
-``built`` figure and verdict is unchanged, and the responses and rendered HTML
-were compared byte for byte. Verify with ``make test`` and this script, then
-re-record the numbers above.
 
 Slice comparisons, not startswith
 ---------------------------------

@@ -819,7 +819,9 @@ class SequenceField(CompositeField):
         rather than raising, without discovering every nested field first.
         """
         rows = self.initial_values(value, limit=self.limits.absolute_max)
-        with self.widget.submission_countdown(self.limits.submission_max) as countdown:
+        with self.widget.submission_countdown.open(
+            self.limits.submission_max
+        ) as countdown:
             rows = rows[: countdown.take(len(rows))]
             values = []
             for row in rows:

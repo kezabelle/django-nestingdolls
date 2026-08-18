@@ -1160,6 +1160,20 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         deleted[f"values-1-{DELETION_FIELD_NAME}"] = "1"
         self.assertIs(Form(deleted, initial=initial).has_changed(), True)
 
+    def test_bound_form_without_sequence_keys_reports_no_change(self):
+        """Answer change detection for a bound field that never extracted rows.
+
+        This field's extraction returns its initial rows without opening a
+        budget, so the overflow reader must answer for a bound field that has
+        no extraction at all. An earlier version stored that answer only
+        inside the countdown scope, so this raised ``AttributeError``.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        self.assertIs(Form({}).has_changed(), False)
+
     def test_to_python_rejects_errors_as_values(self):
         """It rejects validation errors passed in as raw values."""
         field = nestingdolls.ListField(forms.IntegerField())

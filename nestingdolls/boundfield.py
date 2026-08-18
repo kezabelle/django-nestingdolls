@@ -286,13 +286,18 @@ class SequenceBoundField(CompositeBoundField):
 
     field: SequenceField
 
+    # Cleaning and rendering both ask about overflow after extraction closed
+    # its countdown scope, so extraction leaves this one answer behind. A
+    # sequence with no input at all renders its initial rows without
+    # extracting, so the answer must exist before extraction runs.
+    _submission_overflow = False
+
     def __init__(self, form: BaseForm, field: Field, name: str) -> None:
         from nestingdolls.fields import SequenceField  # noqa: PLC0415
 
         super().__init__(form, field, name)
         if not isinstance(self.field, SequenceField):
             raise TypeError("field must be a SequenceField")
-        self._submission_overflow = False
 
     @cached_property
     def is_bound_formset(self) -> bool:
@@ -328,7 +333,9 @@ class SequenceBoundField(CompositeBoundField):
             )
 
         exact_values: list[object] | None = None
-        with widget.submission_countdown(self.field.limits.submission_max) as countdown:
+        with widget.submission_countdown.open(
+            self.field.limits.submission_max, raises=True
+        ) as countdown:
             data: Mapping[str, object] | None
             files: MultiValueDict[str, UploadedFile[bytes]] | None
             data = self.form.data if is_bound_formset else None
@@ -376,22 +383,29 @@ class SequenceBoundField(CompositeBoundField):
                 prefix=self.html_name,
                 auto_id=cast("str", self.form.auto_id),
                 form_kwargs={"use_required_attribute": False},
+                # Generated exact-list rows already used this budget.
+                submission_total_form_count=(
+                    len(exact_values) if exact_values is not None else None
+                ),
             )
-            # Generated exact-list rows already use this budget.
-            if exact_values is not None:
-                formset.submission_total_form_count = len(exact_values)
             for form in formset.forms:
-                # A nested row claim exhausted the budget. Do not read later rows.
-                if countdown.remaining.get() < 0:
-                    break
                 _ = form[row_value_name].data
-        self._extraction_ran_out = countdown.ran_out
-        # This scope opened the exhausted budget. Record one outer error.
-        if countdown.owns_scope and countdown:
-            # Extraction ran out. Only the scope that owns the shared
-            # counter records it, so cleaning reports one error for the
-            # whole submission instead of one child item error per row.
-            self._submission_overflow = True
+        if countdown.overflowed:
+            # The forged claim's rows were never finished. Replace them with a
+            # bound zero-row formset, so no later reader can rebuild them:
+            # TOTAL_FORMS=0 keeps the formset bound, which keeps the data
+            # property's exact-input branch inert. Only the owning open()
+            # records overflow, and a nested overdraw unwinds past this point,
+            # so cleaning raises one error for the whole submission instead of
+            # one child item error per row.
+            formset = widget.new_formset(
+                data=widget.data_from_exact_list([], self.html_name),
+                prefix=self.html_name,
+                auto_id=cast("str", self.form.auto_id),
+                form_kwargs={"use_required_attribute": False},
+                submission_total_form_count=0,
+            )
+        self._submission_overflow = countdown.overflowed
         return formset
 
     @cached_property
@@ -399,13 +413,13 @@ class SequenceBoundField(CompositeBoundField):
         """Return exact input or formset row values.
 
         The formset owns bound extraction and reads nested row data while its
-        countdown is active. These cached reads do not reserve the rows again.
+        countdown is open. These cached reads do not reserve the rows again,
+        and extraction replaced a forged claim's rows with a bound zero-row
+        formset, so there is no overflow case to test here.
         """
         if not self.has_exact_input and not self.is_bound_formset:
             return []
         formset = self.formset
-        if self._extraction_ran_out:
-            return []
         if self.has_exact_input and not formset.is_bound:
             return self.field.widget.value_from_datadict(
                 self.form.data, self.form.files, self.html_name
@@ -472,7 +486,7 @@ class SequenceBoundField(CompositeBoundField):
             changed = self.field.has_changed(self.initial, self.data)
         else:
             changed = super()._has_changed()
-        if changed or self._extraction_ran_out:
+        if changed or self.submission_overflow:
             return True
         if not self.initial:
             # Only the deletion of an initial row is a change, and this

@@ -5,7 +5,8 @@ from __future__ import annotations
 import copy
 import dataclasses
 from collections.abc import Mapping, Sequence
-from contextvars import ContextVar, Token
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 from django.forms import BaseForm, BaseFormSet, Field, Form
@@ -26,7 +27,7 @@ from django.utils.functional import cached_property
 from nestingdolls.patches import FormLayout
 
 if TYPE_CHECKING:
-    from types import TracebackType
+    from collections.abc import Iterator
 
     from django.core.files.uploadedfile import UploadedFile
 
@@ -445,24 +446,10 @@ class SequenceWidget(CompositeWidget):
             """
             if hasattr(self, "submission_total_form_count"):
                 return self.submission_total_form_count
-            with self.sequence_widget.submission_countdown(
+            with self.sequence_widget.submission_countdown.open(
                 self.sequence_widget.limits.submission_max
             ) as countdown:
-                # A negative remaining value means the shared budget
-                # already ran out, so take() returns zero for any claim
-                # and the ManagementForm buys nothing. Do not build it: on
-                # a wide hostile submission that form is one full Django
-                # form per outer row, about 28 percent of the request's
-                # wall time (measured in pathological.py). The skipped
-                # take() is safe because __exit__ reads only the sign of
-                # the remaining value, and the first overdrawing claim
-                # still goes through take(). The ManagementForm stays
-                # lazily available: get_context and full_clean build it on
-                # demand, so no reader changes.
-                if countdown.remaining.get() < 0:
-                    allowed = 0
-                else:
-                    allowed = countdown.take(super().total_form_count())
+                allowed = countdown.take(super().total_form_count())
             self.submission_total_form_count = allowed
             return allowed
 
@@ -476,108 +463,72 @@ class SequenceWidget(CompositeWidget):
         for that attacker-controlled recursive work. It is intentionally not a
         mapping or form-wide policy.
 
-        The shared context holds one signed integer: the remaining row
-        budget. ``take`` always subtracts the full requested count, not
-        only the allowed part. This lets the remaining value fall below
-        zero. A negative value means some caller already asked for more
-        rows than the budget had left. One value thus carries two facts:
-        how many rows are left, and whether any caller ran out. A second
-        stored flag is not needed.
-
-        The variable has no default. A read outside an open scope
-        raises ``LookupError`` from the unset variable itself, so no
-        read site tests for a missing value. Only ``__enter__`` must
-        see the unset state, and it passes a call-site default.
+        A countdown is the budget. ``open()`` builds it at the outermost
+        sequence of one operation and stores it in the shared context; a
+        nested ``open()`` yields that same object and owns nothing.
+        ``take()`` reserves the rows that fit. When the owning ``open()``
+        passed ``raises=True``, an overdraw raises ``OverdrawError`` instead
+        of clipping. The exception unwinds every nested frame, and only
+        the owning ``open()`` catches it and records ``overflowed``, so
+        one oversized submission produces one answer in one place.
         """
 
-        remaining: ClassVar[ContextVar[int]] = ContextVar(
+        class OverdrawError(Exception):
+            """One extraction asked for more rows than the budget holds."""
+
+        active: ClassVar[ContextVar[SequenceWidget.submission_countdown]] = ContextVar(
             "nestingdolls_submission_countdown"
         )
 
-        count: int
-        ran_out: bool = False
-        token: Token[int] | None = dataclasses.field(
-            default=None, init=False, repr=False
-        )
-
-        def __bool__(self) -> bool:
-            """Report whether the shared budget ran out while this scope was open."""
-            return self.ran_out
-
-        @property
-        def owns_scope(self) -> bool:
-            """Report whether this scope started the shared counter.
-
-            Only the outermost scope of one extraction owns the counter.
-            A nested scope found the shared context already open, so it
-            must not report the shared overflow as its own field's
-            overflow. The outer field reports it once for the whole
-            submission.
-
-            ``__exit__`` resets the token but does not clear it, so this
-            stays readable after the ``with`` block ends.
-            """
-            return self.token is not None
+        remaining: int
+        raises: bool = False
+        overflowed: bool = dataclasses.field(default=False, init=False)
 
         def take(self, count: int) -> int:
-            """Reserve the rows that fit in the active shared allowance.
+            """Reserve the rows that fit; raise or clip on an overdraw.
 
-            Subtract the full requested count, not only the allowed part.
-            A negative remaining value then marks that the budget ran out.
-            Clamp the return value at zero: a caller must never build a
-            negative number of rows. A call outside an open scope
-            raises ``LookupError`` from the unset variable.
+            A claim of zero or less buys nothing and refunds nothing.
+            Django's bound ``total_form_count`` is
+            ``min(TOTAL_FORMS, absolute_max)`` with no lower clamp, so a
+            forged negative ``TOTAL_FORMS`` reaches this method. An earlier
+            version subtracted the full claim, so a negative claim grew the
+            budget and cleared a recorded overdraw: 42 keys then bought
+            8005 rows and cleaned as valid.
             """
-            left = self.remaining.get()
-            allowed = max(0, min(count, left))
-            self.remaining.set(left - count)
-            return allowed
+            if count <= 0:
+                return 0
+            if count > self.remaining:
+                if self.raises:
+                    raise self.OverdrawError
+                count = self.remaining
+            self.remaining -= count
+            return count
 
-        def __enter__(self) -> Self:
-            """Start the counter at the outer sequence and reuse it inside rows.
+        @classmethod
+        @contextmanager
+        def open(
+            cls, count: int, *, raises: bool = False
+        ) -> Iterator[SequenceWidget.submission_countdown]:
+            """Yield the shared budget, starting one when none is open.
 
-            This is the one read that must see "no scope open yet".
-            The variable has no default, so give this read one:
-            ``None`` cannot collide with a stored count.
+            The first ``open()`` of an operation owns the budget: it
+            fixes ``count`` and ``raises`` for everything beneath it,
+            catches ``OverdrawError``, and releases the context variable. A
+            nested ``open()`` yields the owner's budget unchanged, so an
+            ``OverdrawError`` raised in its body flies through to the owner.
             """
-            if self.remaining.get(None) is None:
-                self.token = self.remaining.set(self.count)
-            return self
-
-        def __exit__(
-            self,
-            exc_type: type[BaseException] | None,
-            exc_value: BaseException | None,
-            traceback: TracebackType | None,
-        ) -> None:
-            """Remember overflow. Reset the token only if this scope owns it.
-
-            Read the shared state on every exit. Copy the overflow flag on
-            every exit. Do this even if this scope does not own the token.
-            A nested scope never owns the token. Its own ``__enter__``
-            method found the shared context already open.
-
-            An earlier version read the state only inside the token check
-            below. Then a nested scope could not update its own overflow
-            flag. The flag stayed at its default value. Do not move this
-            read back inside the token check. Find a different fix for
-            that other problem.
-
-            Reset the token only if this scope owns it. Do the reset
-            after the read above, not before it. The reset puts back the
-            value from before this scope opened the shared context. For
-            the owning scope, that is the unset state. A read after the
-            reset would then raise ``LookupError`` instead of returning
-            the final state.
-
-            A scope that does not own the token must not call reset.
-            That scope did not open the shared context. It has no old
-            value to put back. A reset with a token it did not receive
-            would damage the owning scope's context.
-            """
-            self.ran_out = self.remaining.get() < 0
-            if self.token is not None:
-                self.remaining.reset(self.token)
+            budget = cls.active.get(None)
+            if budget is not None:
+                yield budget
+                return
+            budget = cls(count, raises=raises)
+            token = cls.active.set(budget)
+            try:
+                yield budget
+            except cls.OverdrawError:
+                budget.overflowed = True
+            finally:
+                cls.active.reset(token)
 
     @dataclasses.dataclass(frozen=True, slots=True)
     class RenderState(CompositeWidget.RenderState):
@@ -678,8 +629,14 @@ class SequenceWidget(CompositeWidget):
         prefix: str | None = None,
         auto_id: str = "id_%s",
         form_kwargs: dict[str, object] | None = None,
+        submission_total_form_count: int | None = None,
     ) -> RowFormSet:
-        """Build a row formset bound to this widget's child field and limits."""
+        """Build a row formset bound to this widget's child field and limits.
+
+        ``submission_total_form_count`` pre-reserves an already-counted row
+        total, so ``total_form_count`` never takes from the shared budget a
+        second time for rows the caller has already paid for.
+        """
         formset = self.formset_class(
             data=data,
             files=files,
@@ -689,6 +646,8 @@ class SequenceWidget(CompositeWidget):
             form_kwargs=form_kwargs,
         )
         formset.sequence_widget = self
+        if submission_total_form_count is not None:
+            formset.submission_total_form_count = submission_total_form_count
         return formset
 
     def data_from_exact_list(
@@ -788,7 +747,7 @@ class SequenceWidget(CompositeWidget):
             source = files
         else:
             source = None
-        with self.submission_countdown(self.limits.submission_max) as countdown:
+        with self.submission_countdown.open(self.limits.submission_max) as countdown:
             if source is not None:
                 has_rows = self.has_row_keys(data, name) or self.has_row_keys(
                     files, name
@@ -836,7 +795,7 @@ class SequenceWidget(CompositeWidget):
         attrs: dict[str, object] | None,
     ) -> dict[str, object]:
         """Render row forms inside one shared render budget."""
-        with self.submission_countdown(self.limits.submission_max):
+        with self.submission_countdown.open(self.limits.submission_max):
             context = super().get_context(name, value, attrs)
             widget_context = cast("dict[str, object]", context["widget"])
             final_attrs = cast("dict[str, object]", widget_context["attrs"])

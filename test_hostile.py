@@ -667,6 +667,31 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["value"], [1, 2])
 
+    def test_client_keeps_a_negative_total_as_zero_rows_without_an_error(self):
+        """A negative total buys no rows, and asking for none is not an overdraw.
+
+        Django's bound ``total_form_count`` is ``min(TOTAL_FORMS,
+        absolute_max)`` over a plain ``IntegerField`` with no lower clamp, so a
+        negative total reaches the shared budget and builds no row, exactly as
+        a total of zero does. The countdown must treat it the same way: refuse
+        the claim, and do not record an overdraw. Reporting
+        ``too_many_forms`` for a request that asked for fewer rows than the
+        budget allows would reject a submission the budget never limited.
+        """
+        for total in ("0", "-5", "-1000000"):
+            with self.subTest(total=total):
+                response = self.client.post(
+                    "/hostile-integer-list/",
+                    {
+                        f"values-{TOTAL_FORM_COUNT}": total,
+                        f"values-{INITIAL_FORM_COUNT}": "0",
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                body = response.json()
+                self.assertIs(body["valid"], True)
+                self.assertEqual(body["value"], [])
+
     def assertJunkManagementControlIsRejected(self, name):
         response = self.client.post(
             "/hostile-integer-list/",
@@ -1242,7 +1267,13 @@ class HostileCleanCostTestCase(HostileClientTestCase):
         return built
 
     def test_overflow_skips_empty_later_child_formsets(self):
-        """Reject overflow and skip child-formset setup that cannot admit a row."""
+        """Reject overflow and skip child-formset setup that cannot admit a row.
+
+        The first inner row's overdraw unwinds extraction, so the 19 outer
+        rows after it never build their child formsets. The final ``values``
+        entry is the owner's bound zero-row replacement: one constant build
+        per rejected submission, never one per sibling.
+        """
         payload = self._amplified_sequence_payload(
             "values", outer_total=20, inner_total=2000
         )
@@ -1254,13 +1285,48 @@ class HostileCleanCostTestCase(HostileClientTestCase):
             form.errors.as_data()["values"][0].code,
             "too_many_forms",
         )
-        self.assertEqual(built, ["values", "values-0"])
+        self.assertEqual(built, ["values", "values-0", "values"])
+
+    def test_overflow_keeps_no_row_a_forged_claim_bought(self):
+        """Keep no row past the budget alive to the end of the response.
+
+        Building a row is bounded work; keeping one is not. Every surviving
+        row is read once by extraction, again by cleaning or a render, and
+        stays alive until the response is finished, so a rejected submission
+        must leave none behind. The first overdraw unwinds extraction, and
+        the owner replaces the whole formset with a bound zero-row one, so
+        the rows a forged claim already bought are unreferenced when
+        extraction returns and no later reader needs to know they existed.
+        Nested rows are only reachable through these outer rows, so dropping
+        these drops the whole tree. Measured on the eight-sibling case in
+        ``pathological.py``: 488 rows at 0.7 MB peak with the abort, against
+        16,000 rows at 4.5 MB when extraction built every row and discarded
+        them afterwards, for the same rejection.
+        """
+        payload = self._amplified_sequence_payload(
+            "values", outer_total=20, inner_total=2000
+        )
+        built = self._count_rows_built()
+        form = SequenceHostileFixtures.NestedTextListForm(data=payload)
+        bound_field = form["values"]
+
+        self.assertIs(bound_field.submission_overflow, True)
+        self.assertEqual(list(bound_field.formset.forms), [])
+        self.assertEqual(bound_field.data, [])
+        self.assertFalse(form.is_valid())
+        self.assertEqual(
+            form.errors.as_data()["values"][0].code,
+            "too_many_forms",
+        )
+        # The claim did buy row construction. Nothing may outlive it.
+        self.assertGreater(len(built), 0)
 
     def test_claim_after_exact_budget_still_records_overflow(self):
         """Let the claim after exact budget use record overflow.
 
-        Zero is not overflow. The next child must read its claim and set the
-        count negative. This prevents changing the guard to ``<= 0``.
+        Zero is not overflow. The next child must read its claim and be the
+        one that overdraws. This prevents refusing a claim that
+        the budget can still pay in full.
         """
         payload = {
             "values-TOTAL_FORMS": "2",
@@ -1277,6 +1343,30 @@ class HostileCleanCostTestCase(HostileClientTestCase):
             form.errors.as_data()["values"][0].code,
             "too_many_forms",
         )
+
+    def test_negative_total_forms_cannot_refund_the_shared_budget(self):
+        """Refuse a negative claim instead of paying it back into the budget.
+
+        Django's bound ``total_form_count`` is ``min(TOTAL_FORMS,
+        absolute_max)`` over a plain ``IntegerField`` with no lower clamp, so
+        a forged negative ``TOTAL_FORMS`` reaches ``take()``. An earlier
+        version subtracted the full claim, so this payload's 42 keys refunded
+        a million rows, built 8005 rows, and cleaned as valid. A claim of zero
+        or less must buy nothing and refund nothing.
+        """
+        payload = self._amplified_sequence_payload(
+            "values", outer_total=5, inner_total=2000
+        )
+        payload[f"values-0-{TOTAL_FORM_COUNT}"] = "-1000000"
+        built = self._count_rows_built()
+        form = SequenceHostileFixtures.NestedTextListForm(data=payload)
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(
+            form.errors.as_data()["values"][0].code,
+            "too_many_forms",
+        )
+        self.assertLessEqual(len(built), 2010)
 
     def test_client_cannot_bypass_the_shared_budget_with_change_detection(self):
         """Change detection reserves rows from the same budget cleaning uses.
