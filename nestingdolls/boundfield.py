@@ -78,27 +78,28 @@ class CompositeBoundField(BoundField):
     ) -> SafeString:
         """Give the widget the submitted state, then let Django render it."""
         widget = widget or self.field.widget
-        if isinstance(widget, CompositeWidget) and only_initial:
-            # Django propagates a hidden initial only when the exact
-            # html_initial_name key was submitted. A composite hidden
-            # initial spans many keys, so rebuild it here instead.
-            widget.render_state = widget.RenderState(
-                hidden_initial_value=self._hidden_initial_value(widget)
-            )
-        elif isinstance(widget, CompositeWidget):
-            self.prepare_widget(widget)
+        if isinstance(widget, CompositeWidget):
+            if only_initial:
+                # Django propagates a hidden initial only when the exact
+                # html_initial_name key was submitted. A composite hidden
+                # initial spans many keys, so rebuild it here instead.
+                name = self.html_initial_name
+                if widget.value_omitted_from_data(
+                    self.form.data, self.form.files, name
+                ):
+                    value = self.value()
+                else:
+                    value = widget.value_from_datadict(
+                        self.form.data, self.form.files, name
+                    )
+                widget.render_state = widget.RenderState(hidden_initial_value=value)
+            else:
+                self.prepare_widget(widget)
         return super().as_widget(widget, attrs, only_initial)
 
     def prepare_widget(self, widget: CompositeWidget) -> None:
         """Put the submitted state this render needs on the widget."""
         widget.render_state = widget.RenderState()
-
-    def _hidden_initial_value(self, widget: CompositeWidget) -> object:
-        """Return a hidden initial rebuilt from the submitted composite keys."""
-        name = self.html_initial_name
-        if widget.value_omitted_from_data(self.form.data, self.form.files, name):
-            return self.value()
-        return widget.value_from_datadict(self.form.data, self.form.files, name)
 
     def _has_changed(self) -> bool:
         """Read hidden composite initial values through the composite widget.
@@ -182,14 +183,10 @@ class MappingBoundField(CompositeBoundField):
         scalar over. So the subform must not bind. ``to_python`` reports
         the "invalid" error instead.
         """
-        if not self.form.is_bound:
-            return False
-        if self.field.disabled:
+        if not self.form.is_bound or self.field.disabled:
             return False
         widget = self.field.widget
-        if widget.has_child_keys(self.form.data, self.html_name) or (
-            widget.has_child_keys(self.form.files, self.html_name)
-        ):
+        if widget.has_child_keys(self.form.data, self.form.files, self.html_name):
             return True
         # An exact value is the value under this field's own name.
         exact_value = None
@@ -254,13 +251,11 @@ class MappingBoundField(CompositeBoundField):
         if not isinstance(widget, MappingWidget):
             super().prepare_widget(widget)
             return
+        initial_error = None
+        if self.initial is not None and not isinstance(self.initial, Mapping):
+            initial_error = str(self.field.error_messages["invalid"])
         widget.render_state = widget.RenderState(
-            subform=self.subform,
-            initial_error=(
-                str(self.field.error_messages["invalid"])
-                if self.initial is not None and not isinstance(self.initial, Mapping)
-                else None
-            ),
+            subform=self.subform, initial_error=initial_error
         )
 
     def value(self) -> object:
@@ -321,10 +316,9 @@ class SequenceBoundField(CompositeBoundField):
     def formset(self) -> BaseFormSet[BaseForm]:
         """Return the cached, prefix-aware row formset for cleaning and rendering."""
         widget = self.field.widget
-        has_exact_input = self.has_exact_input
-        is_bound_formset = self.is_bound_formset
-        # No input for this sequence exists. Render its initial rows.
-        if not has_exact_input and not is_bound_formset:
+        if self.field.disabled or (
+            not self.has_exact_input and not self.is_bound_formset
+        ):
             return widget.new_formset(
                 initial=widget.default_initial_rows(self.initial),
                 prefix=self.html_name,
@@ -336,45 +330,34 @@ class SequenceBoundField(CompositeBoundField):
         with widget.submission_countdown.open(
             self.field.limits.submission_max, raises=True
         ) as countdown:
-            data: Mapping[str, object] | None
-            files: MultiValueDict[str, UploadedFile[bytes]] | None
-            data = self.form.data if is_bound_formset else None
-            files = self.form.files if is_bound_formset else None
-            # We do this here to make sure we're within the submission countdown,
-            # even though we don't subsequently use it until `new_formset` call
-            # later on.
-            initial = (
-                widget.initial_rows(self.initial)
-                if is_bound_formset
-                else widget.default_initial_rows(self.initial)
-            )
-            value: object = None
-            if not is_bound_formset:
+            data: Mapping[str, object] | None = None
+            files: MultiValueDict[str, UploadedFile[bytes]] | None = None
+            initial = widget.default_initial_rows(self.initial)
+            if self.is_bound_formset:
+                data = self.form.data
+                files = cast(
+                    "MultiValueDict[str, UploadedFile[bytes]]", self.form.files
+                )
+                initial = widget.initial_rows(self.initial)
+            else:
                 value = widget.value_from_datadict(
                     self.form.data, self.form.files, self.html_name
                 )
-            if (
-                isinstance(value, list)
-                and self.form.is_bound
-                and not self.field.disabled
-            ):
-                exact_values = value
-                data = widget.data_from_exact_list(value, self.html_name)
-                # Exact data wins over files. Copy files only from their source.
-                files = (
-                    cast(
-                        "MultiValueDict[str, UploadedFile[bytes]]",
-                        MultiValueDict(
+                if isinstance(value, list):
+                    exact_values = value
+                    data = widget.data_from_exact_list(value, self.html_name)
+                    # Exact data wins over files. Copy files only from their source.
+                    files = MultiValueDict()
+                    if (
+                        self.html_name not in self.form.data
+                        and self.html_name in self.form.files
+                    ):
+                        files = MultiValueDict(
                             {
                                 f"{self.html_name}-{index}": [file]
                                 for index, file in enumerate(value)
                             }
-                        ),
-                    )
-                    if self.html_name not in self.form.data
-                    and self.html_name in self.form.files
-                    else MultiValueDict()
-                )
+                        )
 
             formset = widget.new_formset(
                 data=data,

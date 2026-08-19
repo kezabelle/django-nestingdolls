@@ -1361,20 +1361,6 @@ class DictFieldRegressionTestCase(SimpleTestCase):
             {"payload": {"rows": ["hostile"]}}
         )
 
-    def test_bound_data_rejection_returns_the_mapping_initial_value(self):
-        """A child bound data rejection returns the mapping initial value."""
-
-        class RejectingField(forms.CharField):
-            def bound_data(self, data, initial):
-                raise ValidationError("Cannot bind this value.")
-
-        class ChildForm(forms.Form):
-            value = RejectingField()
-
-        field = nestingdolls.MappingField(ChildForm)
-        value = {"value": "hostile"}
-        self.assertEqual(field.bound_data(value, {}), value)
-
     def test_prepare_value_rejection_returns_the_mapping_initial_value(self):
         """A child prepare value rejection returns the mapping initial value."""
 

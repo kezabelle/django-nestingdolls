@@ -63,6 +63,10 @@ nestingdolls = [
     "templates/**/*.html",
 ]
 
+[tool.coverage.run]
+branch = true
+source = ["nestingdolls"]
+
 [tool.mypy]
 plugins = ["mypy_django_plugin.main"]
 strict = true

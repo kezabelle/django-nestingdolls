@@ -85,7 +85,8 @@ class CompositeWidget(Widget):
     def template_name(self, value: str) -> None:
         self._template_name = value
 
-    def _get_media(self) -> WidgetMedia:
+    @property
+    def media(self) -> WidgetMedia:
         """Add this widget's own class ``Media`` to its children's media.
 
         Django's ``MediaDefiningClass`` metaclass already installs a ``media``
@@ -95,8 +96,6 @@ class CompositeWidget(Widget):
         not know about: the media of the child widgets this widget renders.
         """
         return super().media + self._child_media()
-
-    media = property(_get_media)
 
     def _child_media(self) -> WidgetMedia:
         """Return the media of the children this widget renders."""
@@ -176,9 +175,18 @@ class MappingWidget(CompositeWidget):
             for child_name in self.fields
         )
 
-    def has_child_keys(self, source: Mapping[str, object], name: str) -> bool:
-        """Report whether one source holds any declared child key."""
-        return any(key != name and self._accepts_key(key, name) for key in source)
+    def has_child_keys(
+        self,
+        data: Mapping[str, object],
+        files: Mapping[str, object],
+        name: str,
+    ) -> bool:
+        """Report whether either source holds any declared child key."""
+        return any(
+            key != name and self._accepts_key(key, name)
+            for source in (data, files)
+            for key in source
+        )
 
     def _data_from_exact_mapping(
         self, value: Mapping[str, object], name: str
@@ -204,12 +212,12 @@ class MappingWidget(CompositeWidget):
         name: str,
     ) -> tuple[Mapping[str, object], Mapping[str, object]]:
         """Return data and files with exact mappings expanded to child keys."""
-        data_value = data.get(name) if name in data else None
-        if isinstance(data_value, Mapping):
-            data = self._data_from_exact_mapping(data_value, name)
-        files_value = files.get(name) if name in files else None
-        if isinstance(files_value, Mapping):
-            files = self._data_from_exact_mapping(files_value, name)
+        value = data.get(name)
+        if isinstance(value, Mapping):
+            data = self._data_from_exact_mapping(value, name)
+        value = files.get(name)
+        if isinstance(value, Mapping):
+            files = self._data_from_exact_mapping(value, name)
         return data, files
 
     def value_from_datadict(
@@ -225,23 +233,12 @@ class MappingWidget(CompositeWidget):
         This keeps change detection and cleaning on the same input.
         """
         data, files = self.expand_exact_inputs(data, files, name)
-        data_submitted = self.has_child_keys(data, name)
-        files_submitted = self.has_child_keys(files, name)
-        if not data_submitted and not files_submitted and name in data:
-            return data.get(name)
-        if data_submitted or files_submitted:
-            return self._extract_children(data, files, name)
-        if name in files:
-            return files.get(name)
-        return {}
-
-    def _extract_children(
-        self,
-        data: Mapping[str, object],
-        files: Mapping[str, object],
-        name: str,
-    ) -> dict[str, object]:
-        """Collect each submitted child value under its declared name."""
+        if not self.has_child_keys(data, files, name):
+            if name in data:
+                return data.get(name)
+            if name in files:
+                return files.get(name)
+            return {}
         value: dict[str, object] = {}
         for child_name, field in self.fields.items():
             child_widget = self._child_widget(field)
@@ -681,8 +678,13 @@ class SequenceWidget(CompositeWidget):
             return True
         return "0" <= child_key[0] <= "9"
 
-    def has_row_keys(self, source: Mapping[str, object], name: str) -> bool:
-        """Report whether one source holds any per-row prefixed key.
+    def has_row_input(
+        self,
+        data: Mapping[str, object],
+        files: Mapping[str, object],
+        name: str,
+    ) -> bool:
+        """Report whether either source holds a per-row prefixed key.
 
         A plain loop, not a generator expression: this reads every key of
         a submission, so one frame resume per key is real cost. Two slice
@@ -695,21 +697,28 @@ class SequenceWidget(CompositeWidget):
         """
         prefix = f"{name}-"
         start = len(prefix)
-        for key in source:
-            if (
-                isinstance(key, str)
-                and key[:start] == prefix
-                and "0" <= key[start : start + 1] <= "9"
-            ):
-                return True
+        for source in (data, files):
+            for key in source:
+                if (
+                    isinstance(key, str)
+                    and key[:start] == prefix
+                    and "0" <= key[start : start + 1] <= "9"
+                ):
+                    return True
         return False
 
-    def has_management_keys(self, source: Mapping[str, object], name: str) -> bool:
-        """Report whether one source holds any formset management key."""
-        for field_name in MANAGEMENT_NAMES:
-            if f"{name}-{field_name}" in source:
-                return True
-        return False
+    def has_management_input(
+        self,
+        data: Mapping[str, object],
+        files: Mapping[str, object],
+        name: str,
+    ) -> bool:
+        """Report whether either source holds a formset management key."""
+        return any(
+            f"{name}-{field_name}" in source
+            for source in (data, files)
+            for field_name in MANAGEMENT_NAMES
+        )
 
     def is_bound_formset(
         self,
@@ -717,15 +726,16 @@ class SequenceWidget(CompositeWidget):
         files: Mapping[str, object],
         name: str,
     ) -> bool:
-        """Report whether row or management keys bind the row formset."""
+        """Report whether row or management keys bind the row formset.
+
+        Indexed row keys always bind. Without them, an exact value under the
+        field's own name blocks bare management keys.
+        """
+        if self.has_row_input(data, files, name):
+            return True
         if name in data or name in files:
-            return self.has_row_keys(data, name) or self.has_row_keys(files, name)
-        return (
-            self.has_management_keys(data, name)
-            or self.has_management_keys(files, name)
-            or self.has_row_keys(data, name)
-            or self.has_row_keys(files, name)
-        )
+            return False
+        return self.has_management_input(data, files, name)
 
     def value_from_datadict(
         self,
@@ -747,19 +757,20 @@ class SequenceWidget(CompositeWidget):
             source = files
         else:
             source = None
+        has_row_input = self.has_row_input(data, files, name)
+        if (
+            source is None
+            and not has_row_input
+            and not self.has_management_input(data, files, name)
+        ):
+            return []
         with self.submission_countdown.open(self.limits.submission_max) as countdown:
-            if source is not None:
-                has_rows = self.has_row_keys(data, name) or self.has_row_keys(
-                    files, name
-                )
+            if source is not None and not has_row_input:
                 getlist = getattr(source, "getlist", None)
                 values = source.get(name) if getlist is None else getlist(name)
-                if not has_rows:
-                    if isinstance(values, list):
-                        return values[: countdown.take(len(values))]
-                    return values
-            elif not self.is_bound_formset(data, files, name):
-                return []
+                if isinstance(values, list):
+                    return values[: countdown.take(len(values))]
+                return values
             formset = self.new_formset(
                 data=data,
                 files=cast("MultiValueDict[str, UploadedFile[bytes]]", files),
@@ -781,12 +792,8 @@ class SequenceWidget(CompositeWidget):
         """
         initial = self.initial_rows(value)
         if not initial and self.is_required and self.limits.min_length == 0:
-            initial = [self.empty_initial_row()]
+            initial = [{row_value_name: None}]
         return initial
-
-    def empty_initial_row(self) -> dict[str, object]:
-        """Return the placeholder data for one empty row."""
-        return {row_value_name: None}
 
     def get_context(
         self,

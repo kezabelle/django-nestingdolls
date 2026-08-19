@@ -822,7 +822,7 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
                 )
             },
         )
-        absolute_max = OversizedForm.base_fields["values"].absolute_max
+        absolute_max = OversizedForm.base_fields["values"].limits.absolute_max
         oversized = OversizedForm({"values": ["1"] * (absolute_max + 1)})
         self.assertIs(oversized.has_changed(), False)
 
@@ -1472,7 +1472,7 @@ class SetFieldTestCase(SimpleTestCase):
                 raise AssertionError("oversized child value was compared")
 
         field = field_class(UnreachableField(), max_length=0, required=False)
-        values = ["1"] * (field.absolute_max + 1)
+        values = ["1"] * (field.limits.absolute_max + 1)
         self.assertIs(field.has_changed(expected_initial, values), True)
 
     def test_oversized_whole_value_marks_set_changed_without_child_comparison(self):
@@ -3248,8 +3248,8 @@ class PublicApiTestCase(SimpleTestCase):
         self.assertIs(field.widget.child_field, field.child_field)
         self.assertEqual(field.widget.limits.min_length, 1)
         self.assertEqual(field.widget.limits.max_length, 2)
-        self.assertEqual(field.absolute_max, 3)
-        self.assertEqual(field.widget.limits.absolute_max, field.absolute_max)
+        self.assertEqual(field.limits.absolute_max, 3)
+        self.assertIs(field.widget.limits, field.limits)
 
     def test_a_reused_widget_rebuilds_for_its_new_field(self):
         """A reused widget's new field builds a class from its own child."""

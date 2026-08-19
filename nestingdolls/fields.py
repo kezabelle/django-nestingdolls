@@ -7,7 +7,7 @@ import dataclasses
 from collections import namedtuple
 from collections.abc import Callable, Collection, Mapping, Sequence
 from itertools import islice
-from typing import TYPE_CHECKING, Self, cast
+from typing import Self, cast
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
@@ -36,9 +36,6 @@ from nestingdolls.widgets import (
     SequenceWidget,
     row_value_name,
 )
-
-if TYPE_CHECKING:
-    from django.forms.boundfield import BoundField
 
 __all__ = [
     "DataclassField",
@@ -273,37 +270,16 @@ class MappingField(CompositeField):
             )
         )
 
-    def _clean_bound_field(self, bound_field: BoundField) -> object:
+    def _clean_bound_field(self, bound_field: MappingBoundField) -> object:
         """Clean the prefixed child Form of a bound outer form.
 
         The child Form owns both the narrowed input and its cleaned state. A
         missing or scalar submission has no bound subform, so the base field
         reports the ordinary "invalid" or "required" error.
         """
-        if not isinstance(bound_field, MappingBoundField):
-            raise TypeError("bound field must be a MappingBoundField")
-        if self.disabled:
-            return super()._clean_bound_field(bound_field)  # type: ignore[misc]
-        if not bound_field.is_bound_subform:
+        if self.disabled or not bound_field.is_bound_subform:
             return super()._clean_bound_field(bound_field)  # type: ignore[misc]
         return self._clean_child_form(bound_field.subform)
-
-    def bound_data(self, data: object, initial: object) -> object:
-        """Bind submitted members with their matching initial values."""
-        try:
-            initial = self.initial_value(initial)
-            if self.disabled:
-                return initial
-            data = self.to_python(data)
-            return {
-                name: field.bound_data(data.get(name), initial.get(name))
-                for name, field in self.widget.fields.items()
-            }
-        except (InvalidInitialValueError, ValidationError):
-            # BoundField.value() calls this method during a render of an
-            # invalid form. Keep forged input in Django's normal redisplay path, so
-            # that the user sees what the browser sent.
-            return super().bound_data(data, initial)
 
     def prepare_value(self, value: object) -> object:
         """Prepare each mapping member for widget rendering.
@@ -525,11 +501,6 @@ class SequenceField(CompositeField):
 
     limits: Limits
 
-    @property
-    def absolute_max(self) -> int:
-        """Return the limit on the number of submitted rows."""
-        return self.limits.absolute_max
-
     def __init__(
         self,
         child_field: Field,
@@ -568,7 +539,6 @@ class SequenceField(CompositeField):
             # Limits does not know about `required`, so this check belongs
             # here.
             raise ValueError("max_length=0 requires required=False")
-        initial_values: list[object] = []
         if initial is not None and not callable(initial):
             try:
                 initial_values = self.initial_values(initial)
@@ -577,8 +547,8 @@ class SequenceField(CompositeField):
                 # into one row instead of raising an error during a
                 # render.
                 initial_values = [initial]
-        if len(initial_values) > max_length:
-            raise ValueError("initial must not contain more than max_length values")
+            if len(initial_values) > max_length:
+                raise ValueError("initial must not contain more than max_length values")
 
         # Copy the child field. Two fields must not share one field instance,
         # because a field holds its widget and its own configuration.
@@ -701,10 +671,8 @@ class SequenceField(CompositeField):
         """
         return self._clean_values(self.to_python([] if value is None else value), [])
 
-    def _clean_bound_field(self, bound_field: BoundField) -> Collection[object]:
+    def _clean_bound_field(self, bound_field: SequenceBoundField) -> Collection[object]:
         """Clean browser submissions through Django's real row formset."""
-        if not isinstance(bound_field, SequenceBoundField):
-            raise TypeError("bound field must be a SequenceBoundField")
         if self.disabled:
             return cast(
                 "Collection[object]",
@@ -782,35 +750,6 @@ class SequenceField(CompositeField):
         """
         return data
 
-    def bound_data(self, data: object, initial: object) -> Collection[object]:
-        """Bind each submitted row against its matching initial value."""
-        if self.disabled:
-            return self.initial_values(initial)
-
-        data = self.to_python(data)
-        # Show no rows for a submission that is too large. The clean step
-        # records the too_many_forms error, and no row must reach a child
-        # widget.
-        if len(data) > self.limits.absolute_max:
-            return []
-        initial = self.initial_values(initial)
-        values = []
-        for index, value in enumerate(data):
-            initial_value = initial[index] if index < len(initial) else None
-            try:
-                value = self.child_field.bound_data(value, initial_value)  # noqa: PLW2901
-            except (InvalidInitialValueError, ValidationError):
-                # BoundField.value() calls this method during a render. A
-                # composite child can refuse a bad row here, for example a
-                # nested MappingField row submitted as a scalar. The clean
-                # step already recorded that error. Django shows the
-                # value of an enabled field again, so this method falls
-                # back to the base behavior. prepare_value() does the
-                # same.
-                value = super().bound_data(value, initial_value)  # noqa: PLW2901
-            values.append(value)
-        return values
-
     def prepare_value(self, value: object) -> list[object]:
         """Prepare admitted initial rows for widget rendering.
 
@@ -828,16 +767,15 @@ class SequenceField(CompositeField):
                 try:
                     row = self.child_field.prepare_value(row)  # noqa: PLW2901
                 except (InvalidInitialValueError, ValidationError):
-                    # Same render-time fallback as bound_data(). A composite
-                    # child can refuse a bad row, for example a nested
-                    # MappingField row given as a scalar. Show the row the
-                    # way Django does, instead of raising an error
+                    # A composite child can refuse a bad row, for example a
+                    # nested MappingField row given as a scalar. Show the
+                    # row the way Django does, instead of raising an error
                     # mid-render.
                     row = super().prepare_value(row)  # noqa: PLW2901
                 values.append(row)
             return values
 
-    def has_changed(self, initial: object, data: object) -> bool:  # noqa: C901, PLR0911
+    def has_changed(self, initial: object, data: object) -> bool:  # noqa: PLR0911
         """Compare submitted rows using child-field change semantics."""
         if self.disabled:
             return False
@@ -847,24 +785,16 @@ class SequenceField(CompositeField):
         # form misses would lose data, and an extra change costs one save.
         try:
             initial = self.initial_values(initial)
-        except InvalidInitialValueError:
-            return True
-        try:
             data = self.to_python(data)
-        except ValidationError:
+        except (InvalidInitialValueError, ValidationError):
             return True
-        shared_length = min(len(initial), len(data))
-        for index in range(shared_length):
-            try:
-                if self.child_field.has_changed(initial[index], data[index]):
-                    return True
-            except ValidationError:
-                return True
         if len(initial) > len(data):
             return True
-        for value in data[shared_length:]:
+        for index, value in enumerate(data):
             try:
-                if self.child_field.has_changed(None, value):
+                if self.child_field.has_changed(
+                    initial[index] if index < len(initial) else None, value
+                ):
                     return True
             except ValidationError:
                 return True

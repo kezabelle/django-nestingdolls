@@ -50,7 +50,8 @@ mypy: ## Run mypy with strict checks.
 	$(MYPY) demo.py nestingdolls
 
 test: ## Run the Django test files.
-	$(PYTHON) -W error::DeprecationWarning -W error::PendingDeprecationWarning -m unittest discover -p 'test_*.py'
+	$(PYTHON) -W error::DeprecationWarning -W error::PendingDeprecationWarning -m coverage run -m unittest discover -p 'test_*.py'
+	$(PYTHON) -m coverage report --show-missing
 
 test-django: ## Run the suite against Django version $(DJANGO).
 	@test -n "$(DJANGO)" || (echo "set DJANGO, for example DJANGO=5.2.*" >&2; exit 2)

@@ -27,7 +27,8 @@ the bits that belong together don't wander off and become loose keys.
 python -m pip install django-nestingdolls
 ```
 
-or add it to your `pyproject` and `uv sync` or whatever, poetry? pdm? you do you.
+or add it to your `pyproject` and `uv sync` or whatever, poetry? pdm? you
+do you.
 
 ### Setup
 
@@ -44,14 +45,8 @@ That's the whole thing, hopefully. Django's normal DTL form renderer finds
 the package templates and the matching composite wrappers for the  `as_div()`, 
 `as_p()`, `as_table()`, and `as_ul()` form helpers.
 
-Installing the app patches `django.forms.BaseForm.render` (and with it
-`__str__` and `__html__`) process-wide at startup: the wrapper records which
-form helper is rendering so composite widgets can pick the matching layout
-template, and it is a pass-through for forms without composite fields.
-Without the app installed, Django's default renderer fails loudly with
-`TemplateDoesNotExist` at the first composite render; a `TemplatesSetting`
-renderer with the package templates on `DIRS` renders, but every composite
-falls back to its `div` layout regardless of the form helper.
+The app setup also makes composite wrappers follow Django's form-helper
+layout. [Why that needs a patch](#the-render-patch).
 
 ## A quick tutorial
 
@@ -80,7 +75,6 @@ class OrderFieldsForm(forms.Form):
     items = nestingdolls.ListField(
         nestingdolls.DictField(LineItemForm),
         min_length=1,
-        max_length=20,
     )
 
 
@@ -131,8 +125,8 @@ assert form.cleaned_data == {
 
 See the hand-off? `IntegerField` turns `order-items-0-quantity` from a request
 string into an integer. `CheckoutForm` then returns one `order` value ready for
-order code. No reconstruction helper, properly nested into conceptual namespaces,
-less hunting around hopefully.
+order code. No reconstruction helper, properly nested into conceptual
+namespaces, less hunting around hopefully.
 
 ### Render it
 
@@ -148,8 +142,9 @@ Render it with Django's normal form helpers:
 ```
 
 `form.media` loads `nestingdolls/sequence.js`, so people can add and remove
-item rows without a reload. Kinda like in the Django admin inlines. Django still
-names the controls, builds the rows, and does all the validation on submitted values.
+item rows without a reload. Kinda like in the Django admin inlines. Django
+still names the controls, builds the rows, and does all the validation on
+submitted values.
 
 ## Show a saved order again
 
@@ -174,7 +169,8 @@ data, from before that whole naming circus starts.
 ## More ways to use the fields
 
 The checkout example follows the full browser path. The same fields should also
-provide value at other boundaries: an API, an import job, or a background worker.
+provide value at other boundaries: an API, an import job, or a background
+worker.
 
 ### Bind decoded application data
 
@@ -217,13 +213,34 @@ for form in (json_form, yaml_form, csv_form):
     assert form.cleaned_data['product_ids'] == [42, 73]
 ```
 
-Don't forget you'd want to use `yaml.safe_load`, not `yaml.load`. The field checks 
-the values it gets; the decoder still owns input-size and safety limits before that point.
+Use `yaml.safe_load`, not `yaml.load`.
 
-### Return immutable and domain values
+### Constrain a repeated field
 
-You don't have to settle for a mutable `list` or `dict` on the way out. Give
-the field a domain type instead, and that is what comes back.
+Use `min_length` and `max_length` when a list needs a useful range, not just
+any number of rows.
+
+```python
+class TeamForm(forms.Form):
+    member_ids = nestingdolls.ListField(
+        forms.IntegerField(min_value=1),
+        min_length=1,
+        max_length=10,
+    )
+```
+
+A submitted list of one through ten valid IDs cleans normally. More than ten
+gets a validation error.
+
+### Return a frozenset or another domain value
+
+You don't have to settle for a mutable `list` or `dict` for your cleaned
+value. 
+
+Use `FrozenSetField` when repeated values should be unique and stay immutable.
+`TupleField`, `DataclassField`, and `NamedTupleField` make the other return
+shapes in this example; see the [field reference](#the-fields-included) for
+their parameters. 
 
 ```python
 from dataclasses import dataclass
@@ -295,3 +312,120 @@ form = EvidenceForm(request.POST, request.FILES)
 Render it with `enctype='multipart/form-data'`. `FileField` handles the
 upload; the list field keeps every file beside its description. They arrived
 together, so they can leave together.
+
+## The fields included
+
+As mentioned at the beginning, high level, the 2 basic building blocks are 
+[`DictField`](#dictfield) (for nested  key/value shaped data) and 
+[`ListField`](#listfield) (for "up to N of this field" data) and everything 
+else is a variant of those.
+
+### `DictField`
+
+Renders and cleans a child `Form`, returning its cleaned values as a `dict`
+by default.
+
+Should you prefer, you can also use `FormField` or `Subform` or `MappingField`
+(they're all aliases for the same thing).
+
+| Parameter | What it does |
+| --- | --- |
+| `form_class` | The child Django `Form` class that supplies the named fields. |
+| `output` | A callable that turns the cleaned child values into the returned value; defaults to `dict`. |
+
+### `NamedTupleField`
+
+A subclass of the `DictField` which returns a `NamedTuple` instance instead.
+
+| Parameter | What it does |
+| --- | --- |
+| `form_class` | The child Django `Form` class that supplies the named fields. |
+| `output` | The `NamedTuple` class used to build the returned value. |
+
+### `DataclassField`
+
+Like the `NamedTupleField` above, it's a subclass of the `DictField` but
+it returns a `dataclass` instance. Shocking, I'm sure.
+
+| Parameter | What it does |
+| --- | --- |
+| `form_class` | The child Django `Form` class that supplies the named fields. |
+| `output` | The dataclass used to build the returned value. |
+
+### `ListField`
+
+Renders and cleans any number of one child field, returning the cleaned rows as
+a list. Basically the approximate equivalent of a formset, but without the
+ceremony of handling it separately.
+
+Also available as `SequenceField`.
+
+| Parameter | What it does |
+| --- | --- |
+| `child_field` | The Django field repeated for every row. |
+| `min_length` | The fewest cleaned rows allowed. |
+| `max_length` | The most cleaned rows allowed. |
+| `absolute_max` | The hard cap on submitted rows, including rows Django must reject before cleaning. |
+
+### `TupleField` (`FrozenSequenceField`)
+
+Your standard `ListField`, but returns an immutable tuple.
+
+| Parameter | What it does |
+| --- | --- |
+| `child_field` | The Django field repeated for every row. |
+| `min_length` | The fewest cleaned rows allowed. |
+| `max_length` | The most cleaned rows allowed. |
+| `absolute_max` | The hard cap on submitted rows, including rows Django must reject before cleaning. |
+
+### `SetField`
+
+A `SequenceField` which returns a set and keeps each cleaned value once.
+
+| Parameter | What it does |
+| --- | --- |
+| `child_field` | The Django field repeated for every row. |
+| `min_length` | The fewest cleaned values allowed after duplicates are removed. |
+| `max_length` | The most cleaned values allowed after duplicates are removed. |
+| `absolute_max` | The hard cap on submitted rows, including rows Django must reject before cleaning. |
+
+### `FrozenSetField`
+
+It's the same as `SetField`, but giving back an immutable `frozenset` instead.
+
+| Parameter | What it does |
+| --- | --- |
+| `child_field` | The Django field repeated for every row. |
+| `min_length` | The fewest cleaned values allowed after duplicates are removed. |
+| `max_length` | The most cleaned values allowed after duplicates are removed. |
+| `absolute_max` | The hard cap on submitted rows, including rows Django must reject before cleaning. |
+
+
+## Design notes
+
+### The render patch
+
+Django knows whether `form.as_p()` or `form.as_table()` is rendering a form,
+but it does not tell the widget. The app installs a small wrapper around
+`BaseForm.render`, `__str__`, and `__html__` so composite wrappers can choose
+the matching layout. Custom form templates go straight through Django's usual
+rendering path.
+
+### On set behaviour...
+
+`SetField` and `FrozenSetField` turn cleaned rows into a set before checking
+the length. Two `42`s are one value, not two. They also compare membership
+without caring about row order: the same set in a different order is still the
+same set.
+
+### JavaScript helpers for `SequenceField`
+
+It emits bubbling
+`nestingdolls:sequence-ready`, cancelable `nestingdolls:sequence-add` and
+`nestingdolls:sequence-remove`, and after-the-fact
+`nestingdolls:sequence-change` events. You should listen for those and make 
+something happen that that fits your page, maybe it's a toast or counter or 
+something? I dunno!
+
+`preventDefault()` stops an add or removal.
+

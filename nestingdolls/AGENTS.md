@@ -50,8 +50,8 @@ normal Django behavior and uses JavaScript only for progressive enhancement.
 ### Django behavior
 
 - Preserve child form clean hooks and non-field errors.
-- Delegate value extraction, preparation, bound data, and change detection to
-  child widgets and fields.
+- Delegate value extraction, preparation, and change detection to child
+  widgets and fields.
 - Preserve file fields, compound widgets, multipart forms, and widget media.
 - Keep child errors inline. Do not duplicate them as outer field errors.
 
