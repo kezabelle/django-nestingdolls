@@ -344,6 +344,11 @@ urlpatterns = [
 
 @override_settings(ROOT_URLCONF=__name__)
 class SequenceFieldTestCase(FormBindingUnitTestCase):
+    """Tests the flat ``ListField`` contract for browser and whole-value input.
+
+    The tests cover row extraction, management data, row deletion, disabled
+    state, size limits, item errors, and change detection."""
+
     field_class = nestingdolls.ListField
     collection_class = list
 
@@ -508,6 +513,17 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["uploads"], [])
 
+    def test_omitted_file_input_keeps_the_initial_file_rows(self):
+        """A bound form with no file input keeps the initial file rows."""
+
+        class Form(forms.Form):
+            uploads = nestingdolls.ListField(forms.FileField(), required=False)
+
+        upload = SimpleUploadedFile("a.txt", b"a")
+        form = Form(data={}, initial={"uploads": [upload]})
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["uploads"], [upload])
+
     def test_exact_name_list_wins_over_management_keys(self):
         """A direct list under the exact name outranks management keys alone."""
 
@@ -620,7 +636,8 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
             {"valid": True, "values": [1, 2], "errors": {}},
         )
 
-    def test_plain_mapping_does_not_invent_duplicate_management_values(self):
+    def test_list_valued_total_forms_in_plain_dict_data_is_missing_management(self):
+        """A management key that binds to a Python list stays missing management data."""
         """A list from ``dict.get()`` stays one invalid management value."""
 
         class Form(forms.Form):
@@ -805,6 +822,13 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertEqual(error.code, "item_invalid")
         self.assertEqual(error.params["child_code"], "invalid")
 
+    def test_direct_clean_of_a_disabled_child_ignores_submitted_rows(self):
+        """A disabled child cleans each direct row from an empty initial."""
+        field = nestingdolls.ListField(
+            forms.IntegerField(disabled=True, required=False), required=False
+        )
+        self.assertEqual(field.clean(["9", "8"]), [None, None])
+
     def assertOversizedDisabledFieldSkipsChildComparison(self, field_class):
         class UnreachableField(forms.IntegerField):
             def has_changed(self, initial, data):
@@ -863,6 +887,26 @@ class SequenceFieldTestCase(FormBindingUnitTestCase):
         self.assertIs(tampered.is_valid(), True, tampered.errors)
         self.assertEqual(tampered.cleaned_data["point"], {"a": 1})
         self.assertEqual(tampered.cleaned_data["values"], [1])
+
+    def test_direct_disabled_and_oversized_values_skip_child_comparison(self):
+        """A disabled or oversized direct value gets its answer without child comparison."""
+
+        class UnreachableField(forms.IntegerField):
+            def has_changed(self, initial, data):
+                raise AssertionError("child value was compared")
+
+        disabled = nestingdolls.ListField(
+            UnreachableField(), required=False, disabled=True
+        )
+        oversized = nestingdolls.ListField(
+            UnreachableField(), max_length=0, required=False
+        )
+
+        self.assertIs(disabled.has_changed([1], ["2"]), False)
+        self.assertIs(
+            oversized.has_changed([], ["1"] * (oversized.limits.absolute_max + 1)),
+            True,
+        )
 
     def assertTooManyFormsResponse(self, url, total):
         response = self.client.post(
@@ -1406,6 +1450,11 @@ class TupleFieldTestCase(SimpleTestCase):
 
 @override_settings(ROOT_URLCONF=__name__)
 class SetFieldTestCase(SimpleTestCase):
+    """Tests ``SetField`` and ``FrozenSetField``.
+
+    The tests cover deduplication, cardinality, hashability, and bounded change
+    detection."""
+
     def test_cardinality_is_checked_after_deduplication(self):
         """It checks set cardinality after removing duplicates."""
         field = nestingdolls.SetField(forms.IntegerField(), min_length=2, max_length=2)
@@ -1567,8 +1616,23 @@ class SetFieldTestCase(SimpleTestCase):
         self.assertIs(integer_field.has_changed({1}, ["invalid"]), True)
         self.assertIs(json_field.has_changed({True}, ["1"]), True)
 
+    def test_direct_disabled_and_unreadable_values_answer_without_member_pairing(self):
+        """A disabled set reports no change. An unreadable value reports a change."""
+        disabled = nestingdolls.SetField(
+            forms.IntegerField(), required=False, disabled=True
+        )
+        field = nestingdolls.SetField(forms.IntegerField(), required=False)
+
+        self.assertIs(disabled.has_changed({1}, ["2"]), False)
+        self.assertIs(field.has_changed("bad", ["1"]), True)
+        self.assertIs(field.has_changed({1}, "bad"), True)
+
 
 class CompositeHiddenInitialTestCase(SimpleTestCase):
+    """Tests ``show_hidden_initial`` for composite fields.
+
+    The tests cover hidden markup and the change detection that reads it."""
+
     def test_hidden_initial_markup_and_change_detection(self):
         """Hidden initial rows drive change detection and survive an invalid redisplay."""
 
@@ -1842,6 +1906,11 @@ class CompositeHiddenInitialTestCase(SimpleTestCase):
 
 @override_settings(ROOT_URLCONF=__name__)
 class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
+    """Tests sequences nested in sequences and mappings.
+
+    The tests cover nested change detection, the shared row cap, sparse file
+    rows, nested deletion, and nested row errors."""
+
     def test_nested_change_detection_uses_child_semantics(self):
         """Nested change detection delegates to the child field's comparison."""
         tuple_field = nestingdolls.ListField(
@@ -1929,6 +1998,13 @@ class NestedSequenceFieldTestCase(FormBindingUnitTestCase):
 
         self.assertEqual(rendered_small_leaves, 8)
         self.assertEqual(CountingField.preparations, 8)
+
+    def test_prepare_value_keeps_a_row_the_nested_child_refuses(self):
+        """A row that the nested child cannot read stays in the prepared rows."""
+        field = nestingdolls.ListField(
+            nestingdolls.ListField(forms.CharField(), required=False), required=False
+        )
+        self.assertEqual(field.prepare_value([["a"], "scalar"]), [["a"], "scalar"])
 
     def assertSubmissionMaximum(self, limits, keys, expected):
         with override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=keys):
@@ -2674,6 +2750,9 @@ class SequenceNestedListRowTestCase(FormBindingUnitTestCase):
 
 @override_settings(ROOT_URLCONF=__name__, DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
 class DjangoRequestLimitFunctionalTestCase(SimpleTestCase):
+    """Tests posted submissions against the Django request limits and the per-level
+    row caps."""
+
     def assertSequenceRootSubmission(
         self, inner_total, expected_valid, expected_errors
     ):
@@ -2821,6 +2900,11 @@ class DjangoRequestLimitFunctionalTestCase(SimpleTestCase):
 
 
 class NestedParserRegressionTestCase(SimpleTestCase):
+    """Tests request parser edge cases.
+
+    Text indexes do not bind rows. An unknown mapping initial stays one
+    renderable row."""
+
     def test_unrecognized_mapping_initial_becomes_one_renderable_row(self):
         """A mapping that is not flattened sequence data remains one raw row."""
 
@@ -2855,6 +2939,11 @@ class NestedParserRegressionTestCase(SimpleTestCase):
 
 
 class WidgetIntegrationTestCase(SimpleTestCase):
+    """Tests rendered ``SequenceWidget`` markup.
+
+    The tests cover management inputs, row controls, error references, add and
+    remove buttons, and media."""
+
     def test_custom_child_choices_are_rendered(self):
         """It renders child choice widgets normally."""
 
@@ -2891,6 +2980,24 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
         self.assertIs(UploadForm().is_multipart(), True)
         self.assertIs(TextForm().is_multipart(), False)
+
+    def test_exact_name_and_row_keys_count_as_input(self):
+        """An exact or row key counts as input. A non-string key does not."""
+        widget = nestingdolls.ListField(forms.IntegerField()).widget
+
+        self.assertIs(
+            widget.value_omitted_from_data({"values": "x"}, {}, "values"), False
+        )
+        self.assertIs(
+            widget.value_omitted_from_data({"values-0": "1"}, {}, "values"), False
+        )
+        self.assertIs(widget.value_omitted_from_data({0: "1"}, {}, "values"), True)
+
+    def test_extraction_without_input_returns_an_empty_list(self):
+        """Extraction returns an empty list when a submission has no input."""
+        widget = nestingdolls.ListField(forms.IntegerField()).widget
+
+        self.assertEqual(widget.value_from_datadict({}, {}, "values"), [])
 
     def test_form_required_attribute_opt_out_is_preserved(self):
         """It respects the form-level required-attribute opt-out."""
@@ -3103,6 +3210,32 @@ class WidgetIntegrationTestCase(SimpleTestCase):
             compound_html,
         )
 
+    def test_a_disabled_child_field_disables_every_row_input(self):
+        """A disabled child field renders each row input as disabled."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.IntegerField(disabled=True), required=False, initial=[7]
+            )
+
+        self.assertInHTML(
+            '<input type="number" name="values-0" value="7" disabled id="id_values_0">',
+            Form().as_p(),
+        )
+
+    def test_a_string_initial_row_renders_a_blank_compound_row(self):
+        """A compound row does not decompress a string initial row."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.SplitDateTimeField(), required=False)
+
+        html = Form(initial={"values": ["2026-08-05 10:30"]}).as_p()
+
+        self.assertInHTML(
+            '<input type="text" name="values-0_0" id="id_values_0_0">', html
+        )
+        self.assertNotIn("2026-08-05", html)
+
     def assertAddButtonSurvivesInitial(self, initial):
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.IntegerField(), max_length=2)
@@ -3167,6 +3300,10 @@ class WidgetIntegrationTestCase(SimpleTestCase):
 
 
 class PublicApiTestCase(SimpleTestCase):
+    """Tests public constructor contracts.
+
+    Invalid limits, child fields, widgets, and bound field classes are refused."""
+
     def test_constructor_bounds_are_enforced(self):
         """It refuses limit and initial combinations the field cannot satisfy."""
         self.assertEqual(
@@ -3231,6 +3368,13 @@ class PublicApiTestCase(SimpleTestCase):
             nestingdolls.SequenceWidget(child_field=forms.IntegerField())
         with self.assertRaises(TypeError):
             nestingdolls.MappingWidget(form_class=forms.Form)
+
+    def test_constructor_rejects_a_foreign_bound_field_class(self):
+        """The constructor rejects a bound field class with a wrong base class."""
+        with self.assertRaises(TypeError):
+            nestingdolls.ListField(
+                forms.IntegerField(), bound_field_class=forms.BoundField
+            )
 
     def test_widget_instance_is_copied_and_rebound_to_field_configuration(self):
         """Django copies a supplied widget before the field configures it."""

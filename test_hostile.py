@@ -423,36 +423,56 @@ class HostileClientTestCase(SimpleTestCase):
 
 
 @override_settings(ROOT_URLCONF=__name__)
-class HostileSequenceCrashTestCase(HostileClientTestCase):
-    """Prove that no submitted key makes a sequence view raise."""
+@override_settings(ROOT_URLCONF=__name__)
+class HostileRequestBodyTestCase(HostileClientTestCase):
+    """A hostile request body does not cause a server error.
 
-    def test_client_accepts_a_managed_compound_child_row(self):
-        """A managed compound child row returns a valid response."""
-        managed = self.client.post(
-            "/hostile-split-datetime-list/",
+    Each test sends a body that no browser form sends. The view returns a client
+    error or an empty submission."""
+
+    def test_client_survives_a_body_that_is_not_form_data(self):
+        """A JSON body carries no form controls and gives an empty submission."""
+        response = self.client.post(
+            "/hostile-integer-list/",
+            data='{"values": [1, 2]}',
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["value"], [])
+
+    def test_client_survives_a_malformed_multipart_body(self):
+        """A truncated multipart body gives a client error, never a server error."""
+        response = self.client.post(
+            "/hostile-row-upload-list/",
+            data=b"--frontier\r\nContent-Disposition: form-data; name=",
+            content_type="multipart/form-data; boundary=frontier",
+        )
+        self.assertLess(response.status_code, 500)
+
+    @override_settings(DATA_UPLOAD_MAX_NUMBER_FILES=2)
+    def test_client_survives_more_uploads_than_the_request_allows(self):
+        """Django refuses the extra uploads, and the view does not fail."""
+        response = self.client.post(
+            "/hostile-row-upload-list/",
             {
-                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{TOTAL_FORM_COUNT}": "3",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0_0": "2026-08-01",
-                "values-0_1": "10:30:00",
+                "values-0-upload": SimpleUploadedFile("a.txt", b"a"),
+                "values-1-upload": SimpleUploadedFile("b.txt", b"b"),
+                "values-2-upload": SimpleUploadedFile("c.txt", b"c"),
             },
         )
-        self.assertEqual(managed.status_code, 200)
-        self.assertIs(managed.json()["valid"], True)
+        self.assertEqual(response.status_code, 400)
 
-    def assertCompoundChildWholeValueDoesNotRaise(self, body):
-        response = self.client.post("/hostile-split-datetime-list/", body)
-        self.assertEqual(response.status_code, 200)
 
-    def test_client_survives_a_scalar_whole_value_for_compound_child_rows(self):
-        """A scalar whole value for a compound row does not return HTTP 500."""
-        self.assertCompoundChildWholeValueDoesNotRaise({"values": "abc"})
+@override_settings(ROOT_URLCONF=__name__)
+class HostileRowKeyTestCase(HostileClientTestCase):
+    """A malformed row key binds no row.
 
-    def test_client_survives_a_list_whole_value_for_compound_child_rows(self):
-        """A list whole value for a compound row does not return HTTP 500."""
-        self.assertCompoundChildWholeValueDoesNotRaise({"values": ["a", "b"]})
+    Each test sends a row key that managed spelling does not permit. The key
+    binds no row, and valid rows stay in the value."""
 
-    def test_client_survives_deeply_nested_bracket_row_keys(self):
+    def test_client_ignores_a_deeply_nested_bracket_row_key(self):
         """A key with thousands of bracket groups gives an ordinary response."""
         response = self.post_raw(
             "/hostile-deep-bracket-list/",
@@ -499,7 +519,7 @@ class HostileSequenceCrashTestCase(HostileClientTestCase):
         """A negative bracket row key does not bind a row."""
         self.assertMalformedBracketKeyDoesNotBind("values[-1]")
 
-    def test_client_survives_a_row_index_longer_than_the_digit_limit(self):
+    def test_client_ignores_a_row_index_longer_than_the_digit_limit(self):
         """A row index with more digits than the limit names no row."""
         response = self.client.post(
             "/hostile-integer-list/",
@@ -512,6 +532,90 @@ class HostileSequenceCrashTestCase(HostileClientTestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["value"], [1])
+
+    def test_client_ignores_invisible_characters_in_row_keys_and_keeps_them_in_values(
+        self,
+    ):
+        """A zero-width space stays in a value and names no row."""
+        response = self.client.post(
+            "/hostile-nested-text-list/",
+            {
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                f"values-0-{TOTAL_FORM_COUNT}": "1",
+                f"values-0-{INITIAL_FORM_COUNT}": "0",
+                "values-0-0": "text\u200bwith marks",
+                "values-0-\u200b1": "ignored",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["value"], [["text\u200bwith marks"]])
+
+    def test_client_ignores_non_ascii_digit_row_indexes_at_every_level(self):
+        """A Unicode digit names no row at an outer or an inner level."""
+        response = self.client.post(
+            "/hostile-nested-text-list/",
+            {
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                f"values-0-{TOTAL_FORM_COUNT}": "1",
+                f"values-0-{INITIAL_FORM_COUNT}": "0",
+                "values-0-0": "kept",
+                "values-\u0661-0": "outer arabic index",
+                "values-0-\u00b2": "inner superscript index",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["value"], [["kept"]])
+
+    def test_client_ignores_row_indexes_that_cannot_name_a_form(self):
+        """Oversized and overlong indexes do not reach the formset."""
+        response = self.client.post(
+            "/hostile-integer-list/",
+            {
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                "values-0": "5",
+                "values-9999999": "ignored",
+                "values-12345678": "ignored",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["value"], [5])
+
+
+@override_settings(ROOT_URLCONF=__name__)
+class HostileRowValueTestCase(HostileClientTestCase):
+    """A hostile row value gets a validation error, not a crash.
+
+    Each test sends a value that a field cannot clean. The view returns an
+    ordinary response, and the error names the cause."""
+
+    def test_client_accepts_a_managed_compound_child_row(self):
+        """A managed compound child row returns a valid response."""
+        managed = self.client.post(
+            "/hostile-split-datetime-list/",
+            {
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                "values-0_0": "2026-08-01",
+                "values-0_1": "10:30:00",
+            },
+        )
+        self.assertEqual(managed.status_code, 200)
+        self.assertIs(managed.json()["valid"], True)
+
+    def assertCompoundChildWholeValueDoesNotRaise(self, body):
+        response = self.client.post("/hostile-split-datetime-list/", body)
+        self.assertEqual(response.status_code, 200)
+
+    def test_client_survives_a_scalar_whole_value_for_compound_child_rows(self):
+        """A scalar whole value for a compound row does not return HTTP 500."""
+        self.assertCompoundChildWholeValueDoesNotRaise({"values": "abc"})
+
+    def test_client_survives_a_list_whole_value_for_compound_child_rows(self):
+        """A list whole value for a compound row does not return HTTP 500."""
+        self.assertCompoundChildWholeValueDoesNotRaise({"values": ["a", "b"]})
 
     def test_client_reports_an_unhashable_json_row_as_a_validation_error(self):
         """A JSON array in a set row returns a validation error.
@@ -550,88 +654,6 @@ class HostileSequenceCrashTestCase(HostileClientTestCase):
         self.assertEqual(
             body["child_codes"], {"values": ["null_characters_not_allowed"]}
         )
-
-    def test_client_survives_invisible_characters_in_row_keys_and_values(self):
-        """A zero-width space stays in a value and names no row."""
-        response = self.client.post(
-            "/hostile-nested-text-list/",
-            {
-                f"values-{TOTAL_FORM_COUNT}": "1",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-                f"values-0-{TOTAL_FORM_COUNT}": "1",
-                f"values-0-{INITIAL_FORM_COUNT}": "0",
-                "values-0-0": "text\u200bwith marks",
-                "values-0-\u200b1": "ignored",
-            },
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [["text\u200bwith marks"]])
-
-    def test_client_survives_non_ascii_digit_row_indexes_at_every_level(self):
-        """A Unicode digit names no row at an outer or an inner level."""
-        response = self.client.post(
-            "/hostile-nested-text-list/",
-            {
-                f"values-{TOTAL_FORM_COUNT}": "1",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-                f"values-0-{TOTAL_FORM_COUNT}": "1",
-                f"values-0-{INITIAL_FORM_COUNT}": "0",
-                "values-0-0": "kept",
-                "values-\u0661-0": "outer arabic index",
-                "values-0-\u00b2": "inner superscript index",
-            },
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [["kept"]])
-
-    def test_client_discards_row_indexes_that_cannot_name_a_form(self):
-        """Oversized and overlong indexes do not reach the formset."""
-        response = self.client.post(
-            "/hostile-integer-list/",
-            {
-                f"values-{TOTAL_FORM_COUNT}": "1",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0": "5",
-                "values-9999999": "ignored",
-                "values-12345678": "ignored",
-            },
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [5])
-
-    def test_client_survives_a_body_that_is_not_form_data(self):
-        """A JSON body carries no form controls and gives an empty submission."""
-        response = self.client.post(
-            "/hostile-integer-list/",
-            data='{"values": [1, 2]}',
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [])
-
-    def test_client_survives_a_malformed_multipart_body(self):
-        """A truncated multipart body gives a client error, never a server error."""
-        response = self.client.post(
-            "/hostile-row-upload-list/",
-            data=b"--frontier\r\nContent-Disposition: form-data; name=",
-            content_type="multipart/form-data; boundary=frontier",
-        )
-        self.assertLess(response.status_code, 500)
-
-    @override_settings(DATA_UPLOAD_MAX_NUMBER_FILES=2)
-    def test_client_survives_more_uploads_than_the_request_allows(self):
-        """Django refuses the extra uploads, and the view does not fail."""
-        response = self.client.post(
-            "/hostile-row-upload-list/",
-            {
-                f"values-{TOTAL_FORM_COUNT}": "3",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0-upload": SimpleUploadedFile("a.txt", b"a"),
-                "values-1-upload": SimpleUploadedFile("b.txt", b"b"),
-                "values-2-upload": SimpleUploadedFile("c.txt", b"c"),
-            },
-        )
-        self.assertEqual(response.status_code, 400)
 
 
 @override_settings(ROOT_URLCONF=__name__)
@@ -1034,7 +1056,7 @@ class HostileRenderCostTestCase(HostileClientTestCase):
 
 
 @override_settings(ROOT_URLCONF=__name__)
-class HostileCleanCostTestCase(HostileClientTestCase):
+class HostileRowBudgetTestCase(HostileClientTestCase):
     """Measure the cost to reject hostile nested submissions.
 
     ``submission_countdown`` stops nested totals from multiplying rows. Other
@@ -1135,7 +1157,7 @@ class HostileCleanCostTestCase(HostileClientTestCase):
             self.assertIs(response.json()["valid"], False)
         return best
 
-    def test_client_cost_scales_with_sibling_mapping_children_not_worse(self):
+    def test_client_pays_at_most_linear_cost_for_sibling_mapping_children(self):
         """Sibling sequences in a mapping have independent shared budgets.
 
         This matches Django formsets. The form author fixes the sibling count. This
@@ -1167,7 +1189,7 @@ class HostileCleanCostTestCase(HostileClientTestCase):
             "formsets accept",
         )
 
-    def test_client_cost_scales_with_sibling_list_fields_not_worse(self):
+    def test_client_pays_at_most_linear_cost_for_sibling_list_fields(self):
         """Sibling ``ListField`` instances have independent shared budgets.
 
         This is the mapping test without ``DictField``. The form author fixes the
@@ -1196,7 +1218,7 @@ class HostileCleanCostTestCase(HostileClientTestCase):
             "formsets accept",
         )
 
-    def test_client_stays_bounded_three_sequence_levels_deep(self):
+    def test_client_pays_bounded_cost_three_sequence_levels_deep(self):
         """The shared budget limits work at a third nesting level.
 
         Two outer rows, two middle rows, and 2000 inner rows claim up to 8000 rows.
@@ -1550,7 +1572,7 @@ class HostileCleanCostTestCase(HostileClientTestCase):
 
 
 @override_settings(ROOT_URLCONF=__name__)
-class HostileMappingSpellingTestCase(HostileClientTestCase):
+class HostileFormPrefixTestCase(HostileClientTestCase):
     """Send the same mapping child under more than one accepted spelling."""
 
     def test_client_ignores_unprefixed_controls_on_a_prefixed_form(self):

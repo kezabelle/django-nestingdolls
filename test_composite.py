@@ -22,6 +22,7 @@ from django.test.utils import setup_test_environment, teardown_test_environment
 from django.utils.datastructures import MultiValueDict
 
 import nestingdolls
+from nestingdolls.widgets import CompositeWidget
 
 if not settings.configured:
     settings.configure(
@@ -227,32 +228,11 @@ class CompositeFieldAssertions:
         self.assertEqual(widget.template_name, "app/{custom}.html")
 
 
-class SequenceCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCase):
-    def test_render_state_is_isolated(self):
-        """An invalid sequence form does not change a fresh form."""
-        self.assertRenderStateIsIsolated(
-            OptionalSequenceForm,
-            "values",
-            {
-                "values-0": "bad",
-                f"values-{TOTAL_FORM_COUNT}": "1",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-            },
-        )
+class ListFieldCleaningTestCase(SimpleTestCase):
+    """Make sure ``ListField`` cleans each input shape correctly.
 
-    def test_change_detection_uses_child_semantics(self):
-        """A sequence child converts one before change detection."""
-        self.assertChangeDetectionUsesChildSemantics(
-            OptionalSequenceForm,
-            "values",
-            {
-                "values-0": "1",
-                f"values-{TOTAL_FORM_COUNT}": "1",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-            },
-            [1],
-            [3, 4],
-        )
+    Each test sends one input shape. Each test examines the cleaned list or the
+    error codes."""
 
     def test_exact_name_blank_is_one_row(self):
         """A blank request value is one submitted sequence row."""
@@ -261,6 +241,104 @@ class SequenceCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCa
         error = form.errors.as_data()["values"][0]
         self.assertEqual(error.code, "item_invalid")
         self.assertEqual(error.child_code, "required")
+
+    def test_optional_direct_list_cleans_every_row(self):
+        """A direct Python list in a dict cleans every row."""
+        form = OptionalSequenceForm({"values": ["3", "4"]})
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["values"], [3, 4])
+
+    def test_request_list_payload_is_one_row(self):
+        """A request list payload is one row, not the outer sequence."""
+        form = OptionalSequenceForm(MultiValueDict({"values": [["3", "4"]]}))
+        self.assertIs(form.is_valid(), False)
+        error = form.errors.as_data()["values"][0]
+        self.assertEqual(error.code, "item_invalid")
+        self.assertEqual(error.child_code, "invalid")
+
+    def test_direct_non_lists_are_invalid_sequence_input(self):
+        """A direct exact sequence input must be a Python list."""
+        for value in (None, "", "3", ("3",), {"number": "3"}):
+            with self.subTest(value=value):
+                form = OptionalSequenceForm({"values": value})
+                self.assertIs(form.is_valid(), False)
+                error = form.errors.as_data()["values"][0]
+                self.assertEqual(error.code, "invalid")
+
+    def test_direct_none_cleans_empty_when_optional(self):
+        """An optional field treats ``clean(None)`` as an empty submission.
+
+        ``MappingField.clean(None)`` returns ``{}``.
+        The sequence field has the same direct-call behavior.
+        Only ``clean`` makes this conversion.
+        Bound ``{"values": None}`` input remains invalid.
+        """
+        field = nestingdolls.ListField(forms.IntegerField(), required=False)
+
+        self.assertEqual(field.clean(None), [])
+
+    def test_direct_none_reports_required(self):
+        """A required field reports ``required`` for ``clean(None)``."""
+        field = nestingdolls.ListField(forms.IntegerField())
+
+        with self.assertRaises(ValidationError) as caught:
+            field.clean(None)
+
+        self.assertEqual(caught.exception.code, "required")
+
+    def test_prefixed_data_cleans(self):
+        """A prefixed sequence submission cleans its row."""
+        form = SequenceForm(
+            {
+                "values-0": "1",
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+            }
+        )
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["values"], [1])
+
+    def test_required_direct_list_cleans_every_row(self):
+        """A direct sequence list cleans every row."""
+        form = SequenceForm({"values": ["3", "4"]})
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["values"], [3, 4])
+
+    def test_exact_list_blank_and_none_are_rows(self):
+        """A list entry remains a row regardless of its value."""
+        for submitted in ({"values": [""]}, {"values": [None]}, QueryDict("values=")):
+            with self.subTest(submitted=submitted):
+                form = OptionalSequenceForm(submitted)
+                self.assertIs(form.is_valid(), False)
+                error = form.errors.as_data()["values"][0]
+                self.assertEqual(error.code, "item_invalid")
+                self.assertEqual(error.child_code, "required")
+
+    def test_direct_empty_list_cleans_empty(self):
+        """An empty direct list is an empty submitted sequence."""
+        form = OptionalSequenceForm({"values": []})
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["values"], [])
+
+    def test_direct_list_keeps_a_multiple_choice_row(self):
+        """A direct row list reaches Django's list-aware child widget."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.MultipleChoiceField(choices=(("a", "A"), ("b", "B"))),
+                required=False,
+            )
+
+        form = Form({"values": [["a", "b"]]})
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["values"], [["a", "b"]])
+
+
+class ListFieldErrorDisplayTestCase(CompositeFieldAssertions, SimpleTestCase):
+    """Make sure ``ListField`` shows each error at the correct location.
+
+    Each test examines the outer field errors, the row errors, or the rendered
+    error markup."""
 
     def test_outer_validator_error_stays_visible(self):
         """A sequence validator error remains visible at the outer field."""
@@ -354,6 +432,39 @@ class SequenceCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCa
         """A sequence bound field rejects a foreign field."""
         self.assertForeignFieldIsRejected(nestingdolls.SequenceBoundField)
 
+
+class ListFieldRenderingTestCase(CompositeFieldAssertions, SimpleTestCase):
+    """Make sure ``ListField`` renders each layout correctly.
+
+    Each test examines the rendered markup, the render state, or change
+    detection."""
+
+    def test_render_state_is_isolated(self):
+        """An invalid sequence form does not change a fresh form."""
+        self.assertRenderStateIsIsolated(
+            OptionalSequenceForm,
+            "values",
+            {
+                "values-0": "bad",
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+            },
+        )
+
+    def test_change_detection_uses_child_semantics(self):
+        """A sequence child converts one before change detection."""
+        self.assertChangeDetectionUsesChildSemantics(
+            OptionalSequenceForm,
+            "values",
+            {
+                "values-0": "1",
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+            },
+            [1],
+            [3, 4],
+        )
+
     def test_as_div_uses_the_div_wrapper(self):
         """The sequence div helper uses the div widget wrapper."""
         self.assertWrapperMarkup(
@@ -390,7 +501,7 @@ class SequenceCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCa
             "sequence",
         )
 
-    def test_sequential_renders_use_their_own_layout(self):
+    def test_consecutive_renders_use_their_own_layout(self):
         """A sequence form keeps each render layout separate."""
         self.assertSequentialRendersUseOwnLayout(SequenceForm, "sequence")
 
@@ -402,49 +513,72 @@ class SequenceCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCa
         """A sequence widget keeps a literal custom template name."""
         self.assertLiteralTemplateNameSurvives(SequenceForm, "values")
 
-    def test_direct_list_dict_cleans(self):
-        """A direct Python list in a dict cleans every row."""
-        form = OptionalSequenceForm({"values": ["3", "4"]})
+
+class DictFieldCleaningTestCase(CompositeFieldAssertions, SimpleTestCase):
+    """Make sure ``DictField`` cleans each input shape correctly.
+
+    Each test sends one input shape. Each test examines the cleaned mapping or
+    the error codes."""
+
+    def test_exact_name_empty_string_cleans_empty(self):
+        """A lone empty ``point`` key cleans as an empty mapping."""
+        self.assertExactNameEmptyStringCleansEmpty(OptionalMappingForm, "point", {})
+
+    def test_accepts_declared_prefixed_children_only(self):
+        """Dot, bracket, and undeclared keys cannot enter a child form."""
+        form = OptionalMappingForm(
+            {
+                "point-a": "1",
+                "point-label": "kept",
+                "point-undeclared": "ignored",
+                "point.a": "ignored",
+                "point[a]": "ignored",
+            }
+        )
         self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["values"], [3, 4])
+        self.assertEqual(form.cleaned_data["point"], {"a": 1, "label": "kept"})
 
-    def test_request_list_payload_is_one_row(self):
-        """A request list payload is one row, not the outer sequence."""
-        form = OptionalSequenceForm(MultiValueDict({"values": [["3", "4"]]}))
-        self.assertIs(form.is_valid(), False)
-        error = form.errors.as_data()["values"][0]
-        self.assertEqual(error.code, "item_invalid")
-        self.assertEqual(error.child_code, "invalid")
+    def test_preserves_getlist_values_for_child_widgets(self):
+        """Canonicalization copies every repeated value through Django's protocol."""
 
-    def test_direct_non_lists_are_invalid_sequence_input(self):
-        """A direct exact sequence input must be a Python list."""
-        for value in (None, "", "3", ("3",), {"number": "3"}):
-            with self.subTest(value=value):
-                form = OptionalSequenceForm({"values": value})
-                self.assertIs(form.is_valid(), False)
-                error = form.errors.as_data()["values"][0]
-                self.assertEqual(error.code, "invalid")
+        class RepeatedInput(dict[str, object]):
+            def getlist(self, key: str) -> list[object]:
+                return self.lists.get(key, [])
 
-    def test_direct_none_cleans_empty_when_optional(self):
-        """An optional field treats ``clean(None)`` as an empty submission.
+            def __init__(self) -> None:
+                super().__init__({"point-a": "second"})
+                self.lists = {"point-a": ["first", "second"]}
 
-        ``MappingField.clean(None)`` returns ``{}``.
-        The sequence field has the same direct-call behavior.
-        Only ``clean`` makes this conversion.
-        Bound ``{"values": None}`` input remains invalid.
-        """
-        field = nestingdolls.ListField(forms.IntegerField(), required=False)
+        class CaptureWidget(forms.TextInput):
+            values: ClassVar[list[object]] = []
 
-        self.assertEqual(field.clean(None), [])
+            def value_from_datadict(self, data, files, name):
+                type(self).values = data.getlist(name)
+                return super().value_from_datadict(data, files, name)
 
-    def test_direct_none_reports_required(self):
-        """A required field reports ``required`` for ``clean(None)``."""
-        field = nestingdolls.ListField(forms.IntegerField())
+        class CaptureForm(forms.Form):
+            a = forms.CharField(widget=CaptureWidget)
 
-        with self.assertRaises(ValidationError) as caught:
-            field.clean(None)
+        class Form(forms.Form):
+            point = nestingdolls.DictField(CaptureForm)
 
-        self.assertEqual(caught.exception.code, "required")
+        form = Form(RepeatedInput())
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(CaptureWidget.values, ["first", "second"])
+
+    def test_optional_direct_mapping_cleans_every_child(self):
+        """A direct mapping in a dict cleans every child."""
+        form = OptionalMappingForm({"point": {"a": "3", "label": "whole"}})
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["point"], {"a": 3, "label": "whole"})
+
+    def test_exact_request_mapping_cleans(self):
+        """A request exact mapping still cleans every child."""
+        form = OptionalMappingForm(
+            MultiValueDict({"point": [{"a": "3", "label": "whole"}]})
+        )
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["point"], {"a": 3, "label": "whole"})
 
     def test_prefixed_data_cleans(self):
         """A prefixed sequence submission cleans its row."""
@@ -458,62 +592,33 @@ class SequenceCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCa
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], [1])
 
-    def test_direct_list_cleans(self):
-        """A direct sequence list cleans every row."""
-        form = SequenceForm({"values": ["3", "4"]})
+    def test_required_direct_mapping_cleans_every_child(self):
+        """A direct mapping cleans every child."""
+        form = MappingForm({"point": {"a": "3", "label": "whole"}})
         self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["values"], [3, 4])
+        self.assertEqual(form.cleaned_data["point"], {"a": 3, "label": "whole"})
 
-    def test_exact_list_blank_and_none_are_rows(self):
-        """A list entry remains a row regardless of its value."""
-        for submitted in ({"values": [""]}, {"values": [None]}, QueryDict("values=")):
-            with self.subTest(submitted=submitted):
-                form = OptionalSequenceForm(submitted)
-                self.assertIs(form.is_valid(), False)
-                error = form.errors.as_data()["values"][0]
-                self.assertEqual(error.code, "item_invalid")
-                self.assertEqual(error.child_code, "required")
+    def test_direct_mapping_scalar_child_sequence_is_invalid(self):
+        """A direct mapping retains an invalid scalar sequence child."""
 
-    def test_direct_empty_list_cleans_empty(self):
-        """An empty direct list is an empty submitted sequence."""
-        form = OptionalSequenceForm({"values": []})
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["values"], [])
-
-    def test_direct_list_keeps_a_multiple_choice_row(self):
-        """A direct row list reaches Django's list-aware child widget."""
+        class Child(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), required=False)
 
         class Form(forms.Form):
-            values = nestingdolls.ListField(
-                forms.MultipleChoiceField(choices=(("a", "A"), ("b", "B"))),
-                required=False,
-            )
+            point = nestingdolls.DictField(Child, required=False)
 
-        form = Form({"values": [["a", "b"]]})
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["values"], [["a", "b"]])
+        form = Form({"point": {"values": "3"}})
+        self.assertIs(form.is_valid(), False)
+        error = form.errors.as_data()["point"][0]
+        self.assertEqual(error.code, "item_invalid")
+        self.assertEqual(error.child_code, "invalid")
 
 
-class MappingCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCase):
-    def test_render_state_is_isolated(self):
-        """An invalid mapping form does not change a fresh form."""
-        self.assertRenderStateIsIsolated(
-            OptionalMappingForm, "point", {"point-a": "bad"}
-        )
+class DictFieldErrorDisplayTestCase(CompositeFieldAssertions, SimpleTestCase):
+    """Make sure ``DictField`` shows each error at the correct location.
 
-    def test_change_detection_uses_child_semantics(self):
-        """A mapping child converts one before change detection."""
-        self.assertChangeDetectionUsesChildSemantics(
-            OptionalMappingForm,
-            "point",
-            {"point-a": "1"},
-            {"a": 1},
-            {"a": 3, "label": "whole"},
-        )
-
-    def test_exact_name_empty_string_cleans_empty(self):
-        """A lone empty ``point`` key cleans as an empty mapping."""
-        self.assertExactNameEmptyStringCleansEmpty(OptionalMappingForm, "point", {})
+    Each test examines the outer field errors, the child errors, or the rendered
+    error markup."""
 
     def test_outer_validator_error_stays_visible(self):
         """A mapping validator error remains visible at the outer field."""
@@ -568,48 +673,6 @@ class MappingCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCas
             "point=forged&point-a=1&point-label=kept",
         )
 
-    def test_mapping_accepts_declared_prefixed_children_only(self):
-        """Dot, bracket, and undeclared keys cannot enter a child form."""
-        form = OptionalMappingForm(
-            {
-                "point-a": "1",
-                "point-label": "kept",
-                "point-undeclared": "ignored",
-                "point.a": "ignored",
-                "point[a]": "ignored",
-            }
-        )
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["point"], {"a": 1, "label": "kept"})
-
-    def test_mapping_preserves_getlist_values_for_child_widgets(self):
-        """Canonicalization copies every repeated value through Django's protocol."""
-
-        class RepeatedInput(dict[str, object]):
-            def getlist(self, key: str) -> list[object]:
-                return self.lists.get(key, [])
-
-            def __init__(self) -> None:
-                super().__init__({"point-a": "second"})
-                self.lists = {"point-a": ["first", "second"]}
-
-        class CaptureWidget(forms.TextInput):
-            values: ClassVar[list[object]] = []
-
-            def value_from_datadict(self, data, files, name):
-                type(self).values = data.getlist(name)
-                return super().value_from_datadict(data, files, name)
-
-        class CaptureForm(forms.Form):
-            a = forms.CharField(widget=CaptureWidget)
-
-        class Form(forms.Form):
-            point = nestingdolls.DictField(CaptureForm)
-
-        form = Form(RepeatedInput())
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(CaptureWidget.values, ["first", "second"])
-
     def test_custom_bound_field_renders_the_field_error(self):
         """A custom mapping bound field renders its child error."""
 
@@ -632,6 +695,29 @@ class MappingCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCas
     def test_bound_field_rejects_a_foreign_field(self):
         """A mapping bound field rejects a foreign field."""
         self.assertForeignFieldIsRejected(nestingdolls.MappingBoundField)
+
+
+class DictFieldRenderingTestCase(CompositeFieldAssertions, SimpleTestCase):
+    """Make sure ``DictField`` renders each layout correctly.
+
+    Each test examines the rendered markup, the render state, or change
+    detection."""
+
+    def test_render_state_is_isolated(self):
+        """An invalid mapping form does not change a fresh form."""
+        self.assertRenderStateIsIsolated(
+            OptionalMappingForm, "point", {"point-a": "bad"}
+        )
+
+    def test_change_detection_uses_child_semantics(self):
+        """A mapping child converts one before change detection."""
+        self.assertChangeDetectionUsesChildSemantics(
+            OptionalMappingForm,
+            "point",
+            {"point-a": "1"},
+            {"a": 1},
+            {"a": 3, "label": "whole"},
+        )
 
     def test_as_div_uses_the_div_wrapper(self):
         """The mapping div helper uses the div widget wrapper."""
@@ -669,7 +755,7 @@ class MappingCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCas
             "mapping",
         )
 
-    def test_sequential_renders_use_their_own_layout(self):
+    def test_consecutive_renders_use_their_own_layout(self):
         """A mapping form keeps each render layout separate."""
         self.assertSequentialRendersUseOwnLayout(MappingForm, "mapping")
 
@@ -681,49 +767,13 @@ class MappingCompositeFunctionalTestCase(CompositeFieldAssertions, SimpleTestCas
         """A mapping widget keeps a literal custom template name."""
         self.assertLiteralTemplateNameSurvives(MappingForm, "point")
 
-    def test_direct_mapping_dict_cleans(self):
-        """A direct mapping in a dict cleans every child."""
-        form = OptionalMappingForm({"point": {"a": "3", "label": "whole"}})
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["point"], {"a": 3, "label": "whole"})
-
-    def test_exact_request_mapping_cleans(self):
-        """A request exact mapping still cleans every child."""
-        form = OptionalMappingForm(
-            MultiValueDict({"point": [{"a": "3", "label": "whole"}]})
-        )
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["point"], {"a": 3, "label": "whole"})
-
-    def test_prefixed_data_cleans(self):
-        """A prefixed mapping submission cleans its child."""
-        form = MappingForm({"point-a": "1"})
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["point"], {"a": 1, "label": ""})
-
-    def test_direct_mapping_cleans(self):
-        """A direct mapping cleans every child."""
-        form = MappingForm({"point": {"a": "3", "label": "whole"}})
-        self.assertIs(form.is_valid(), True, form.errors)
-        self.assertEqual(form.cleaned_data["point"], {"a": 3, "label": "whole"})
-
-    def test_direct_mapping_scalar_child_sequence_is_invalid(self):
-        """A direct mapping retains an invalid scalar sequence child."""
-
-        class Child(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField(), required=False)
-
-        class Form(forms.Form):
-            point = nestingdolls.DictField(Child, required=False)
-
-        form = Form({"point": {"values": "3"}})
-        self.assertIs(form.is_valid(), False)
-        error = form.errors.as_data()["point"][0]
-        self.assertEqual(error.code, "item_invalid")
-        self.assertEqual(error.child_code, "invalid")
-
 
 class CompositeWidgetTestCase(SimpleTestCase):
+    """Make sure the composite widgets keep safe state and media.
+
+    Each test examines widget state or media across form instances and widget
+    subclasses."""
+
     def test_child_widgets_are_not_shared_between_form_instances(self):
         """One form does not share cached child widgets with another form.
 
@@ -746,6 +796,14 @@ class CompositeWidgetTestCase(SimpleTestCase):
             first.fields["rows"].widget.child_field.widget.fields["f"].widget,
             second.fields["rows"].widget.child_field.widget.fields["f"].widget,
         )
+
+    def test_the_base_widget_defers_keys_and_media_to_subclasses(self):
+        """The base widget has no key test and no child media of its own."""
+        widget = CompositeWidget()
+        with self.assertRaises(NotImplementedError):
+            widget.value_omitted_from_data({"point": "1"}, {}, "point")
+        with self.assertRaises(NotImplementedError):
+            str(widget.media)
 
     def test_widget_media_merges_every_declaration_in_the_mro(self):
         """A widget subclass adds media without removing inherited media.
@@ -772,6 +830,10 @@ class CompositeWidgetTestCase(SimpleTestCase):
         self.assertIn("nestingdolls/sequence.js", media)
         self.assertIn("extra-sequence.js", media)
         self.assertIn("extra-mapping.js", media)
+
+
+class PublicApiTestCase(SimpleTestCase):
+    """Make sure the public interface of ``nestingdolls`` is complete."""
 
     def test_every_exported_name_is_importable(self):
         """Every name in ``__all__`` is importable."""

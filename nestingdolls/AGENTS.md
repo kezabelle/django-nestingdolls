@@ -1,330 +1,139 @@
 # Package guide for agents
 
-This guide applies to work in `nestingdolls/`. The repository guide also
-applies.
+This guide applies below `nestingdolls/`; the repository guide also applies.
+Before editing `static/` or `templates/`, read that directory's `AGENTS.md`.
+This package provides nested Django mapping and sequence form fields. JavaScript
+is progressive enhancement only.
 
-## Purpose
+## Public surface and ownership
 
-This package adds mapping and sequence fields to Django forms. It preserves
-normal Django behavior and uses JavaScript only for progressive enhancement.
-
-## Public API
-
-- `DictField` is the primary name for a fixed mapping. The class is
-  `MappingField`; `DictField`, `FormField`, and `Subform` are aliases of it.
-  `NamedTupleField` and `DataclassField` subclass it to return a named tuple
-  or a dataclass.
-- `ListField` is the primary name for an ordered sequence. The class is
-  `SequenceField`; `ListField` is its alias. `FrozenSequenceField` subclasses
-  it to return a tuple, and `TupleField` is its alias. `SetField` returns a
-  set, and `FrozenSetField` returns a frozenset.
-- Mapping and sequence widgets and bound fields are advanced integration hooks.
-- All five error classes in `errors.py` are public. `InvalidInitialValueError`
-  is a `ValueError` for initial data with the wrong shape. The other four are
-  `ValidationError` subclasses: `ItemValidationError`,
+- Every name in `nestingdolls.__all__` is public. `DictField`, `FormField`, and
+  `Subform` alias `MappingField`; `ListField` aliases `SequenceField`.
+  `TupleField`/`FrozenSequenceField` and `SetField`/`FrozenSetField` are
+  sequence variants. `NamedTupleField` and `DataclassField` are mapping
+  variants.
+- `MappingWidget`, `SequenceWidget`, `MappingBoundField`, and
+  `SequenceBoundField` are advanced public integration hooks.
+  `InvalidInitialValueError` is a `ValueError`; `ItemValidationError`,
   `MappingInputValidationError`, `SequenceInputValidationError`, and
-  `TooManyFormsValidationError`.
-- `CompositeWidget`, `CompositeBoundField`, and `CompositeField` are internal.
-  They hold shared behavior to avoid writing it twice.
-- A class that holds one cohort of behavior is nested in the class that owns it,
-  as Django nests `class Media`: `SequenceField.Limits`, `SequenceWidget.RowForm`,
-  `SequenceWidget.RowFormSet`, `SequenceWidget.submission_countdown`, and the
-  `RenderState` holders. These nested classes are private. Put a cohort of
-  related methods in one of them instead of adding more methods to the owner.
+  `TooManyFormsValidationError` are `ValidationError` subclasses.
+- `CompositeField`, `CompositeWidget`, and `CompositeBoundField` are internal
+  shared bases. Keep behavior cohorts in their owner nested classes, such as
+  `SequenceField.Limits`, `SequenceWidget.RowForm`,
+  `SequenceWidget.RowFormSet`, `SequenceWidget.submission_countdown`, and
+  widget `RenderState` classes.
+- Use `_` only for a member called through `self` or subclass inheritance. If
+  another class calls it directly, remove `_`. Nested classes already scope
+  their members; do not add `_` there for privacy. Use lower-snake-case
+  class constants. After adding, renaming, or moving a member, check every
+  caller against these rules.
 
-## Invariants
+- Public exports: `__init__.py`.
+- Fields and specializations: `fields.py`.
+- Widgets, row formsets, extraction, and render state: `widgets.py`.
+- Bound child forms and formsets: `boundfield.py`.
+- Item and input errors: `errors.py`.
+- Form-layout render bridge and startup: `patches.py`, `apps.py`, and
+  `test_patches.py`.
+- Mapping templates: `templates/nestingdolls/mapping/` and `test_dictfield.py`.
+- Sequence templates: `templates/nestingdolls/sequence/` and `test_listfield.py`.
+- Named-tuple and dataclass output: `fields.py`, `test_namedtuplefield.py`, and
+  `test_dataclassfield.py`.
+- Shared composite behavior: the three internal bases and `test_composite.py`.
+- Hostile row costs and limits: `test_hostile.py` and `pathological.py`.
+- Browser controller and artifact: `static/nestingdolls/sequence.ts` and the
+  committed `sequence.js`.
 
-### Input handling
+## Behavior invariants
 
-- Preserve whole-value and prefixed input forms.
-- Preserve the input precedence each widget documents in
-  `value_from_datadict`. For a mapping, an exact mapping value under the
-  field's own name expands and replaces prefixed child keys. For a sequence,
-  indexed row keys outrank an exact value; without indexed rows, an exact
-  value outranks bare management keys.
-- Preserve all input forms through mapping and sequence nesting.
-- Do not copy or canonicalize submission keys. A subform or row formset binds
-  to the raw request data with a Django prefix and reads only its own keys.
-- Keep mapping `data` and `files` separate through nested widgets.
+### Input and binding
 
-### Django behavior
+- Preserve whole-value and prefixed input through arbitrary mapping/sequence
+  nesting.
+- An exact mapping expands to child keys and replaces prefixed mapping input.
+  Indexed sequence row keys outrank exact input; exact input outranks
+  management-only input.
+- Do not copy, normalize, or aggregate submission keys. Bind raw request
+  `data` and `files` with a Django prefix so each child reads only its own
+  keys. Keep `data` and `files` separate through mapping nesting.
 
-- Preserve child form clean hooks and non-field errors.
-- Delegate value extraction, preparation, and change detection to child
-  widgets and fields.
+### Django contract
+
+- Preserve child clean hooks and non-field errors. Let child widgets and fields
+  extract, prepare, and compare values.
 - Preserve file fields, compound widgets, multipart forms, and widget media.
-- Keep child errors inline. Do not duplicate them as outer field errors.
+  Keep child errors inline; do not duplicate them as outer errors.
 
-### Naming
+### Rendering and browser contract
 
-- A leading underscore means only `self`, or a subclass through
-  inheritance, calls it. If a different class calls a method or property
-  directly, even another class in this package, drop the underscore.
-- A nested class already scopes its own members: `Limits`, `RowForm`,
-  `RowFormSet`, `RenderState`, and the rest. Do not add a leading underscore
-  inside one of them for privacy; the nesting already provides it.
-- Name a class-level constant like any other attribute: lower snake_case,
-  never `_SHOUTY_CASE`.
-- After a change that adds, renames, or moves a method, check every call
-  site of that name against these rules, not just the one you touched.
+- Server-rendered HTML must work without JavaScript. Use inert `<template>`
+  elements for row add/remove controls. See `static/AGENTS.md` for script
+  rules and `templates/AGENTS.md` for template rules.
+- Do not add a built-in status, toast, or notification for row changes. Emit
+  `nestingdolls:sequence-change`; the host page owns announcements.
+- Keep the supported form-layout patch and four layout templates for each
+  composite. Keep hidden-initial work to `from_hidden_initial` and
+  `RenderState.hidden_initial_value`; do not add passes or render state.
 
-### HTML and JavaScript
+### Collections and documentation
 
-- Keep server-rendered HTML useful without JavaScript.
-- Create add and remove controls from inert `<template>` elements.
-- The script's source file, build steps, and code rules are in
-  `static/AGENTS.md`.
-- Do not add a status message, toast, or other notification element for row
-  add or remove. Emit the `nestingdolls:sequence-change` event instead, and
-  let the host page build its own announcement from it.
+- Deduplicate sets before length checks and compare sets without order.
+  Keep `SetField.has_changed` linear and conservative: pair a converted row
+  with its hashed member, and report ambiguity as a change. Do not add a
+  pairwise scan or comparison budget.
+- Use ASD-STE100 in comments and docstrings. A comment must explain a
+  non-obvious reason, an unidiomatic construct, or a bug cause; it must not
+  restate code or excuse unclear code. Put a needed ticket, specification, or
+  measurement at its use site.
 
-### Rendering layouts
+## Recursive sequence row budget
 
-- The form-layout render patch in `patches.py` and the four layout
-  templates for each composite widget are a deliberate, supported
-  feature. Do not propose their removal to reduce code size.
-- `show_hidden_initial` and hidden composite rendering are also
-  supported. Keep their cost close to Django's own: one conversion
-  hook (`from_hidden_initial`) and one render-state field
-  (`hidden_initial_value`). Do not grow this path.
+Read this before changing normalization, extraction, formset construction, or
+row rendering. Django already limits request keys, files, bytes, and one
+formset level with `absolute_max`; do not duplicate those limits. This package
+only limits attacker-controlled row multiplication across nested sequences.
+Python and decoded JSON bypass request-parser limits, but their rows still use
+this budget; their callers own byte and depth limits.
 
-### Collection semantics
+- `SequenceWidget.submission_countdown` is the sole recursive-row guard. The
+  outer `open(limits.submission_max)` creates one context-local budget; nested
+  opens reuse it, and its owner clears it on exit. Do not import, open,
+  inspect, or extend it from mappings, composite bases, `clean()`, field-tree
+  walks, or cross-field/request-wide paths. Store only the countdown in its
+  `ContextVar`: no default, sentinel, field/widget/formset reference, or lazy
+  cap expansion.
+- Only these scopes may call `open()`: `SequenceWidget.RowFormSet.total_form_count`,
+  `SequenceWidget.value_from_datadict`, `SequenceField.prepare_value`,
+  `SequenceWidget.get_context`, and `SequenceBoundField.formset`. A sixth
+  scope is a bug: the first owner fixes the budget and mode for descendants.
+- `SequenceBoundField.formset` is the only `raises=True` owner. An overdraw
+  unwinds, is recorded once, reports one `too_many_forms` error, and renders
+  a zero-row bound formset. The other four scopes clip to the allowed prefix;
+  do not let a clipped submitted form clean as valid.
+- Call `take()` only before rows are built: in `RowFormSet.total_form_count`
+  for submitted `TOTAL_FORMS`, in whole-list `SequenceWidget.value_from_datadict`,
+  and in `SequenceField.prepare_value` for initial rows. Do not take cached
+  rows again; pass an exact-list reservation through `new_formset` with
+  `submission_total_form_count` and document the inherited reservation.
+  `take(count <= 0)` returns zero and never spends or refunds capacity.
+- `Limits.submission_max` is `max(absolute_max, DATA_UPLOAD_MAX_NUMBER_FIELDS)`
+  for each submission. It covers one sequence field's nested tree only, never
+  sibling fields, forms, or requests.
 
-- Preserve set deduplication and order-independent set comparison.
-- Check set length limits after deduplication.
+## Hot submission-key scans
 
-## Source map
+Apply these rules when changing `SequenceWidget.has_row_input` or
+`SequenceWidget.RowFormSet.rows_with_submitted_values`. Use `pathological.py`
+for a scan-cost change; its fresh wall-time measurement overrides historical
+numbers.
 
-- Public exports: `nestingdolls/__init__.py`
-- Composite error types, including child-error wrapping: `nestingdolls/errors.py`
-- Fields: `nestingdolls/fields.py`
-- Widgets and the row formset: `nestingdolls/widgets.py`
-- Bound fields: `nestingdolls/boundfield.py`
-- Form-layout render patch: `nestingdolls/patches.py` and `test_patches.py`
-- App registration that installs the render patch at startup:
-  `nestingdolls/apps.py`
-- Mapping templates and tests:
-  `nestingdolls/templates/nestingdolls/mapping/` and `test_dictfield.py`
-- Sequence templates and tests:
-  `nestingdolls/templates/nestingdolls/sequence/` and `test_listfield.py`
-- Named tuple and dataclass mapping outputs: `nestingdolls/fields.py` with
-  `test_namedtuplefield.py` and `test_dataclassfield.py`
-- Hostile requests and the row budget: `test_hostile.py`; `pathological.py`
-  measures their cost
-- Sequence JavaScript: `nestingdolls/static/nestingdolls/sequence.ts` and its
-  compiled `sequence.js` file
-- Behavior shared by both lives on `CompositeWidget`,
-  `CompositeBoundField`, and `CompositeField`; each overrides only what
-  differs, and `test_composite.py` covers the shared contract for both.
-- Each field, widget, and bound field overrides a small, deliberate set of
-  Django methods. Read the class rather than a list of names: the docstring on
-  each override states which Django method it replaces and why.
-
-## Documentation language
-
-Use ASD-STE100 Simplified Technical English in documentation, comments, and
-docstrings.
-
-Rules for comments and docstrings in implementation code:
-
-- Do not restate what the code already says.
-- Do not use a comment to excuse unclear code; make the code clear first.
-- If a clear comment is hard to write, examine the code for a problem.
-- A comment must remove confusion, not create it.
-- Explain unidiomatic code; a reader must not "fix" it into a bug.
-- Put a reference (ticket, spec, measurement) at the point where the reader
-  needs it.
-- When you fix a bug, leave a comment that records the cause, so the bug
-  does not return.
-
-## Input limits
-
-Read this before you change normalization, extraction, or row counts. Do not
-add a new limit before you know which part is already covered.
-
-Django applies four settings while it parses a request. They count keys,
-files, and bytes. They do not count rows.
-
-- `DATA_UPLOAD_MAX_NUMBER_FIELDS` allows 1000 keys in each of GET and POST.
-  Above that value, Django raises `TooManyFieldsSent`.
-- `DATA_UPLOAD_MAX_NUMBER_FILES` allows 100 uploaded files. Above that value,
-  Django raises `TooManyFilesSent`.
-- `DATA_UPLOAD_MAX_MEMORY_SIZE` allows 2621440 bytes in the request body.
-  Above that value, Django raises `RequestDataTooBig`. This is a byte limit. It
-  does not limit rows.
-- `FILE_UPLOAD_MAX_MEMORY_SIZE` allows 2621440 bytes of one upload in memory.
-  Above that value, Django writes the upload to a temporary file.
-
-A Django formset limits one level with `absolute_max`. Its default `max_num` is
-1000 and its default `absolute_max` is 2000. A formset cannot contain another
-formset, so Django does not multiply row counts. For Django, the key limit and
-`absolute_max` are enough. Do not repeat those checks here.
-
-This package can put a sequence inside a sequence, and Django cannot count
-that recursive row product. One `TOTAL_FORMS` key can ask one level to build
-`absolute_max` empty rows. A request with 998 keys can ask for 996,498 rows
-across two levels: 498 outer rows that each carry a nested `TOTAL_FORMS`
-claim of 2000 (the "2 levels, 498x2000 spread" case in `pathological.py`).
-It stays below every Django request limit. The nested multiplication is the
-only limit that belongs to this package. Two outer rows with three inner
-rows spend `2 + 6 = 8` rows. Three outer rows with 900 inner rows spend
-`3 + 2700 = 2703`, so the default 2,000-row cap rejects the complete
-submission.
-
-`SequenceWidget.submission_countdown` is the one limit that belongs to this
-package. It protects attacker-controlled multiplication from recursive
-sequence nesting, not every collection configured by an application.
-
-- Call `submission_countdown.open(limits.submission_max)` only in sequence
-  parsing, extraction, or rendering. The first `open()` of an operation
-  builds the context-local budget at the outer sequence; a nested `open()`
-  yields that same budget and owns nothing. Do not open it in a mapping,
-  `clean()`, a shared composite base class, or a field-tree walk.
-  A site needs the budget only if it does one of two things: spend it, or
-  drive the lazy recursion that builds a nested level. Building a row form
-  does not build the rows inside it. Those appear only when something reads
-  or renders that row's value, so the budget must stay open across the read,
-  and the reader is the site that must hold it. That gives exactly five
-  sites, and any sixth is a duplicate. Three spend: `RowFormSet.total_form_count`
-  (a submitted `TOTAL_FORMS`), the whole-value `SequenceWidget.value_from_datadict`
-  (a Python list, and it drives extraction), and `SequenceField.prepare_value`
-  (server initial rows, and it drives preparation). Two only drive:
-  `SequenceWidget.get_context` for a render
-  and `SequenceBoundField.formset` for an extraction. Its existing row-data
-  reads traverse nested sequence and mapping children before cleaning.
-  Everything else inherits. Cleaning and change detection both reach rows
-  through `SequenceBoundField.formset`, so `SequenceField._clean_bound_field`
-  reads `bound_field.submission_overflow`, which performs that one
-  extraction, instead of opening a budget of its own. A second budget there
-  would find every row list already built and could only take rows twice.
-  `SequenceBoundField.formset` is the one site that opens with
-  `raises=True`: an overdraw anywhere in the nested tree raises
-  `submission_countdown.OverdrawError`, the exception unwinds every nested frame
-  without building another row, and only the owning `open()` catches it and
-  records `overflowed`. Extraction then swaps in a bound zero-row formset
-  and leaves `submission_overflow` behind as its single answer, so one
-  oversized submission reports one `too_many_forms` error, not one child
-  item error per row, and no later reader needs a second flag to know the
-  forged rows are void. Every other owner clips: rendering and preparation
-  show the prefix that fits, and a standalone `value_from_datadict` clips
-  because the child-form extraction path is the reporter.
-  That list is closed, and a sixth site is not a harmless addition. Only
-  the owning `open()` reports, so an `open()` anywhere above a sequence
-  takes ownership away from `SequenceBoundField.formset`, and a clip-mode
-  owner silences the report: rows past the budget are then dropped from a
-  submission that still cleans as valid. A sequence configured for 50 rows,
-  extracted under an outer budget of 20, keeps 20 rows, raises nothing, and
-  loses the other 10. The first `open()` also fixes the budget and its mode
-  for every sequence beneath it, so an outer budget built from anything
-  other than that sequence's own `limits.submission_max` silently replaces
-  the limit the application chose. This is why the budget does not belong
-  in `CompositeBoundField`: a mapping reaches its children through a child
-  `Form` and a sequence reaches its rows through a `BaseFormSet`, so the
-  shared base has no row-building path to wrap, and it has no
-  `absolute_max` from which to derive a budget.
-- Call `take(count)` at the earliest point a submitted row count turns into
-  built rows. Two points qualify for a submitted count:
-  `RowFormSet.total_form_count`, where a `TOTAL_FORMS` value becomes the
-  number of row forms Django builds, and the whole-value clip in
-  `SequenceWidget.value_from_datadict`, where a Python list under the field's
-  own name becomes rows. `SequenceField.prepare_value` also takes, but for
-  server-provided initial rows rather than a submission. A row nested inside
-  an open budget reserves from that same budget, so a total that is legal
-  on its own at every level still cannot multiply across sibling rows. A
-  step that waits until after row construction to call `take()` has already
-  paid to build every row a forged `TOTAL_FORMS` asked for, once for every
-  sibling row that reaches it. `take(count)` reserves only rows that fit:
-  under a clip-mode owner it returns them, and under the raise-mode
-  extraction owner an overdraw raises `OverdrawError` at the first claim that
-  does not fit, so nothing after that claim is built. Cleaning reports
-  `too_many_forms` for the complete bound submission when extraction
-  overflowed; rendering shows only the prefix that fits. Exact use
-  succeeds. Never put the limit in an overridable field `clean()` method:
-  bound extraction records overflow, bound cleaning reports the error, and
-  rendering clips.
-- A step that reads an already-built row list, such as a bound field
-  reading its cached formset's forms, must not call `take()` on that count
-  again. It inherits the reservation, and a comment at that step must say
-  so. A double `take()` on the same rows halves the effective budget and can
-  reject a submission that should pass. An already-counted total travels
-  through `new_formset`'s `submission_total_form_count` parameter, which
-  pre-fills the memo `total_form_count` would otherwise write: extraction
-  uses it to pass an exact list's reservation to the formset it builds.
-- `Limits.submission_max` is `max(absolute_max, DATA_UPLOAD_MAX_NUMBER_FIELDS)`. The key limit covers populated rows and `absolute_max` covers empty rows. Read the setting for each submission.
-- Keep the class inside `SequenceWidget`, and enter it only through
-  `open()`. Mappings and the shared composite base classes must not import,
-  open, inspect, or extend it. A countdown is the budget: `open()` builds
-  it whole, stores it in the `ClassVar` `ContextVar` while the owning scope
-  runs, and releases the variable on the way out, so no partially
-  initialized state ever exists. It carries three facts: the rows
-  remaining, the owner's raise-or-clip mode, and `overflowed`, which has
-  exactly one writer (the owning `open()`'s `except OverdrawError`) and one
-  reader (`SequenceBoundField.formset`, after its `with` block). Do not
-  give the variable a module default, store field objects, add sentinels or
-  marker values, or add lazy cap expansion. The stored object is the
-  countdown itself: it references no field, widget, or formset, and the
-  variable stops referencing it once the owning `open()` exits.
-- A claim of zero or less buys nothing and refunds nothing. Django's bound
-  `total_form_count` is `min(TOTAL_FORMS, absolute_max)` over a plain
-  `IntegerField` with no lower clamp, so a forged negative `TOTAL_FORMS`
-  reaches `take()`. It must not grow the budget or erase a recorded overflow;
-  an earlier version subtracted the full claim, and 42 keys then bought
-  8,005 rows and cleaned as valid.
-- The budget belongs to one field's own nested tree only. It does not
-  reach a sibling field, on the same form or inside a mapping's child
-  form. Django gives each formset on a page its own `absolute_max` with
-  no cap shared across formsets (`BaseFormSet.total_form_count`); the
-  number of sequence fields on a form is fixed by the form's author, not
-  by a request, so this follows the same accepted precedent. Do not add
-  cross-field, cross-form, or request-wide sharing to work around this.
-
-The "Input handling" rule that no submission key is copied or canonicalized
-is also a limit: a forged key such as `values-99999999` is never read. Django
-builds rows `0` through `total_form_count`, which is `min(TOTAL_FORMS,
-absolute_max)`, and each row form reads only its own exact keys. With no copy
-step, there is no per-key memory to protect and no index grammar to enforce.
-
-`SetField.has_changed` is linear and conservative. It pairs each converted
-row with the member it hashes to, then lets the child field compare that one
-pair. A row that pairs with no member reports a change unless the child says
-the row is blank. There is no pairwise scan of rows against members, so no
-comparison budget exists, and a comparison never fails because an earlier
-extraction built rows. Ambiguity reports a change, which costs one more save.
-
-Django applies its four settings to a request only. Python data and decoded
-JSON do not go through the request parser. The limits of this package still
-apply to them, and Python and decoded JSON callers own their own input size
-and depth limits.
-
-## Key scans
-
-A loop that tests a prefix against every submitted key can run once per bound
-row, so its per-key cost is load-bearing. `pathological.py` at the repository
-root measures it; its docstring records one run's numbers and says the output
-of a new run wins over the recorded text. The rules apply where the loop
-reads every key: `SequenceWidget.has_row_keys` and
-`RowFormSet.rows_with_submitted_values`. `MappingWidget._accepts_key` keeps
-`removeprefix`; it measured at or below 0.002s, so it is not worth the same
-treatment. The rules the measurements produced:
-
-- Hold the prefix length in a local and compare a slice, `key[:n] == prefix`,
-  rather than calling `key.startswith(prefix)`. `str.startswith` accepts
-  `(prefix, start, end)`, so it is `METH_VARARGS` and every call builds an
-  argument tuple; `key[:n]` is a `BINARY_SLICE` opcode and builds none. Worth
-  1.1x to 1.2x. No length guard is needed: a key shorter than the prefix
-  yields a shorter string, which cannot equal it.
-- Write the loop out instead of putting a generator expression in `any()`. One
-  frame resume per key is real cost when the loop reads every key.
-- Do not reorder a cheap character test ahead of the prefix compare to skip
-  calls. Measured at 0.61x: it skips 202 of 998 calls and pays a slice and
-  two comparisons on all 998.
-- Trust `getlist`. A mapping that offers it behaves like `MultiValueDict`:
-  it returns a fresh list and `[]` for a missing key. Read it once at
-  the source boundary and return its result directly — no `list()` re-copy,
-  no `in` pre-check on that path, and no `cast` frame. A plain mapping has
-  no `getlist`. Read `get()` and retain its value shape. Do not wrap a
-  direct value in a one-item list just to scan it.
-
-`cProfile` counts `startswith` as a call and charges per-call overhead to it,
-while a slice is an opcode and is invisible. Swapping one for the other flatters
-a profile more than it speeds up a request. Believe wall time.
+- Use one explicit key loop, cache the prefix length, and compare
+  `key[:prefix_length] == prefix`. Do not use `any(generator)`, scan keys once
+  per row, prefilter before the prefix comparison, or switch to `startswith`
+  without new benchmark evidence. The goal is to avoid `O(rows × keys)` work.
+- On a source with `getlist`, call it once and use its result. On a plain
+  mapping, use `get`. Do not copy, pre-check, cast, or wrap values only to
+  scan them.
+- Keep `MappingWidget._accepts_key` on its measured `removeprefix` path unless
+  a new measurement finds a material regression. Use wall time, not a
+  `cProfile` call count that hides slice-opcode cost.

@@ -38,6 +38,11 @@ class PointForm(forms.Form):
 
 
 class DataclassFieldConstructionTestCase(SimpleTestCase):
+    """Make sure ``DataclassField`` accepts or rejects an ``output`` type.
+
+    The field checks the ``output`` names against the fields that the child Form
+    class declares."""
+
     def test_rejects_a_non_dataclass_output(self):
         with self.assertRaises(ImproperlyConfigured):
             nestingdolls.DataclassField(PointForm, output=tuple)
@@ -134,6 +139,11 @@ class DataclassFieldConstructionTestCase(SimpleTestCase):
 
 
 class DataclassFieldCleaningTestCase(SimpleTestCase):
+    """Make sure ``DataclassField`` cleans a submission to one dataclass.
+
+    Each test examines the cleaned value, the validator input, or the error code
+    for required, optional, and disabled fields."""
+
     def test_clean_builds_the_dataclass_output(self):
         field = nestingdolls.DataclassField(PointForm, output=Point)
         self.assertIs(field.output, Point)
@@ -200,6 +210,10 @@ class DataclassFieldCleaningTestCase(SimpleTestCase):
 
 
 class DataclassFieldRenderingTestCase(SimpleTestCase):
+    """Make sure ``DataclassField`` renders and compares an initial dataclass value.
+
+    Each test examines the rendered values or change detection."""
+
     def test_initial_and_change_detection_accept_a_dataclass_instance(self):
         class Form(forms.Form):
             point = nestingdolls.DataclassField(PointForm, output=Point)

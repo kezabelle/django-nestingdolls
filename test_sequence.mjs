@@ -73,7 +73,7 @@ function build(html) {
   return dom;
 }
 
-test("the added row has the correct attribute values", () => {
+test("an added row substitutes its index into per-row attributes only", () => {
   const dom = build(
     `
       <div

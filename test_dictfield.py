@@ -390,6 +390,11 @@ urlpatterns = [
 
 @override_settings(ROOT_URLCONF=__name__)
 class MappingSubmissionFunctionalTestCase(SimpleTestCase):
+    """Tests the ``MappingField`` contract through posted HTTP submissions.
+
+    The tests cover omissions, child errors, prefixes, disabled state, and file
+    transport."""
+
     def test_client_reports_mapping_omissions_and_partial_child_errors(self):
         """Client reports required mapping omissions and partial child failures."""
         response = self.client.post("/mapping-optional-probe/", {})
@@ -729,6 +734,8 @@ class MappingFieldUnitTestCase(FormBindingUnitTestCase):
         self.assertIs(cleaned, True)
 
     def test_output_builds_another_mapping_type(self):
+        """The ``output`` option builds the cleaned value as a different mapping type."""
+
         class ChildForm(forms.Form):
             value = forms.IntegerField()
 
@@ -856,8 +863,48 @@ class MappingFieldUnitTestCase(FormBindingUnitTestCase):
         )
         self.assertIs(malformed_initial.has_changed(), True)
 
-    def test_rejects_wrong_form_widget_and_bound_field_types(self):
-        """Constructor extension points require compatible Django types."""
+    def test_partial_hidden_initial_reports_the_missing_member_as_a_change(self):
+        """A hidden initial without one member compares that member as missing."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(
+                MappingProbeFixtures.PointForm, show_hidden_initial=True
+            )
+
+        partial = Form(
+            {
+                "point-a": "8",
+                "point-label": "saved",
+                "initial-point-a": "8",
+            },
+            initial={"point": {"a": 8, "label": "saved"}},
+        )
+        self.assertIs(partial.has_changed(), True)
+
+    def test_direct_has_changed_covers_disabled_unreadable_and_failing_members(self):
+        """A disabled mapping reports no change. An unreadable value or a failing member reports a change."""
+        disabled = nestingdolls.MappingField(
+            MappingProbeFixtures.PointForm, disabled=True
+        )
+        field = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
+
+        self.assertIs(disabled.has_changed({"a": 1}, {"a": 2}), False)
+        self.assertIs(field.has_changed(["bad"], {"a": 1}), True)
+        self.assertIs(field.has_changed({"a": 1}, "bad"), True)
+
+        class ErrorField(forms.IntegerField):
+            def has_changed(self, initial, data):
+                raise ValidationError("comparison failed")
+
+        class ErrorForm(forms.Form):
+            a = ErrorField()
+
+        self.assertIs(
+            nestingdolls.MappingField(ErrorForm).has_changed({"a": 1}, {"a": 2}), True
+        )
+
+    def test_rejects_wrong_form_widget_output_and_bound_field_types(self):
+        """Constructor extension points require compatible types."""
 
         class NeedsArgForm(forms.Form):
             def __init__(self, token, *args, **kwargs):
@@ -875,6 +922,8 @@ class MappingFieldUnitTestCase(FormBindingUnitTestCase):
             nestingdolls.MappingField(
                 MappingProbeFixtures.PointForm, bound_field_class=forms.BoundField
             )
+        with self.assertRaises(TypeError):
+            nestingdolls.MappingField(MappingProbeFixtures.PointForm, output=1)
 
     def test_widget_extensions_are_copied_and_rebound_to_the_child_form(self):
         """Django copies widget instances and the field supplies its Form class."""
@@ -896,7 +945,10 @@ class MappingFieldUnitTestCase(FormBindingUnitTestCase):
         self.assertIs(class_field.widget.form_class, MappingProbeFixtures.PointForm)
 
 
-class DictFieldRenderingTestCase(SimpleTestCase):
+class MappingFieldRenderingTestCase(SimpleTestCase):
+    """Tests that each form layout renders the mapping child form, its wrapper, and
+    resolvable error references."""
+
     def assertChildErrorReferencesResolve(self, renderer):
         class Form(forms.Form):
             point = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
@@ -1011,6 +1063,17 @@ class DictFieldRenderingTestCase(SimpleTestCase):
         self.assertIs(field.widget.needs_multipart_form, True)
         self.assertIn("child.js", str(field.widget.media))
 
+    def test_a_direct_widget_render_builds_the_child_form_from_the_value(self):
+        """A direct widget render builds the child form from the value it gets."""
+        field = nestingdolls.MappingField(MappingProbeFixtures.PointForm)
+
+        html = field.widget.render("point", {"a": 4, "label": "direct"})
+
+        self.assertInHTML(
+            '<input type="number" name="point-a" value="4" required id="id_point-a">',
+            html,
+        )
+
 
 class MappingDeveloperInputUnitTestCase(FormBindingUnitTestCase):
     """Exercises Python-only nested values and field APIs called without a form."""
@@ -1058,6 +1121,35 @@ class MappingDeveloperInputUnitTestCase(FormBindingUnitTestCase):
             "2026-08-01T10:30:00",
         )
         self.assertIs(cleaned["upload"], upload)
+
+    def test_exact_name_and_child_keys_count_as_input(self):
+        """An exact or child key counts as input. A non-string key does not."""
+        widget = nestingdolls.MappingField(MappingProbeFixtures.PointForm).widget
+
+        self.assertIs(
+            widget.value_omitted_from_data({"point": "x"}, {}, "point"), False
+        )
+        self.assertIs(
+            widget.value_omitted_from_data({"point-a": "1"}, {}, "point"), False
+        )
+        self.assertIs(widget.value_omitted_from_data({0: "1"}, {}, "point"), True)
+
+    def test_an_exact_multivaluedict_binds_only_the_keys_it_holds(self):
+        """An exact MultiValueDict binds only the child keys it holds."""
+
+        class PairForm(forms.Form):
+            first = forms.CharField(required=False)
+            second = forms.CharField(required=False)
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PairForm, required=False)
+
+        nested = MultiValueDict[str, object]()
+        nested.setlist("first", ["one", "two"])
+        form = Form({"point": nested})
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["point"], {"first": "two", "second": ""})
 
 
 class MappingNestedSequenceChildTestCase(FormBindingUnitTestCase):
@@ -1282,7 +1374,9 @@ class MappingSequenceOfRecordsTestCase(FormBindingUnitTestCase):
         )
 
 
-class DictFieldRegressionTestCase(SimpleTestCase):
+class MappingFieldRegressionTestCase(SimpleTestCase):
+    """Tests that hostile or wrong-shape values stay renderable form errors."""
+
     def assertPointValueRenders(self, form):
         self.assertEqual(form["point"].value(), ["bad"])
         str(form["point"])

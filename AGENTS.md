@@ -1,69 +1,51 @@
-# Guides
+## Scope and guides
 
-This file is the repository guide, and it applies everywhere. It covers the
-commands, the important directories, and how to write and verify tests.
-Each guide below covers one directory, applies to every file under it, and
-adds to this file instead of replacing it. Read this file first, then the
-guide for the directory you edit.
+This repository-wide guide applies everywhere; read it before the guide for the
+directory you edit. A nested guide supplements, rather than replaces, this one.
 
-- [`nestingdolls/AGENTS.md`](nestingdolls/AGENTS.md) is the package guide.
-  Read it before you edit Python in the package, and read its "Input limits"
-  section before you change normalization, extraction, or row counts.
-- [`nestingdolls/static/AGENTS.md`](nestingdolls/static/AGENTS.md) is the
-  TypeScript guide. Read it before you edit `sequence.ts` or
-  `test_sequence.mjs`.
-- [`nestingdolls/templates/AGENTS.md`](nestingdolls/templates/AGENTS.md) is
-  the template guide. Read it before you edit a Django template.
+- Before package Python edits, read
+  [`nestingdolls/AGENTS.md`](nestingdolls/AGENTS.md); read its **Input limits**
+  section before changing normalization, extraction, or row counts.
+- Before editing `sequence.ts` or `test_sequence.mjs`, read
+  [`nestingdolls/static/AGENTS.md`](nestingdolls/static/AGENTS.md).
+- Before editing a Django template, read
+  [`nestingdolls/templates/AGENTS.md`](nestingdolls/templates/AGENTS.md).
 
-# Directories
+## Layout
 
-- `nestingdolls/` is the package: fields, widgets, bound fields, errors, and
-  the form-layout render patch. The package guide's source map pairs each
-  module with its concern and its tests.
-- `nestingdolls/static/nestingdolls/` holds the TypeScript source
-  `sequence.ts` and its compiled `sequence.js`, which stays committed.
-- `nestingdolls/templates/nestingdolls/` holds the widget templates.
-- The repository root holds the Python tests (`test_*.py`), the jsdom tests
-  (`test_sequence.mjs`), `demo.py`, `pathological.py` (the hostile-submission
-  cost measurements), and `mypy_settings.py`.
+- `nestingdolls/` contains fields, widgets, bound fields, errors, and the
+  form-layout render patch; its guide maps modules to concerns and tests.
+  `nestingdolls/static/nestingdolls/` contains `sequence.ts` and its committed
+  compiled artifact, `sequence.js`; `nestingdolls/templates/nestingdolls/`
+  contains widget templates.
+- The root contains Python tests (`test_*.py`), jsdom tests
+  (`test_sequence.mjs`), `demo.py`, `pathological.py`
+  (hostile-submission cost measurements), and `mypy_settings.py`.
 
-# Commands
+## Commands and verification
 
-Every command below is a `make` target. Run `make help` for the list.
-A fresh clone needs one `npm ci` before the JavaScript targets
-(`tscheck`, `jsdrift`, `jstest`, `js`) and therefore before `make check`.
+All commands below are Make targets; use `make help` to list them. A fresh
+clone needs `npm ci` before JavaScript targets (`tscheck`, `jsdrift`, `jstest`,
+`js`) and therefore before `make check`.
 
-- `make check` runs everything and leaves every file as it was, so it is
-  also the CI gate: `tscheck`, `jsdrift`, `jstest`, `ruff`, `formatcheck`,
-  `test`, `distcheck`, `mypy`.
-- `make fix` applies the lint auto-fixes and the formatter. `check` never does.
-
-# Tests and verification
-
-Run `make check` after an implementation change. For a prose-only change, do
-not run runtime checks unless executable examples changed.
-
-Python:
-
+- `make check` is the non-mutating CI gate: `tscheck`, `jsdrift`, `jstest`,
+  `ruff`, `formatcheck`, `test`, `distcheck`, and `mypy`.
+- `make fix` applies lint auto-fixes and formatting; `make check` changes no
+  files.
+- Run `make check` after implementation changes. Do not run runtime checks for
+  prose-only changes unless executable examples changed.
 - `make test` runs `test_composite`, `test_dataclassfield`, `test_listfield`,
-  `test_dictfield`, `test_hostile`, `test_namedtuplefield`, and `test_patches`.
-  Put a new test in the module that already covers the concern; the package
-  guide's source map names the pairings, and `test_composite.py` covers the
-  contract shared by mappings and sequences.
-- `make mypy` type-checks `demo.py` and the whole `nestingdolls` package under
-  the settings in `mypy_settings.py`, which exists only for `django-stubs`; no
-  test imports it.
-- `make ruff` and `make formatcheck` cover the maintained Python files listed in
-  the Makefile's `PYTHON_FILES`.
+  `test_dictfield`, `test_hostile`, `test_namedtuplefield`, and
+  `test_patches`. Add tests to the existing concern module;
+  `test_composite.py` covers mapping/sequence contracts.
+- `make mypy` checks `demo.py` and `nestingdolls` using `mypy_settings.py` for
+  `django-stubs`; tests do not import that file. `make ruff` and
+  `make formatcheck` cover the maintained Python files in the Makefile's
+  `PYTHON_FILES`.
 - `make distcheck` builds both distributions from the tracked tree in a
-  temporary directory and runs `twine check --strict` on them, then confirms
-  the sdist carries `LICENSE`. It reads `git write-tree`, not the working
-  tree, so a build input that is present on disk but never `git add`ed fails
-  the gate instead of shipping an artifact with no README or no license text.
-
-TypeScript:
-
-- After editing `sequence.ts`, follow the build order in
-  [`nestingdolls/static/AGENTS.md`](nestingdolls/static/AGENTS.md). `make
-  check` fails when `sequence.js` on disk is not the current build of
-  `sequence.ts`; the comparison uses `cmp`, not git.
+  temporary directory, runs `twine check --strict`, and verifies that the
+  sdist includes `LICENSE`; it uses `git write-tree`, so untracked build inputs
+  fail the gate.
+- After editing `sequence.ts`, follow the static guide's build order.
+  `make check` compares `sequence.js` with the current TypeScript build using
+  `cmp`, not Git.

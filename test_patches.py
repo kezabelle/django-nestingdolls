@@ -75,6 +75,11 @@ class UninstalledApplicationCompositeForm(forms.Form):
 
 
 class FormRenderingPatchTestCase(SimpleTestCase):
+    """Test the safety of the form-rendering patch.
+
+    The patch installs one time only. It keeps render wrappers from other
+    libraries. It does not change forms that have no composite fields."""
+
     def test_installation_is_idempotent(self):
         """Repeated installation keeps one wrapper around the original renderer.
 
@@ -139,6 +144,26 @@ class FormRenderingPatchTestCase(SimpleTestCase):
         self.assertIs(html, render_results[-1])
         self.assertIs(BaseForm.nestingdolls_original_render, original_render)
 
+    def test_patch_is_a_pass_through_for_forms_without_composite_fields(self):
+        """The patch does not change HTML for a form without composite fields."""
+
+        class PlainForm(forms.Form):
+            name = forms.CharField()
+            count = forms.IntegerField()
+
+        patched_html = PlainForm().as_p()
+        with without_form_rendering_patch():
+            unpatched_html = PlainForm().as_p()
+
+        self.assertEqual(patched_html, unpatched_html)
+
+
+class FormLayoutTrackingTestCase(SimpleTestCase):
+    """Test that the patch records the active form layout.
+
+    Each render gives its layout to its nested widgets. An error or nested render
+    does not change a different render."""
+
     def test_patch_resets_layout_after_render_error(self):
         """A render error restores the default layout for the next render."""
 
@@ -186,98 +211,7 @@ class FormRenderingPatchTestCase(SimpleTestCase):
         """The template settings renderer passes the paragraph layout to its child."""
         self.assertRendererPassesLayoutToNestedWidget(TemplatesSetting())
 
-    def test_mapping_widget_renders_without_patch(self):
-        """A mapping widget renders its wrapper and child inputs without the patch."""
-
-        class PointForm(forms.Form):
-            a = forms.IntegerField()
-            label = forms.CharField(required=False)
-
-        class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm)
-
-        form = Form(initial={"point": {"a": 9, "label": "layout"}})
-
-        with without_form_rendering_patch():
-            html = form.as_p()
-
-        self.assertIn('data-widget="mapping"', html)
-        self.assertIn("<div", html)
-        self.assertIn('name="point-a"', html)
-        self.assertIn('name="point-label"', html)
-
-    def test_sequence_widget_renders_without_patch(self):
-        """A sequence widget renders its wrapper and row inputs without the patch."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField(), min_length=2)
-
-        form = Form()
-
-        with without_form_rendering_patch():
-            html = form.as_p()
-
-        self.assertIn('data-widget="sequence"', html)
-        self.assertIn("<div", html)
-        self.assertIn('name="values-0"', html)
-        self.assertIn('name="values-1"', html)
-
-    @override_settings(INSTALLED_APPS=("nestingdolls",))
-    def test_installing_the_app_resolves_templates_and_tracks_paragraph_layout(self):
-        """The default renderer finds templates and the patch selects paragraph widgets."""
-        html = squashed(UninstalledApplicationCompositeForm().as_p())
-
-        self.assertIn('<span data-widget="mapping"', html)
-        self.assertIn('<span data-widget="sequence"', html)
-        self.assertIn('name="point-a"', html)
-        self.assertIn('name="values-0"', html)
-        self.assertIn('name="values-1"', html)
-
-    @override_settings(
-        INSTALLED_APPS=("django.forms",),
-        TEMPLATES=[
-            {
-                "BACKEND": "django.template.backends.django.DjangoTemplates",
-                "DIRS": [Path(nestingdolls.__file__).parent / "templates"],
-                "APP_DIRS": True,
-            }
-        ],
-    )
-    def test_default_renderer_ignores_template_dirs_without_the_app(self):
-        """The default form renderer does not load project template settings."""
-        with (
-            without_form_rendering_patch(),
-            self.assertRaisesRegex(
-                TemplateDoesNotExist, "nestingdolls/mapping/div.html"
-            ),
-        ):
-            UninstalledApplicationCompositeForm().as_p()
-
-    @override_settings(
-        INSTALLED_APPS=("django.forms",),
-        FORM_RENDERER="django.forms.renderers.TemplatesSetting",
-        TEMPLATES=[
-            {
-                "BACKEND": "django.template.backends.django.DjangoTemplates",
-                "DIRS": [Path(nestingdolls.__file__).parent / "templates"],
-                "APP_DIRS": True,
-            }
-        ],
-    )
-    def test_template_settings_renderer_uses_template_dirs_without_the_app(self):
-        """The template-settings renderer finds widgets, but cannot track helpers."""
-        with without_form_rendering_patch():
-            html = squashed(UninstalledApplicationCompositeForm().as_p())
-
-        self.assertIn('<div data-widget="mapping"', html)
-        self.assertIn('<div data-widget="sequence"', html)
-        self.assertNotIn('<span data-widget="mapping"', html)
-        self.assertNotIn('<span data-widget="sequence"', html)
-        self.assertIn('name="point-a"', html)
-        self.assertIn('name="values-0"', html)
-        self.assertIn('name="values-1"', html)
-
-    def test_default_render_uses_the_renderer_form_template(self):
+    def test_default_render_uses_the_renderer_form_template_layout(self):
         """``{{ form }}`` picks the layout of the renderer's own form template."""
 
         class PRenderer(DjangoTemplates):
@@ -342,15 +276,108 @@ class FormRenderingPatchTestCase(SimpleTestCase):
         self.assertIn('<span data-widget="sequence"', html)
         self.assertNotIn('<div data-widget="sequence"', html)
 
-    def test_patch_is_a_pass_through_for_forms_without_composite_fields(self):
-        """The patch does not change HTML for a form without composite fields."""
 
-        class PlainForm(forms.Form):
-            name = forms.CharField()
-            count = forms.IntegerField()
+class UnpatchedWidgetRenderingTestCase(SimpleTestCase):
+    """Test that composite widgets render without the patch.
 
-        patched_html = PlainForm().as_p()
+    The mapping widget and sequence widget show their wrappers and child inputs
+    when Django uses its original renderer."""
+
+    def test_mapping_widget_renders_without_patch(self):
+        """A mapping widget renders its wrapper and child inputs without the patch."""
+
+        class PointForm(forms.Form):
+            a = forms.IntegerField()
+            label = forms.CharField(required=False)
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(PointForm)
+
+        form = Form(initial={"point": {"a": 9, "label": "layout"}})
+
         with without_form_rendering_patch():
-            unpatched_html = PlainForm().as_p()
+            html = form.as_p()
 
-        self.assertEqual(patched_html, unpatched_html)
+        self.assertIn('data-widget="mapping"', html)
+        self.assertIn("<div", html)
+        self.assertIn('name="point-a"', html)
+        self.assertIn('name="point-label"', html)
+
+    def test_sequence_widget_renders_without_patch(self):
+        """A sequence widget renders its wrapper and row inputs without the patch."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField(), min_length=2)
+
+        form = Form()
+
+        with without_form_rendering_patch():
+            html = form.as_p()
+
+        self.assertIn('data-widget="sequence"', html)
+        self.assertIn("<div", html)
+        self.assertIn('name="values-0"', html)
+        self.assertIn('name="values-1"', html)
+
+
+class TemplateDiscoveryTestCase(SimpleTestCase):
+    """Test how project settings control template discovery.
+
+    The default renderer finds widget templates only when the project installs
+    the app. The template-settings renderer finds templates through project
+    template directories."""
+
+    @override_settings(INSTALLED_APPS=("nestingdolls",))
+    def test_installing_the_app_resolves_templates_and_tracks_paragraph_layout(self):
+        """The default renderer finds templates and the patch selects paragraph widgets."""
+        html = squashed(UninstalledApplicationCompositeForm().as_p())
+
+        self.assertIn('<span data-widget="mapping"', html)
+        self.assertIn('<span data-widget="sequence"', html)
+        self.assertIn('name="point-a"', html)
+        self.assertIn('name="values-0"', html)
+        self.assertIn('name="values-1"', html)
+
+    @override_settings(
+        INSTALLED_APPS=("django.forms",),
+        TEMPLATES=[
+            {
+                "BACKEND": "django.template.backends.django.DjangoTemplates",
+                "DIRS": [Path(nestingdolls.__file__).parent / "templates"],
+                "APP_DIRS": True,
+            }
+        ],
+    )
+    def test_default_renderer_ignores_template_dirs_without_the_app(self):
+        """The default form renderer does not load project template settings."""
+        with (
+            without_form_rendering_patch(),
+            self.assertRaisesRegex(
+                TemplateDoesNotExist, "nestingdolls/mapping/div.html"
+            ),
+        ):
+            UninstalledApplicationCompositeForm().as_p()
+
+    @override_settings(
+        INSTALLED_APPS=("django.forms",),
+        FORM_RENDERER="django.forms.renderers.TemplatesSetting",
+        TEMPLATES=[
+            {
+                "BACKEND": "django.template.backends.django.DjangoTemplates",
+                "DIRS": [Path(nestingdolls.__file__).parent / "templates"],
+                "APP_DIRS": True,
+            }
+        ],
+    )
+    def test_template_settings_renderer_uses_template_dirs_without_the_app(self):
+        """The template-settings renderer finds widgets, but cannot track helpers."""
+        with without_form_rendering_patch():
+            html = squashed(UninstalledApplicationCompositeForm().as_p())
+
+        self.assertIn('<div data-widget="mapping"', html)
+        self.assertIn('<div data-widget="sequence"', html)
+        self.assertNotIn('<span data-widget="mapping"', html)
+        self.assertNotIn('<span data-widget="sequence"', html)
+        self.assertIn('name="point-a"', html)
+        self.assertIn('name="values-0"', html)
+        self.assertIn('name="values-1"', html)

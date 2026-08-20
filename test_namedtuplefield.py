@@ -37,6 +37,11 @@ class PointForm(forms.Form):
 
 
 class NamedTupleFieldConstructionTestCase(SimpleTestCase):
+    """Make sure ``NamedTupleField`` accepts or rejects an ``output`` type.
+
+    The field checks the ``output`` names against the fields that the child Form
+    class declares."""
+
     def test_rejects_a_plain_tuple_output(self):
         """An output must expose ``_fields``, not just be a tuple subclass."""
         with self.assertRaises(ImproperlyConfigured):
@@ -119,6 +124,11 @@ class NamedTupleFieldConstructionTestCase(SimpleTestCase):
 
 
 class NamedTupleFieldCleaningTestCase(SimpleTestCase):
+    """Make sure ``NamedTupleField`` cleans a submission to one named tuple.
+
+    Each test examines the cleaned value, the validator input, or the error code
+    for required, optional, and disabled fields."""
+
     def test_clean_builds_the_namedtuple_output(self):
         """Cleaning a whole Python value returns one output instance."""
         field = nestingdolls.NamedTupleField(PointForm, output=Point)
@@ -153,7 +163,7 @@ class NamedTupleFieldCleaningTestCase(SimpleTestCase):
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertIsNone(form.cleaned_data["point"])
 
-    def test_submitted_form_data_builds_the_namedtuple_type(self):
+    def test_submitted_form_data_builds_the_namedtuple_output(self):
         """A bound submission cleans to one namedtuple_type instance."""
 
         class Form(forms.Form):
@@ -209,6 +219,10 @@ class NamedTupleFieldCleaningTestCase(SimpleTestCase):
 
 
 class NamedTupleFieldRenderingTestCase(SimpleTestCase):
+    """Make sure ``NamedTupleField`` renders and compares an initial named tuple value.
+
+    Each test examines the rendered values or change detection."""
+
     def test_initial_accepts_a_namedtuple_instance(self):
         """A namedtuple_type instance given as initial renders like a mapping."""
 
