@@ -4,7 +4,9 @@ RUFF := $(UV_RUN) ruff
 MYPY := $(UV_RUN) mypy
 NPM := npm --silent
 
-PYTHON_FILES := demo.py nestingdolls pathological.py test_composite.py test_dataclassfield.py test_dictfield.py test_hostile.py test_listfield.py test_namedtuplefield.py test_patches.py mypy_settings.py
+PYTHON_TEST_FILES := $(wildcard tests/test_*.py)
+PYTHON_SUPPORT_FILES := tests/support.py tests/testcases.py
+PYTHON_FILES := demo.py nestingdolls pathological.py $(PYTHON_TEST_FILES) $(PYTHON_SUPPORT_FILES) mypy_settings.py
 COMPILED_JS := nestingdolls/static/nestingdolls/sequence.js
 
 .PHONY: js jsdrift tscheck jstest format formatcheck ruff rufffix mypy test test-django pathological distcheck check fix
@@ -50,12 +52,12 @@ mypy: ## Run mypy with strict checks.
 	$(MYPY) demo.py nestingdolls
 
 test: ## Run the Django test files.
-	$(PYTHON) -W error::DeprecationWarning -W error::PendingDeprecationWarning -m coverage run -m unittest discover -p 'test_*.py'
+	$(PYTHON) -W error::DeprecationWarning -W error::PendingDeprecationWarning -m coverage run -m unittest discover -s tests -t . -p 'test_*.py'
 	$(PYTHON) -m coverage report --show-missing
 
 test-django: ## Run the suite against Django version $(DJANGO).
 	@test -n "$(DJANGO)" || (echo "set DJANGO, for example DJANGO=5.2.*" >&2; exit 2)
-	$(UV_RUN) --with "django==$(DJANGO)" python -W error::DeprecationWarning -W error::PendingDeprecationWarning -m unittest discover -p 'test_*.py'
+	$(UV_RUN) --with "django==$(DJANGO)" python -W error::DeprecationWarning -W error::PendingDeprecationWarning -m unittest discover -s tests -t . -p 'test_*.py'
 
 pathological: ## Measure what hostile nested submissions cost. Not part of check.
 	$(PYTHON) pathological.py $(ARGS)

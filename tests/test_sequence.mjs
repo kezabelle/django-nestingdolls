@@ -6,7 +6,7 @@ import { JSDOM } from "jsdom";
 
 const controller = await readFile(
   new URL(
-    "./nestingdolls/static/nestingdolls/sequence.js",
+    "../nestingdolls/static/nestingdolls/sequence.js",
     import.meta.url,
   ),
   "utf8",

@@ -48,7 +48,5 @@ is commented in place; do not remove those comments.
 
 ## Editing workflow
 
-1. Reuse an existing shared fragment before adding one.
-2. Check whether Django already has a correct built-in path.
-3. Re-run the focused rendering tests (`test_dictfield` for mapping
-   templates, `test_listfield` for sequence templates), then `make check`.
+- Reuse an existing shared fragment before adding one.
+- Check whether Django already has a correct built-in path or file.

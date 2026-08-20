@@ -14,7 +14,7 @@ script does not run.
 | `nestingdolls/sequence.js` | Compiler output. Never edit it. Keep it committed. |
 | `tsconfig.json` (repository root) | The one compiler configuration. |
 | `package.json` (repository root) | The `build`, `typecheck`, and `test` scripts. |
-| `test_sequence.mjs` (repository root) | The jsdom tests. They load `sequence.js`. |
+| `tests/test_sequence.mjs` | The jsdom tests. They load `sequence.js`. |
 
 
 ## Build and check
@@ -31,7 +31,6 @@ Do this after each TypeScript edit, in this order:
 1. `make js`
 2. `make jstest`
 3. `make check`
-
 
 Know these facts:
 
@@ -179,19 +178,3 @@ No tool checks this. Match `sequence.ts` by hand.
   columns. Nothing goes past 84.
 - One blank line between declarations. No blank line at the start of a body.
 - Do not reformat a line you did not change.
-
-## Tests
-
-- `test_sequence.mjs` is plain JavaScript with `node:test` and `jsdom`. Do not
-  convert it to TypeScript.
-- It reads the compiled `sequence.js` and runs it with `dom.window.eval`. Run
-  `make js` first, or you test the previous build.
-- Assert through the DOM and through the events. The script exports nothing
-  else, and that is the whole observable contract.
-- Test each behavior that touches row markup on all four layouts. Reuse
-  `DIV_LAYOUT`, `P_LAYOUT`, `UL_LAYOUT`, `TABLE_LAYOUT`, the `row()`,
-  `rowsContainer()`, and `build()` helpers, and one `test()` for each layout
-  that calls a shared `assert…(layout)` function.
-- Test the failure path too. `enhancementFailure()` collects the error that
-  the window reports.
-- A change in behavior needs a test in the same commit.

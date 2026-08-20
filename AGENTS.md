@@ -6,7 +6,9 @@ directory you edit. A nested guide supplements, rather than replaces, this one.
 - Before package Python edits, read
   [`nestingdolls/AGENTS.md`](nestingdolls/AGENTS.md); read its **Input limits**
   section before changing normalization, extraction, or row counts.
-- Before editing `sequence.ts` or `test_sequence.mjs`, read
+- Before creating or changing a test, read
+  [`tests/AGENTS.md`](tests/AGENTS.md), the canonical test guide.
+- Before editing `sequence.ts` or `tests/test_sequence.mjs`, read
   [`nestingdolls/static/AGENTS.md`](nestingdolls/static/AGENTS.md).
 - Before editing a Django template, read
   [`nestingdolls/templates/AGENTS.md`](nestingdolls/templates/AGENTS.md).
@@ -18,8 +20,8 @@ directory you edit. A nested guide supplements, rather than replaces, this one.
   `nestingdolls/static/nestingdolls/` contains `sequence.ts` and its committed
   compiled artifact, `sequence.js`; `nestingdolls/templates/nestingdolls/`
   contains widget templates.
-- The root contains Python tests (`test_*.py`), jsdom tests
-  (`test_sequence.mjs`), `demo.py`, `pathological.py`
+- `tests/` contains Python tests (`test_*.py`) and the jsdom tests
+  (`test_sequence.mjs`). The root also contains `demo.py`, `pathological.py`
   (hostile-submission cost measurements), and `mypy_settings.py`.
 
 ## Commands and verification
@@ -34,10 +36,6 @@ clone needs `npm ci` before JavaScript targets (`tscheck`, `jsdrift`, `jstest`,
   files.
 - Run `make check` after implementation changes. Do not run runtime checks for
   prose-only changes unless executable examples changed.
-- `make test` runs `test_composite`, `test_dataclassfield`, `test_listfield`,
-  `test_dictfield`, `test_hostile`, `test_namedtuplefield`, and
-  `test_patches`. Add tests to the existing concern module;
-  `test_composite.py` covers mapping/sequence contracts.
 - `make mypy` checks `demo.py` and `nestingdolls` using `mypy_settings.py` for
   `django-stubs`; tests do not import that file. `make ruff` and
   `make formatcheck` cover the maintained Python files in the Makefile's

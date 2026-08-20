@@ -2,7 +2,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test test_sequence.mjs"
+    "test": "node --test tests/test_sequence.mjs"
   },
   "devDependencies": {
     "jsdom": "^30.0.1",

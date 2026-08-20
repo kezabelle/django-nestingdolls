@@ -110,4 +110,6 @@ ignore = [
 # The benchmark intentionally prints results and instruments a Django private method.
 "pathological.py" = ["ANN", "D", "N", "PLR2004", "SLF001", "T201"]
 # unittest conventions conflict with pytest-only rules and make test-only annotations/docs redundant.
-"test_*.py" = ["ANN", "ARG", "D", "FBT003", "N", "PLR2004", "PT", "S101", "SLF001", "T201"]
+"tests/test_*.py" = ["ANN", "ARG", "D", "F403", "F405", "FBT003", "N", "PLR2004", "PT", "S101", "SLF001", "T201"]
+"tests/support.py" = ["ANN", "ARG", "D", "FBT003", "N", "PLR2004", "PT", "S101", "SLF001", "T201"]
+"tests/testcases.py" = ["ANN", "ARG", "D", "FBT003", "N", "PLR2004", "PT", "S101", "SLF001", "T201"]
