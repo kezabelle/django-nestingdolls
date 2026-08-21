@@ -6,7 +6,9 @@
   data-widget="mapping"
   data-mapping-field="{{ widget.name }}"
   {% if widget.attrs.id %}id="{{ widget.attrs.id }}_widget"{% endif %}
+  {% include "nestingdolls/mapping/attrs.html" with attrs=widget.wrapper_attrs only %}
 >
+  {% include "nestingdolls/shared/errors.html" with errors=widget.initial_errors only %}
   <ul>
     {{ widget.subform.as_ul }}
   </ul>

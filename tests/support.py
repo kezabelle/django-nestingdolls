@@ -35,7 +35,12 @@ from django.views import View
 
 import nestingdolls
 
-from .testcases import CompositeErrorDisplayAssertions, CompositeRenderingAssertions
+from .testcases import (
+    CompositeErrorDisplayAssertions,
+    CompositeRenderingAssertions,
+    MarkedErrorList,
+    MarkedRenderer,
+)
 
 __all__ = (
     "DEFAULT_MAX_NUM",
@@ -79,6 +84,8 @@ __all__ = (
     "MappingRootSubmissionLimitProbeView",
     "MappingValidatedProbeFixtures",
     "MappingValueForm",
+    "MarkedErrorList",
+    "MarkedRenderer",
     "MultiValueDict",
     "MultipleFileField",
     "MultipleFileInput",

@@ -1,1 +1,4 @@
-{% if errors %}<span class="errorlist"{% if errors.field_id %} id="{{ errors.field_id }}_error"{% endif %}>{% for error in errors %}{{ error }}{% if line_break %}<br>{% endif %}{% endfor %}</span>{% endif %}
+{% comment %}
+Use the ErrorList class. It keeps custom error classes and the nonfield marker.
+{% endcomment %}
+{% if errors %}<span class="{{ errors.error_class }}"{% if errors.field_id %} id="{{ errors.field_id }}_error"{% endif %}>{% for error in errors %}{{ error }}{% if line_break %}<br>{% endif %}{% endfor %}</span>{% endif %}

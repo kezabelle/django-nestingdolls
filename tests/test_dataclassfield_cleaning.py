@@ -37,6 +37,18 @@ class DataclassFieldCleaningTestCase(SimpleTestCase):
 
         self.assertEqual(cleaned, DataclassPoint(x=1, y=2))
 
+    def test_cleaned_output_cleans_again(self):
+        """The dataclass ``compress`` produced is valid input for ``clean``.
+
+        ``initial_value`` already normalises a dataclass instance, so
+        ``to_python`` accepts the same shape.
+        """
+        field = nestingdolls.DataclassField(DataclassPointForm, output=DataclassPoint)
+
+        once = field.clean({"x": "1", "y": "2"})
+
+        self.assertEqual(field.clean(once), once)
+
     def test_required_field_rejects_missing_submission(self):
         class Form(forms.Form):
             point = nestingdolls.DataclassField(

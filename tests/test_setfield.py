@@ -204,6 +204,43 @@ class SetFieldTestCase(SimpleTestCase):
         self.assertIs(field.has_changed("bad", ["1"]), True)
         self.assertIs(field.has_changed({1}, "bad"), True)
 
+    def assertCleanedOutputCleansAgain(self, field_class):
+        field = field_class(forms.IntegerField())
+
+        once = field.clean(["1", "2"])
+
+        self.assertEqual(field.clean(once), once)
+
+    def test_set_cleaned_output_cleans_again(self):
+        """The set ``compress`` produced is valid input for ``clean``."""
+        self.assertCleanedOutputCleansAgain(nestingdolls.SetField)
+
+    def test_frozen_set_cleaned_output_cleans_again(self):
+        """The frozenset ``compress`` produced is valid input for ``clean``."""
+        self.assertCleanedOutputCleansAgain(nestingdolls.FrozenSetField)
+
+    def assertEmptyValueSkipsValidators(self, field_class, empty_collection):
+        calls = []
+        field = field_class(
+            forms.IntegerField(), required=False, validators=[calls.append]
+        )
+
+        self.assertEqual(field.clean([]), empty_collection)
+        # An empty ``ListField`` skips its validators because ``[]`` is in
+        # Django's ``EMPTY_VALUES``; a set variant must behave the same.
+        self.assertEqual(calls, [])
+
+        self.assertEqual(field.clean(["1"]), type(empty_collection)({1}))
+        self.assertEqual(calls, [type(empty_collection)({1})])
+
+    def test_empty_set_skips_validators_like_an_empty_list(self):
+        """An empty set is an empty value, so validators do not run."""
+        self.assertEmptyValueSkipsValidators(nestingdolls.SetField, set())
+
+    def test_empty_frozen_set_skips_validators_like_an_empty_list(self):
+        """An empty frozenset is an empty value, so validators do not run."""
+        self.assertEmptyValueSkipsValidators(nestingdolls.FrozenSetField, frozenset())
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

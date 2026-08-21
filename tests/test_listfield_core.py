@@ -147,26 +147,30 @@ class ListFieldCoreBehaviorTestCase(ListFormBindingUnitTestCase):
             response.content, {"valid": True, "values": [1], "errors": {}}
         )
 
-    def test_exact_name_non_lists_are_invalid_sequence_input(self):
-        """A direct exact sequence input must be a Python list."""
+    def test_exact_name_non_collections_are_invalid_sequence_input(self):
+        """A direct exact sequence input must be a non-string collection."""
 
         class Form(forms.Form):
             values = nestingdolls.ListField(forms.CharField(), required=False)
 
-        for value in (None, "", "value", ("value",), {"value": "value"}):
+        for value in (None, "", "value", b"value", {"value": "value"}):
             with self.subTest(value=value):
                 form = Form({"values": value})
                 self.assertIs(form.is_valid(), False)
                 self.assertEqual(form.errors.as_data()["values"][0].code, "invalid")
 
         field = nestingdolls.ListField(forms.CharField(), required=False)
-        # ``None`` is the one non-list input ``clean`` accepts directly: it is
-        # the field's own default initial, and ``MappingField.clean`` already
-        # treats it as empty. Everything else must be a Python list.
+        # ``None`` is the one non-collection input ``clean`` accepts directly:
+        # it is the field's own default initial, and ``MappingField.clean``
+        # already treats it as empty.
         self.assertEqual(field.clean(None), [])
         with self.assertRaises(ValidationError) as error:
             field.clean("")
         self.assertEqual(error.exception.code, "invalid")
+        # Any other non-string collection binds, so the field can clean the
+        # tuple or the set that a sibling variant produced.
+        self.assertEqual(field.clean(("a", "b")), ["a", "b"])
+        self.assertEqual(field.clean(field.clean(["a", "b"])), ["a", "b"])
 
     def test_exact_name_mapping_is_invalid_sequence_input(self):
         """A direct mapping under a sequence name is not one row."""
@@ -1049,6 +1053,29 @@ class ListFieldCoreBehaviorTestCase(ListFormBindingUnitTestCase):
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["values"], ["kept"])
 
+    def test_row_equal_to_the_child_initial_is_kept(self):
+        """A submitted row is kept even when it equals the child's own initial.
+
+        Django alone would drop it: an extra row stays ``empty_permitted``
+        and ``Form.has_changed()`` compares the row against the child
+        field's ``initial``. ``RowFormSet.get_form_kwargs`` exists for this.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                forms.CharField(required=False, initial="x")
+            )
+
+        form = Form(
+            QueryDict(
+                f"values-{TOTAL_FORM_COUNT}=2&values-{INITIAL_FORM_COUNT}=0&"
+                "values-0=x&values-1=y"
+            )
+        )
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["values"], ["x", "y"])
+
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
     def test_bound_whole_value_above_the_shared_cap_reports_too_many_forms(self):
         """A clipped whole value reports overflow instead of losing rows."""
@@ -1064,6 +1091,39 @@ class ListFieldCoreBehaviorTestCase(ListFormBindingUnitTestCase):
         error = form.errors.as_data()["values"][0]
         self.assertEqual(error.code, "too_many_forms")
         self.assertEqual(error.params["num"], 10)
+
+    def test_item_error_params_carry_the_documented_row_index(self):
+        """A row failure keeps its row index in ``params``.
+
+        README.md documents this exact dict; a sequence records the row index
+        where a mapping records the child field name.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        form = Form(
+            {
+                "values-0": "1",
+                "values-1": "bad",
+                f"values-{TOTAL_FORM_COUNT}": "2",
+                f"values-{INITIAL_FORM_COUNT}": "2",
+            }
+        )
+
+        self.assertIs(form.is_valid(), False)
+        error = form.errors.as_data()["values"][0]
+        self.assertEqual(error.code, "item_invalid")
+        self.assertEqual(
+            error.params,
+            {
+                "item": 1,
+                "message": "Enter a whole number.",
+                "child_code": "invalid",
+            },
+        )
+        self.assertEqual(list(form["values"].errors), [])
+        self.assertEqual(list(form.errors["values"]), ["Enter a whole number."])
 
     def test_deleted_row_errors_stay_out_of_item_errors(self):
         """A deleted row's errors do not become item errors of the field."""
@@ -1094,11 +1154,14 @@ class DjangoRequestLimitFunctionalTestCase(SimpleTestCase):
     def assertSequenceRootSubmission(
         self, inner_total, expected_valid, expected_errors
     ):
+        # The outer row is declared initial, so Django's own formset rule
+        # keeps it: only an extra row may clean away as blank. Its inner
+        # checkboxes are all unchecked, so the row carries no data key.
         response = self.client.post(
             "/sequence-root-submission-limit/",
             {
                 f"outer-{TOTAL_FORM_COUNT}": "1",
-                f"outer-{INITIAL_FORM_COUNT}": "0",
+                f"outer-{INITIAL_FORM_COUNT}": "1",
                 f"outer-0-{TOTAL_FORM_COUNT}": str(inner_total),
                 f"outer-0-{INITIAL_FORM_COUNT}": str(inner_total),
             },
@@ -1192,7 +1255,7 @@ class DjangoRequestLimitFunctionalTestCase(SimpleTestCase):
             "/sequence-root-submission-limit/",
             {
                 f"outer-{TOTAL_FORM_COUNT}": "1",
-                f"outer-{INITIAL_FORM_COUNT}": "0",
+                f"outer-{INITIAL_FORM_COUNT}": "1",
                 f"outer-0-{TOTAL_FORM_COUNT}": "11",
                 f"outer-0-{INITIAL_FORM_COUNT}": "0",
             },
@@ -1211,7 +1274,7 @@ class DjangoRequestLimitFunctionalTestCase(SimpleTestCase):
             "/sequence-mapping-sequence-submission-limit/",
             {
                 f"items-{TOTAL_FORM_COUNT}": "1",
-                f"items-{INITIAL_FORM_COUNT}": "0",
+                f"items-{INITIAL_FORM_COUNT}": "1",
                 f"items-0-tags-{TOTAL_FORM_COUNT}": str(inner_total),
                 f"items-0-tags-{INITIAL_FORM_COUNT}": str(inner_total),
             },

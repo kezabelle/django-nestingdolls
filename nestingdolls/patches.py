@@ -12,13 +12,12 @@ from __future__ import annotations
 from contextvars import ContextVar
 from enum import StrEnum
 from functools import wraps
-from typing import TYPE_CHECKING, Self, cast
+from typing import TYPE_CHECKING, Self
 
 from django.forms.forms import BaseForm
 
 if TYPE_CHECKING:
     from django.forms.renderers import BaseRenderer
-    from django.forms.utils import RenderableMixin
     from django.utils.safestring import SafeString
 
 active_form_layout: ContextVar[FormLayout | None] = ContextVar(
@@ -93,7 +92,7 @@ def install_form_rendering_patch() -> None:
 
     @wraps(original_render)
     def render_with_form_layout(
-        self: RenderableMixin,
+        self: BaseForm,
         template_name: str | None = None,
         context: dict[str, object] | None = None,
         renderer: BaseRenderer | type[BaseRenderer] | None = None,
@@ -105,8 +104,7 @@ def install_form_rendering_patch() -> None:
         # with None, and still render a named Django layout.
         # BaseForm.template_name is the renderer's form_template_name. A
         # renderer can change that name.
-        form = cast("BaseForm", self)
-        layout = FormLayout.from_template_name(template_name or form.template_name)
+        layout = FormLayout.from_template_name(template_name or self.template_name)
         # The template name is not one of Django's four. Keep the layout of the
         # render around this one, because a custom template can hold a form of
         # any layout.
@@ -119,7 +117,7 @@ def install_form_rendering_patch() -> None:
             # Reset the value, because a form can render inside another form.
             active_form_layout.reset(token)
 
-    BaseForm.render = render_with_form_layout  # type: ignore[method-assign]
-    BaseForm.__str__ = render_with_form_layout  # type: ignore[method-assign]
-    BaseForm.__html__ = render_with_form_layout  # type: ignore[method-assign]
+    BaseForm.render = render_with_form_layout  # type: ignore[method-assign, assignment]
+    BaseForm.__str__ = render_with_form_layout  # type: ignore[method-assign, assignment]
+    BaseForm.__html__ = render_with_form_layout  # type: ignore[method-assign, assignment]
     BaseForm.nestingdolls_render_patch_installed = True  # type: ignore[attr-defined]

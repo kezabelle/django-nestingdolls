@@ -1,0 +1,4 @@
+{% comment %}
+Django form templates mark help text safe. Use safe here to match them.
+{% endcomment %}
+{% if help_text %}<{{ tag }} class="helptext"{% if id %} id="{{ id }}"{% endif %}>{{ help_text|safe }}</{{ tag }}>{% endif %}

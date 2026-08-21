@@ -7,7 +7,7 @@ import dataclasses
 from collections import namedtuple
 from collections.abc import Callable, Collection, Mapping, Sequence
 from itertools import islice
-from typing import Self, cast
+from typing import Self
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
@@ -102,13 +102,11 @@ class MappingField(CompositeField):
         field in ``__init__``; the output type still declares that name,
         and ``_compress_with_defaults`` fills it with ``None``.
         """
-        return tuple(
-            cast("Mapping[str, Field]", self.form_class.base_fields)  # type: ignore[attr-defined]
-        )
+        return tuple(self.form_class.base_fields)  # type: ignore[attr-defined]
 
-    output: Callable[..., object]
+    output: Callable[..., object]  # type: ignore[explicit-any]
 
-    def _build_output(
+    def _build_output(  # type: ignore[explicit-any]
         self, output: Callable[..., object] | None
     ) -> Callable[..., object]:
         """Return the callable that builds cleaned output."""
@@ -118,7 +116,7 @@ class MappingField(CompositeField):
             raise TypeError("output must be callable")
         return output
 
-    def __init__(
+    def __init__(  # type: ignore[explicit-any]
         self,
         form_class: type[BaseForm],
         /,
@@ -192,21 +190,16 @@ class MappingField(CompositeField):
         raise InvalidInitialValueError("initial must be a mapping of values")
 
     def to_python(self, value: object) -> dict[str, object]:
-        """Return the value as a dict, and refuse a value that is not a mapping.
-
-        The widget extracted the children already, so this method does no work
-        on keys.
-        """
-        if value is None or value == "":
-            return {}
-        if not isinstance(value, Mapping):
-            raise MappingInputValidationError(self.error_messages["invalid"])
-        return dict(value)
+        """Return a dict or raise an invalid input error."""
+        try:
+            return self.initial_value(value)
+        except InvalidInitialValueError as error:
+            raise MappingInputValidationError(self.error_messages["invalid"]) from error
 
     def from_hidden_initial(self, value: object, /) -> object:
         """Convert each member back from its hidden initial value."""
         # to_python() gives a mapping of members here, or raises for other input.
-        members = cast("dict[str, object]", super().from_hidden_initial(value))
+        members: dict[str, object] = super().from_hidden_initial(value)  # type: ignore[assignment]
         for name, child_field in self.widget.fields.items():
             if name in members:
                 members[name] = self._child_from_hidden_initial(
@@ -262,7 +255,8 @@ class MappingField(CompositeField):
         """
         value = self.to_python(value)
         if not value:
-            return self.compress(cast("dict[str, object]", super().clean(value)))
+            cleaned: dict[str, object] = super().clean(value)
+            return self.compress(cleaned)
         return self._clean_child_form(
             self.form_class(
                 data=value,
@@ -325,19 +319,16 @@ Subform = MappingField
 class NamedTupleField(MappingField):
     """Clean a child form into a named tuple."""
 
-    def _build_output(
+    def _build_output(  # type: ignore[explicit-any]
         self, output: Callable[..., object] | None
     ) -> Callable[..., object]:
         """Return the named tuple class that builds cleaned output."""
         if output is None:
             # A runtime field list cannot be expressed through typing.NamedTuple.
-            return cast(
-                "type[tuple[object, ...]]",
-                namedtuple(  # noqa: PYI024
-                    f"{self.form_class.__name__}Value",
-                    self._declared_field_names,
-                    defaults=(None,) * len(self._declared_field_names),
-                ),
+            return namedtuple(  # noqa: PYI024
+                f"{self.form_class.__name__}Value",
+                self._declared_field_names,
+                defaults=(None,) * len(self._declared_field_names),
             )
         if not (
             isinstance(output, type)
@@ -347,9 +338,8 @@ class NamedTupleField(MappingField):
             raise ImproperlyConfigured(
                 "output argument for NamedTupleField must be a named tuple class"
             )
-        if frozenset(self._declared_field_names) != frozenset(
-            cast("tuple[str, ...]", output._fields)
-        ):
+        field_names: tuple[str, ...] = output._fields
+        if frozenset(self._declared_field_names) != frozenset(field_names):
             raise ImproperlyConfigured(
                 "form_class fields must match output._fields exactly"
             )
@@ -362,26 +352,24 @@ class NamedTupleField(MappingField):
 
     def compress(self, data: dict[str, object]) -> tuple[object, ...] | None:
         """Build a named tuple from cleaned child values."""
-        return cast("tuple[object, ...] | None", self._compress_with_defaults(data))
+        value: tuple[object, ...] | None = self._compress_with_defaults(data)  # type: ignore[assignment]
+        return value
 
 
 class DataclassField(MappingField):
     """Clean a child form into a dataclass."""
 
-    def _build_output(
+    def _build_output(  # type: ignore[explicit-any]
         self, output: Callable[..., object] | None
     ) -> Callable[..., object]:
         """Return the dataclass that builds cleaned output."""
         if output is None:
-            return cast(
-                "type[object]",
-                dataclasses.make_dataclass(
-                    f"{self.form_class.__name__}Value",
-                    [
-                        (name, object, dataclasses.field(default=None))
-                        for name in self._declared_field_names
-                    ],
-                ),
+            return dataclasses.make_dataclass(
+                f"{self.form_class.__name__}Value",
+                [
+                    (name, object, dataclasses.field(default=None))
+                    for name in self._declared_field_names
+                ],
             )
         if not isinstance(output, type) or not dataclasses.is_dataclass(output):
             raise ImproperlyConfigured(
@@ -615,19 +603,20 @@ class SequenceField(CompositeField):
         raise InvalidInitialValueError("initial must be a collection of values")
 
     def to_python(self, value: object) -> list[object]:
-        """Return a list, and refuse every other input shape.
-
-        The widget builds browser rows as a list. Direct callers must supply
-        that same shape.
-        """
-        if not isinstance(value, list):
+        """Return a list or raise an invalid input error."""
+        if isinstance(value, list):
+            return value
+        if value is None or value == "":
             raise SequenceInputValidationError(self.error_messages["invalid"])
-        return value
+        try:
+            return self.initial_values(value)
+        except InvalidInitialValueError:
+            raise SequenceInputValidationError(self.error_messages["invalid"]) from None
 
     def from_hidden_initial(self, value: object, /) -> object:
         """Convert each row back from its hidden initial value."""
         # to_python() gives a list of rows here, or raises for other input.
-        rows = cast("list[object]", super().from_hidden_initial(value))
+        rows: list[object] = super().from_hidden_initial(value)  # type: ignore[assignment]
         return [self._child_from_hidden_initial(self.child_field, row) for row in rows]
 
     def _clean_values(
@@ -674,10 +663,7 @@ class SequenceField(CompositeField):
     def _clean_bound_field(self, bound_field: SequenceBoundField) -> Collection[object]:
         """Clean browser submissions through Django's real row formset."""
         if self.disabled:
-            return cast(
-                "Collection[object]",
-                super()._clean_bound_field(bound_field),  # type: ignore[misc]
-            )
+            return super()._clean_bound_field(bound_field)  # type: ignore[misc, no-any-return]
         # Reserve rows once, at extraction, then clean what extraction produced.
         # Reading this flag performs that extraction, so cleaning is never the step
         # that discovers a forged row count.
@@ -696,10 +682,7 @@ class SequenceField(CompositeField):
                 return self._clean_values(
                     [None] * len(bound_field.initial), bound_field.initial
                 )
-            return cast(
-                "Collection[object]",
-                super()._clean_bound_field(bound_field),  # type: ignore[misc]
-            )
+            return super()._clean_bound_field(bound_field)  # type: ignore[misc, no-any-return]
         if not formset.is_valid():
             errors: list[ValidationError] = list(formset.non_form_errors().as_data())
             errors.extend(
@@ -821,6 +804,9 @@ class SetField(SequenceField):
     default_error_messages = {  # noqa: RUF012
         "unhashable": _("Enter items that can belong to a set."),
     }
+
+    # Add set values because Field.empty_values has no set values.
+    empty_values: Sequence[object] = (*Field.empty_values, set(), frozenset())
 
     collection_type: Callable[[list[object]], set[object] | frozenset[object]] = set
 

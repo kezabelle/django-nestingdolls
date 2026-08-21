@@ -3,15 +3,35 @@
 from __future__ import annotations
 
 import copy
+from typing import TYPE_CHECKING
 
 from django import forms
+from django.forms.renderers import DjangoTemplates
+from django.forms.utils import ErrorList
 from django.http import QueryDict
 from django.template import Context, Template
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 __all__ = (
     "CompositeErrorDisplayAssertions",
     "CompositeRenderingAssertions",
+    "MarkedErrorList",
+    "MarkedRenderer",
 )
+
+
+class MarkedErrorList(ErrorList):
+    """Tag every rendered error list, the way a project's own class would."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        kwargs.setdefault("error_class", "my-errors")
+        super().__init__(*args, **kwargs)
+
+
+class MarkedRenderer(DjangoTemplates):
+    """Stand in for a project renderer, identified by object identity."""
 
 
 class CompositeErrorDisplayAssertions:
@@ -166,3 +186,94 @@ class CompositeRenderingAssertions:
         widget.template_name = "app/{custom}.html"
 
         self.assertEqual(widget.template_name, "app/{custom}.html")
+
+    def assertFormErrorClassReachesChildren(
+        self,
+        form_class: type[forms.Form],
+        field_name: str,
+        invalid_data: dict[str, str],
+    ) -> None:
+        form = form_class(invalid_data, error_class=MarkedErrorList)
+
+        self.assertIs(form.is_valid(), False)
+        self.assertIn('class="errorlist my-errors"', str(form[field_name]))
+
+    def assertFormRendererReachesChildren(
+        self,
+        form_class: type[forms.Form],
+        field_name: str,
+        invalid_data: dict[str, str],
+        child_forms: Callable[[forms.BoundField], list[forms.BaseForm]],
+    ) -> None:
+        renderer = MarkedRenderer()
+        form = form_class(invalid_data, renderer=renderer)
+
+        self.assertIs(form.is_valid(), False)
+        children = child_forms(form[field_name])
+        self.assertNotEqual(children, [])
+        for child in children:
+            self.assertIs(child.renderer, renderer)
+
+    def assertChildOnlyFailureMarksTheField(
+        self,
+        form_class: type[forms.Form],
+        field_name: str,
+        invalid_data: dict[str, str],
+    ) -> None:
+        """Assert a composite that failed only in a child looks invalid.
+
+        ``form_class`` declares ``error_css_class``, ``required_css_class``,
+        the composite under ``field_name``, and a required ``plain``
+        ``CharField`` that supplies the plain-Django baseline.
+        """
+        form = form_class({**invalid_data, "plain": ""})
+
+        self.assertIs(form.is_valid(), False)
+        # The composite failed only through a child, so its own error list
+        # stays empty while the form still records the failure.
+        self.assertEqual(list(form[field_name].errors), [])
+        self.assertNotEqual(list(form.errors[field_name]), [])
+        self.assertEqual(
+            sorted(form[field_name].css_classes().split()),
+            sorted(form["plain"].css_classes().split()),
+        )
+        # ``BoundField.css_classes`` accepts a space-separated string or an
+        # iterable, and de-duplicates through a set. Both shapes must keep the
+        # caller's classes and gain the error class exactly once.
+        for extra in ("mine yours", ["mine", "yours"]):
+            with self.subTest(extra=extra):
+                classes = form[field_name].css_classes(extra).split()
+                self.assertEqual(sorted(classes), sorted(set(classes)))
+                self.assertEqual(
+                    sorted(classes),
+                    sorted(form["plain"].css_classes(extra).split()),
+                )
+        self.assertEqual(form.as_div().count("has-error"), 2)
+
+    def assertLateAddErrorMarksTheField(
+        self,
+        form_class: type[forms.Form],
+        field_name: str,
+        valid_data: dict[str, str],
+    ) -> None:
+        """Assert ``css_classes`` follows an error recorded after a first read.
+
+        Django's ``BoundField.errors`` is a plain property, so a view that
+        calls ``form.add_error`` after something already rendered the field
+        still gets the error class. A composite must not cache its way out of
+        that. ``form_class`` supplies the same ``plain`` baseline field.
+        """
+        form = form_class({**valid_data, "plain": "ok"})
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        composite, plain = form[field_name], form["plain"]
+        self.assertEqual(composite.css_classes(), plain.css_classes())
+
+        form.add_error(field_name, "Late outer error.")
+        form.add_error("plain", "Late outer error.")
+
+        self.assertIn("has-error", plain.css_classes())
+        self.assertEqual(
+            sorted(composite.css_classes().split()),
+            sorted(plain.css_classes().split()),
+        )

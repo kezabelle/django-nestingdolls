@@ -194,6 +194,37 @@ class MappingChildValidationTestCase(MappingFormBindingUnitTestCase):
     ``Form(data=...)`` in-process instead of posting to a view.
     """
 
+    def test_item_error_params_carry_the_documented_locator(self):
+        """A child failure keeps its locator in ``params``.
+
+        README.md documents this exact dict as the machine-readable route,
+        because ``ErrorDict.as_json()`` keeps only ``message`` and ``code``.
+        """
+
+        class Point(forms.Form):
+            x = forms.CharField()
+            y = forms.CharField(required=False)
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(Point)
+
+        form = Form({"point-x": ""})
+
+        self.assertIs(form.is_valid(), False)
+        error = form.errors.as_data()["point"][0]
+        self.assertEqual(error.code, "item_invalid")
+        self.assertEqual(
+            error.params,
+            {
+                "item": "x",
+                "message": "This field is required.",
+                "child_code": "required",
+            },
+        )
+        # The outer bound field hides it so the subform renders it once.
+        self.assertEqual(list(form["point"].errors), [])
+        self.assertEqual(list(form.errors["point"]), ["This field is required."])
+
     def test_required_mapping_omission_is_required_via_whole_value(self):
         """A required mapping with no whole value reports 'required'."""
 

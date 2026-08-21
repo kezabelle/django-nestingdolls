@@ -185,14 +185,16 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
     def test_client_accepts_an_exact_nested_submission_total(self):
         """Client accepts a nested submission that uses the shared cap exactly.
 
-        The inner rows are declared initial, so they survive extraction the
-        way a stock formset keeps its initial forms.
+        Both the outer row and the inner rows are declared initial, so they
+        survive extraction the way a stock formset keeps its initial forms.
+        An extra outer row carrying no data key of its own would clean away
+        as blank before the budget mattered.
         """
         response = self.client.post(
             "/exact-nested-submission-probe/",
             {
                 f"outer-{TOTAL_FORM_COUNT}": "1",
-                f"outer-{INITIAL_FORM_COUNT}": "0",
+                f"outer-{INITIAL_FORM_COUNT}": "1",
                 f"outer-0-{TOTAL_FORM_COUNT}": "1999",
                 f"outer-0-{INITIAL_FORM_COUNT}": "1999",
             },
@@ -222,6 +224,53 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
 
         self.assertIs(form.is_valid(), True, form.errors)
         self.assertEqual(form.cleaned_data["outer"], [list(range(9))])
+
+    def assertNestedRowBlankness(self, inner_required, extra_data, expected):
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.ListField(forms.CharField(), required=inner_required),
+                required=False,
+            )
+
+        form = Form(
+            {
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "0",
+                f"values-0-{TOTAL_FORM_COUNT}": "1",
+                f"values-0-{INITIAL_FORM_COUNT}": "0",
+                **extra_data,
+            }
+        )
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["values"], expected)
+
+    def test_untouched_nested_row_cleans_away_as_blank(self):
+        """An untouched nested row is blank, so its required child never runs.
+
+        A rendered row submits its nested formset's management keys, and
+        those are structure rather than content.
+        """
+        self.assertNestedRowBlankness(True, {"values-0-0": ""}, [])
+
+    def test_untouched_nested_row_builds_no_phantom_element(self):
+        """An untouched nested row with an optional child adds no empty list."""
+        self.assertNestedRowBlankness(False, {"values-0-0": ""}, [])
+
+    def test_nested_row_with_a_value_still_cleans_through(self):
+        """A nested row carrying a value is not blank."""
+        self.assertNestedRowBlankness(True, {"values-0-0": "abc"}, [["abc"]])
+
+    def test_nested_delete_key_alone_leaves_the_outer_row_blank(self):
+        """A checked nested delete box is structure, not outer-row content."""
+        self.assertNestedRowBlankness(
+            True,
+            {
+                "values-0-0": "",
+                f"values-0-0-{DELETION_FIELD_NAME}": "on",
+            },
+            [],
+        )
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
     def test_nested_whole_values_reject_shared_row_limit_overflow(self):

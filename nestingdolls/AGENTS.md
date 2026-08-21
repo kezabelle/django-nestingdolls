@@ -28,6 +28,12 @@ is progressive enhancement only.
   class constants. After adding, renaming, or moving a member, check every
   caller against these rules.
 
+## Typing
+
+- `Any` is forbidden. `object` is the loosest accepted boundary type. Prove or
+  narrow a value; when django-stubs contradicts Django’s runtime contract, use
+  one local coded ignore rather than `cast()`.
+
 - Public exports: `__init__.py`.
 - Fields and specializations: `fields.py`.
 - Widgets, row formsets, extraction, and render state: `widgets.py`.
@@ -137,6 +143,11 @@ numbers.
 - On a source with `getlist`, call it once and use its result. On a plain
   mapping, use `get`. Do not copy, pre-check, cast, or wrap values only to
   scan them.
+- A row's structural keys are not content, at any nesting depth. Compare the
+  key's last segment with the management names and the delete name. Do not read
+  the segment after this row's own prefix: a rendered row also sends the four
+  management keys of every nested formset, and treating those as content pins
+  every outer row to `empty_permitted=False`.
 - Keep `MappingWidget._accepts_key` on its measured `removeprefix` path unless
   a new measurement finds a material regression. Use wall time, not a
   `cProfile` call count that hides slice-opcode cost.

@@ -1,0 +1,4 @@
+{% comment %}
+Put caller attributes on the mapping wrapper. Django does not render `False`.
+It renders `True` without a value. MappingWidget removes `id` and `aria-invalid`.
+{% endcomment %}{% for name, value in attrs.items %}{% if value is not False %} {{ name }}{% if value is not True %}="{{ value|stringformat:'s' }}"{% endif %}{% endif %}{% endfor %}

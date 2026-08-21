@@ -1356,3 +1356,83 @@ test("a disabled widget is not enhanced and keeps its controls disabled", () => 
   assert.ok(totalInput instanceof dom.window.HTMLInputElement);
   assert.equal(totalInput.value, "1");
 });
+
+function assertMappingFieldPrefixIsSubstituted(layout) {
+  const dom = build(
+    `
+      <${layout.rootTag}
+        data-widget="sequence"
+        data-sequence-field="values"
+        data-sequence-maximum="3"
+        data-sequence-absolute-maximum="3"
+      >
+        <input type="hidden" value="1" data-sequence-total>
+        ${rowsContainer(layout, "")}
+        <template data-sequence-empty-row>
+          ${row(
+            layout,
+            "",
+            `
+              <div
+                data-widget="mapping"
+                data-mapping-field="values-__prefix__"
+              >
+                <input name="values-__prefix__-a">
+              </div>
+              <template data-sequence-empty-row>
+                <div
+                  data-widget="mapping"
+                  data-mapping-field="values-__prefix__-__prefix__"
+                ></div>
+              </template>
+            `,
+          )}
+        </template>
+        <template data-sequence-remove-button>
+          <button type="button" data-sequence-remove>Remove</button>
+        </template>
+        <button type="button" data-sequence-add>Add</button>
+      </${layout.rootTag}>
+    `,
+  );
+
+  const addButton = dom.window.document.querySelector("[data-sequence-add]");
+  assert.ok(addButton);
+  addButton.click();
+
+  // The value is the mapping's full prefixed name, so one placeholder per
+  // token is the correct replacement at every nesting level.
+  const wrapper = dom.window.document.querySelector("[data-mapping-field]");
+  assert.ok(wrapper);
+  assert.equal(wrapper.getAttribute("data-mapping-field"), "values-1");
+
+  // A nested template's content is a separate fragment, so reach it through
+  // the template element. The script walks into it, and the inner row keeps
+  // its own placeholder for its own add.
+  const nestedTemplate = dom.window.document.querySelector(
+    "[data-sequence-row] [data-sequence-empty-row]",
+  );
+  assert.ok(nestedTemplate instanceof dom.window.HTMLTemplateElement);
+  const nested = nestedTemplate.content.querySelector("[data-mapping-field]");
+  assert.ok(nested);
+  assert.equal(
+    nested.getAttribute("data-mapping-field"),
+    "values-1-__prefix__",
+  );
+}
+
+test("div layout substitutes the row index into data-mapping-field", () => {
+  assertMappingFieldPrefixIsSubstituted(DIV_LAYOUT);
+});
+
+test("p layout substitutes the row index into data-mapping-field", () => {
+  assertMappingFieldPrefixIsSubstituted(P_LAYOUT);
+});
+
+test("ul layout substitutes the row index into data-mapping-field", () => {
+  assertMappingFieldPrefixIsSubstituted(UL_LAYOUT);
+});
+
+test("table layout substitutes the row index into data-mapping-field", () => {
+  assertMappingFieldPrefixIsSubstituted(TABLE_LAYOUT);
+});

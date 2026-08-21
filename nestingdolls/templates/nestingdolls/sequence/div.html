@@ -23,6 +23,7 @@
       {% include "nestingdolls/sequence/row.html" with row=row widget_name=widget.name row_tag="div" body_tag="" widget_id=widget.attrs.id delete_disabled=widget.disabled only %}
     {% endfor %}
   </div>
+  {% include "nestingdolls/sequence/help_text.html" with help_text=widget.child_help_text id=widget.child_help_text_id tag="div" only %}
   {% include "nestingdolls/sequence/deleted_rows.html" with deleted_rows=widget.deleted_rows widget_name=widget.name disabled=widget.disabled only %}
   <template data-sequence-empty-row data-sequence-field="{{ widget.name }}">
     {% include "nestingdolls/sequence/row.html" with row=widget.empty_row widget_name=widget.name row_tag="div" body_tag="" widget_id=widget.attrs.id delete_disabled=False only %}

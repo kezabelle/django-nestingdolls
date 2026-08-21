@@ -152,6 +152,33 @@ For a composite field, `{{ field }}` renders its nested inputs and child-field
 errors. `{{ field.errors }}` is for errors on the outer field, such as an outer
 validator error. Child errors stay out of it, so they do not show up twice.
 
+#### Where a child failure is recorded
+
+A child failure is recorded on the *outer* field as an `ItemValidationError`
+with `code="item_invalid"`. Its `params` carry the locator:
+
+| Key | Value |
+| --- | --- |
+| `item` | The child field name for a mapping, or the row index for a sequence. |
+| `message` | The rendered child message. |
+| `child_code` | The child field's own error code, such as `"required"`. |
+
+Read them through `form.errors.as_data()`:
+
+```python
+form = PointForm({"point-x": ""})  # x is required, y is not submitted
+form.is_valid()  # False
+form.errors["point"]  # ['This field is required.']
+form["point"].errors  # [] — the subform renders it inline
+form.errors.as_data()["point"][0].params
+# {'item': 'x', 'message': 'This field is required.', 'child_code': 'required'}
+```
+
+`form[name].errors` deliberately omits these, so the subform or the row renders
+each child error exactly once next to the input that caused it. Django's
+`ErrorDict.as_json()` keeps only `message` and `code`, so an API that needs the
+locator must use `as_data()`.
+
 Include `{{ form.media }}` on any page with a sequence. It loads the JavaScript
 for adding and removing rows. Leave it out and the rows on the page still submit
 and validate just fine; people just cannot change their number in the browser.

@@ -159,6 +159,27 @@ class MappingFieldRenderingTestCase(SimpleTestCase):
             html,
         )
 
+    def test_subwidgets_render_the_submitted_state(self):
+        """``BoundField.subwidgets`` renders what ``str(field)`` renders.
+
+        Django reaches ``Widget.get_context`` directly there, so the render
+        state has to be installed before it looks.
+        """
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(MappingProbeFixtures.MappingPointForm)
+
+        form = Form({"point-label": "typed-value"})
+        self.assertIs(form.is_valid(), False)
+
+        subwidgets = form["point"].subwidgets
+        self.assertEqual(len(subwidgets), 1)
+        rendered = str(subwidgets[0])
+
+        self.assertEqual(rendered.count('value="typed-value"'), 1)
+        self.assertEqual(rendered.count("This field is required."), 1)
+        self.assertEqual(rendered, str(form["point"]))
+
 
 class DictFieldErrorDisplayTestCase(CompositeErrorDisplayAssertions, SimpleTestCase):
     """Make sure ``DictField`` shows each error at the correct location.
@@ -243,6 +264,134 @@ class DictFieldErrorDisplayTestCase(CompositeErrorDisplayAssertions, SimpleTestC
         self.assertForeignFieldIsRejected(nestingdolls.MappingBoundField)
 
 
+class MappingLayoutContractTestCase(SimpleTestCase):
+    """Assert every layout renders the same errors, classes, and wrapper attrs.
+
+    Only ``mapping/p.html`` renders the field loop itself; the other three
+    delegate to ``subform.as_div``/``as_ul``/``as_table``. Each assertion below
+    runs against all four so no layout drifts."""
+
+    LAYOUTS = ("as_div", "as_p", "as_ul", "as_table")
+
+    class ScalarInitialForm(forms.Form):
+        point = nestingdolls.MappingField(MappingProbeFixtures.MappingPointForm)
+
+    class TrippableForm(forms.Form):
+        class TripForm(forms.Form):
+            a = forms.IntegerField(required=False)
+
+            def clean(self):
+                if self.cleaned_data.get("a") == 9:
+                    raise ValidationError("Whole child is wrong.")
+                return super().clean()
+
+        point = nestingdolls.MappingField(TripForm)
+
+    def test_initial_that_is_not_a_mapping_reports_once_in_every_layout(self):
+        """A scalar initial reports its error exactly once per layout."""
+        form = self.ScalarInitialForm(initial={"point": "not-a-mapping"})
+
+        for layout in self.LAYOUTS:
+            with self.subTest(layout=layout):
+                self.assertEqual(
+                    getattr(form, layout)().count("Enter a mapping of values."), 1
+                )
+
+    def test_valid_initial_reports_nothing_in_every_layout(self):
+        """A mapping initial reports no shape error in any layout."""
+        form = self.ScalarInitialForm(initial={"point": {"a": 1, "label": "ok"}})
+
+        for layout in self.LAYOUTS:
+            with self.subTest(layout=layout):
+                self.assertEqual(
+                    getattr(form, layout)().count("Enter a mapping of values."), 0
+                )
+
+    def test_child_non_field_error_and_initial_error_each_render_once(self):
+        """Neither list is rendered twice when both errors exist at once."""
+        form = self.TrippableForm({"point-a": "9"}, initial={"point": "not-a-mapping"})
+        self.assertIs(form.is_valid(), False)
+
+        for layout in self.LAYOUTS:
+            with self.subTest(layout=layout):
+                html = getattr(form, layout)()
+                self.assertEqual(html.count("Whole child is wrong."), 1)
+                self.assertEqual(html.count("Enter a mapping of values."), 1)
+
+    def test_non_field_errors_use_djangos_nonfield_class(self):
+        """A subform non-field error carries Django's own error classes."""
+        form = self.TrippableForm({"point-a": "9"})
+        self.assertIs(form.is_valid(), False)
+
+        self.assertIn('class="errorlist nonfield"', form.as_p())
+
+    def test_child_field_errors_use_the_plain_error_class(self):
+        """A child field error carries the plain error class."""
+        form = self.ScalarInitialForm({"point-label": "missing a"})
+        self.assertIs(form.is_valid(), False)
+
+        self.assertIn('class="errorlist"', form.as_p())
+
+    def test_wrapper_renders_the_widget_attrs_in_every_layout(self):
+        """Container attrs reach the wrapper element, and ``id`` stays single."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(
+                MappingProbeFixtures.MappingPointForm,
+                widget=nestingdolls.MappingWidget(
+                    attrs={
+                        "class": "cls-marker",
+                        "data-z": "zz",
+                        "hidden": True,
+                        "draggable": False,
+                    }
+                ),
+            )
+
+        form = Form()
+        for layout in self.LAYOUTS:
+            with self.subTest(layout=layout):
+                html = getattr(form, layout)()
+                self.assertEqual(html.count('class="cls-marker"'), 1)
+                self.assertEqual(html.count('data-z="zz"'), 1)
+                self.assertEqual(html.count(" hidden"), 1)
+                self.assertEqual(html.count("draggable"), 0)
+                self.assertEqual(html.count('id="id_point_widget"'), 1)
+                self.assertEqual(html.count('id="id_point"'), 0)
+
+    def test_wrapper_never_carries_aria_invalid(self):
+        """A wrapper element is not a form control, so it stays unmarked."""
+        form = self.ScalarInitialForm({"point-label": "missing a"})
+        self.assertIs(form.is_valid(), False)
+
+        for layout in self.LAYOUTS:
+            with self.subTest(layout=layout):
+                html = getattr(form, layout)()
+                wrapper = html[: html.index("data-mapping-field") + 40]
+                self.assertNotIn("aria-invalid", wrapper)
+                self.assertIn('aria-invalid="true"', html)
+
+    def test_sequence_rows_forward_container_attrs_to_each_mapping_wrapper(self):
+        """A sequence forwards its attrs to each row, wrapper element included.
+
+        The row-derived ``id`` still appears once, because the wrapper attrs
+        drop ``id``.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(
+                nestingdolls.MappingField(MappingProbeFixtures.MappingPointForm),
+                widget=nestingdolls.SequenceWidget(attrs={"class": "outer"}),
+            )
+
+        html = Form(initial={"values": [{"a": 1, "label": "row"}]}).as_div()
+
+        # One rendered row plus the empty-row template.
+        self.assertEqual(html.count('class="outer"'), 2)
+        self.assertEqual(html.count('id="id_values_0_widget"'), 1)
+        self.assertEqual(html.count('id="id_values_0"'), 0)
+
+
 class DictFieldRenderingTestCase(CompositeRenderingAssertions, SimpleTestCase):
     """Make sure ``DictField`` renders each layout correctly.
 
@@ -253,6 +402,55 @@ class DictFieldRenderingTestCase(CompositeRenderingAssertions, SimpleTestCase):
         """An invalid mapping form does not change a fresh form."""
         self.assertRenderStateIsIsolated(
             OptionalMappingValueForm, "point", {"point-a": "bad"}
+        )
+
+    def test_form_error_class_reaches_the_subform(self):
+        """The outer form's error class renders the child's error list."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(MappingProbeFixtures.MappingPointForm)
+
+        self.assertFormErrorClassReachesChildren(
+            Form, "point", {"point-label": "missing a"}
+        )
+
+    def test_form_renderer_reaches_the_subform(self):
+        """The outer form's renderer is the subform's renderer."""
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(MappingProbeFixtures.MappingPointForm)
+
+        self.assertFormRendererReachesChildren(
+            Form,
+            "point",
+            {"point-label": "missing a"},
+            lambda bound_field: [bound_field.subform],
+        )
+
+    def test_child_only_failure_marks_the_field(self):
+        """A mapping that failed only in a child carries the error class."""
+
+        class Form(forms.Form):
+            error_css_class = "has-error"
+            required_css_class = "is-required"
+            point = nestingdolls.MappingField(MappingProbeFixtures.MappingPointForm)
+            plain = forms.CharField()
+
+        self.assertChildOnlyFailureMarksTheField(
+            Form, "point", {"point-label": "missing a"}
+        )
+
+    def test_late_add_error_marks_the_field(self):
+        """An error recorded after a first read still marks a mapping."""
+
+        class Form(forms.Form):
+            error_css_class = "has-error"
+            required_css_class = "is-required"
+            point = nestingdolls.MappingField(MappingProbeFixtures.MappingPointForm)
+            plain = forms.CharField()
+
+        self.assertLateAddErrorMarksTheField(
+            Form, "point", {"point-a": "1", "point-label": "ok"}
         )
 
     def test_change_detection_uses_child_semantics(self):

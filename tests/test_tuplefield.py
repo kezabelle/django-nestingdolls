@@ -78,6 +78,14 @@ class TupleFieldTestCase(SimpleTestCase):
             field.clean(["1", "2", "3"])
         self.assertEqual(context.exception.code, "max_length")
 
+    def test_cleaned_output_cleans_again(self):
+        """The tuple ``compress`` produced is valid input for ``clean``."""
+        field = nestingdolls.TupleField(forms.IntegerField())
+
+        once = field.clean(["1", "2"])
+
+        self.assertEqual(field.clean(once), once)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

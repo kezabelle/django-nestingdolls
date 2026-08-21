@@ -28,6 +28,7 @@
         "aria-labelledby",
         "aria-controls",
         "data-sequence-field",
+        "data-mapping-field",
     ];
     const localPrefixAttributes = ["aria-label"];
     const prefixAttributes = [

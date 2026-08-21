@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime, time
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from django.core.exceptions import ValidationError
 from django.forms.boundfield import BoundField
@@ -20,8 +20,11 @@ from nestingdolls.widgets import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from django.core.files.uploadedfile import UploadedFile
     from django.forms import BaseForm, BaseFormSet, Field
+    from django.forms.boundfield import BoundWidget
     from django.forms.utils import ErrorList
     from django.forms.widgets import Widget
     from django.utils.safestring import SafeString
@@ -63,12 +66,37 @@ class CompositeBoundField(BoundField):
             field_id=self.auto_id,
         )
 
+    def css_classes(self, extra_classes: str | Iterable[str] | None = None) -> str:
+        """Return CSS classes for outer and child errors.
+
+        Child forms and rows show child errors. This field removes them from
+        ``self.errors`` to prevent duplicate error text. If the form has an
+        error for this field but ``self.errors`` is empty, add the form error
+        CSS class. Django then handles required and extra classes.
+        """
+        if (
+            self.form.errors.get(self.name)
+            and not self.errors
+            and hasattr(self.form, "error_css_class")
+        ):
+            if isinstance(extra_classes, str):
+                extra_classes = f"{extra_classes} {self.form.error_css_class}"
+            else:
+                extra_classes = (*(extra_classes or ()), self.form.error_css_class)
+        return super().css_classes(extra_classes)
+
     @cached_property
     def data(self) -> object:
         """Extract the submitted composite value exactly once."""
         return self.field.widget.value_from_datadict(
             self.form.data, self.form.files, self.html_name
         )
+
+    @property
+    def subwidgets(self) -> list[BoundWidget]:
+        """Set render state before Django gets subwidgets."""
+        self.prepare_widget(self.field.widget)
+        return super().subwidgets
 
     def as_widget(
         self,
@@ -111,7 +139,7 @@ class CompositeBoundField(BoundField):
         if self.field.disabled:
             return False
         if not self.field.show_hidden_initial:
-            return cast("bool", super()._has_changed())  # type: ignore[misc]
+            return super()._has_changed()  # type: ignore[misc, no-any-return]
         widget = self.field.hidden_widget()
         try:
             initial = self.field.from_hidden_initial(
@@ -219,6 +247,7 @@ class MappingBoundField(CompositeBoundField):
             initial=initial if isinstance(initial, dict) else {},
             prefix=self.html_name,
             auto_id=self.form.auto_id,
+            error_class=self.form.error_class,
             use_required_attribute=(
                 self.field.required and self.form.use_required_attribute
             ),
@@ -322,7 +351,9 @@ class SequenceBoundField(CompositeBoundField):
             return widget.new_formset(
                 initial=widget.default_initial_rows(self.initial),
                 prefix=self.html_name,
-                auto_id=cast("str", self.form.auto_id),
+                auto_id=self.form.auto_id,
+                error_class=self.form.error_class,
+                renderer=self.form.renderer,
                 form_kwargs={"use_required_attribute": False},
             )
 
@@ -335,9 +366,7 @@ class SequenceBoundField(CompositeBoundField):
             initial = widget.default_initial_rows(self.initial)
             if self.is_bound_formset:
                 data = self.form.data
-                files = cast(
-                    "MultiValueDict[str, UploadedFile[bytes]]", self.form.files
-                )
+                files = self.form.files
                 initial = widget.initial_rows(self.initial)
             else:
                 value = widget.value_from_datadict(
@@ -364,7 +393,9 @@ class SequenceBoundField(CompositeBoundField):
                 files=files,
                 initial=initial,
                 prefix=self.html_name,
-                auto_id=cast("str", self.form.auto_id),
+                auto_id=self.form.auto_id,
+                error_class=self.form.error_class,
+                renderer=self.form.renderer,
                 form_kwargs={"use_required_attribute": False},
                 # Generated exact-list rows already used this budget.
                 submission_total_form_count=(
@@ -384,7 +415,9 @@ class SequenceBoundField(CompositeBoundField):
             formset = widget.new_formset(
                 data=widget.data_from_exact_list([], self.html_name),
                 prefix=self.html_name,
-                auto_id=cast("str", self.form.auto_id),
+                auto_id=self.form.auto_id,
+                error_class=self.form.error_class,
+                renderer=self.form.renderer,
                 form_kwargs={"use_required_attribute": False},
                 submission_total_form_count=0,
             )

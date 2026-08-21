@@ -14,6 +14,7 @@ from .support import (
     CompositeErrorDisplayAssertions,
     CompositeRenderingAssertions,
     ImproperlyConfigured,
+    MappingPointForm,
     MultiValueDict,
     OptionalSequenceForm,
     QueryDict,
@@ -160,6 +161,33 @@ class ListFieldWidgetIntegrationTestCase(SimpleTestCase):
             '<textarea name="values-0" cols="40" rows="10" id="id_values_0">{&quot;answer&quot;: 42}</textarea>',
             html,
         )
+
+    def test_subwidgets_render_the_submitted_state(self):
+        """``BoundField.subwidgets`` renders what ``str(field)`` renders.
+
+        Django reaches ``Widget.get_context`` directly there, so the render
+        state has to be installed before it looks.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        form = Form(
+            {
+                "values-TOTAL_FORMS": "1",
+                "values-INITIAL_FORMS": "1",
+                "values-0": "not-a-number",
+            }
+        )
+        self.assertIs(form.is_valid(), False)
+
+        subwidgets = form["values"].subwidgets
+        self.assertEqual(len(subwidgets), 1)
+        rendered = str(subwidgets[0])
+
+        self.assertEqual(rendered.count('value="not-a-number"'), 1)
+        self.assertEqual(rendered.count("Enter a whole number."), 1)
+        self.assertEqual(rendered, str(form["values"]))
 
     def test_reused_widget_derives_multipart_requirement_from_the_new_child(self):
         """It does not retain multipart state from a widget's original child."""
@@ -633,14 +661,21 @@ class ListFieldCleaningTestCase(SimpleTestCase):
         self.assertEqual(error.code, "item_invalid")
         self.assertEqual(error.child_code, "invalid")
 
-    def test_direct_non_lists_are_invalid_sequence_input(self):
-        """A direct exact sequence input must be a Python list."""
-        for value in (None, "", "3", ("3",), {"number": "3"}):
+    def test_direct_non_collections_are_invalid_sequence_input(self):
+        """A direct exact sequence input must be a non-string collection."""
+        for value in (None, "", "3", b"3", {"number": "3"}):
             with self.subTest(value=value):
                 form = OptionalSequenceForm({"values": value})
                 self.assertIs(form.is_valid(), False)
                 error = form.errors.as_data()["values"][0]
                 self.assertEqual(error.code, "invalid")
+
+    def test_direct_tuple_input_binds_as_rows(self):
+        """A tuple binds, so a sibling variant's output cleans again."""
+        form = OptionalSequenceForm({"values": ("3", "4")})
+
+        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertEqual(form.cleaned_data["values"], [3, 4])
 
     def test_direct_none_cleans_empty_when_optional(self):
         """An optional field treats ``clean(None)`` as an empty submission.
@@ -828,6 +863,69 @@ class ListFieldRenderingTestCase(CompositeRenderingAssertions, SimpleTestCase):
             },
         )
 
+    def test_form_error_class_reaches_the_rows(self):
+        """The outer form's error class renders each row's error list."""
+        self.assertFormErrorClassReachesChildren(
+            OptionalSequenceForm,
+            "values",
+            {
+                "values-0": "bad",
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "1",
+            },
+        )
+
+    def test_form_renderer_reaches_the_rows(self):
+        """The outer form's renderer is the formset's and every row's."""
+        self.assertFormRendererReachesChildren(
+            OptionalSequenceForm,
+            "values",
+            {
+                "values-0": "bad",
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "1",
+            },
+            lambda bound_field: [bound_field.formset, *bound_field.formset.forms],
+        )
+
+    def test_child_only_failure_marks_the_field(self):
+        """A sequence that failed only in a row carries the error class."""
+
+        class Form(forms.Form):
+            error_css_class = "has-error"
+            required_css_class = "is-required"
+            values = nestingdolls.ListField(forms.IntegerField())
+            plain = forms.CharField()
+
+        self.assertChildOnlyFailureMarksTheField(
+            Form,
+            "values",
+            {
+                "values-0": "bad",
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "1",
+            },
+        )
+
+    def test_late_add_error_marks_the_field(self):
+        """An error recorded after a first read still marks a sequence."""
+
+        class Form(forms.Form):
+            error_css_class = "has-error"
+            required_css_class = "is-required"
+            values = nestingdolls.ListField(forms.IntegerField())
+            plain = forms.CharField()
+
+        self.assertLateAddErrorMarksTheField(
+            Form,
+            "values",
+            {
+                "values-0": "1",
+                f"values-{TOTAL_FORM_COUNT}": "1",
+                f"values-{INITIAL_FORM_COUNT}": "1",
+            },
+        )
+
     def test_change_detection_uses_child_semantics(self):
         """A sequence child converts one before change detection."""
         self.assertChangeDetectionUsesChildSemantics(
@@ -889,6 +987,122 @@ class ListFieldRenderingTestCase(CompositeRenderingAssertions, SimpleTestCase):
     def test_custom_template_name_stays_literal(self):
         """A sequence widget keeps a literal custom template name."""
         self.assertLiteralTemplateNameSurvives(SequenceForm, "values")
+
+
+class SequenceLayoutContractTestCase(SimpleTestCase):
+    """Assert every layout marks invalid rows and renders the child help text."""
+
+    LAYOUTS = ("as_div", "as_p", "as_ul", "as_table")
+    HELP_TEXT_ID = "id_values_rows_helptext"
+
+    class HelpTextForm(forms.Form):
+        values = nestingdolls.ListField(
+            forms.CharField(help_text="ROWHELP", label="ROWLABEL")
+        )
+
+    def test_whole_field_error_marks_every_row(self):
+        """A ``min_length`` failure belongs to no row, so every row is marked.
+
+        Django marks every sub-input of a ``use_fieldset`` widget; the
+        ``aria-describedby`` reference stays on the fieldset, which already
+        points at the field's error list.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.CharField(), min_length=3)
+
+        form = Form(
+            {
+                "values-0": "a",
+                "values-1": "b",
+                f"values-{TOTAL_FORM_COUNT}": "2",
+                f"values-{INITIAL_FORM_COUNT}": "2",
+            }
+        )
+        self.assertIs(form.is_valid(), False)
+
+        html = form.as_div()
+        self.assertEqual(html.count('aria-invalid="true"'), 2)
+        self.assertIn('aria-describedby="id_values_error"', html)
+        self.assertNotIn('aria-describedby="id_values_0_error"', html)
+
+    def test_row_error_marks_only_that_row(self):
+        """An item failure on one row of three marks that row alone."""
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(forms.IntegerField())
+
+        form = Form(
+            {
+                "values-0": "1",
+                "values-1": "bad",
+                "values-2": "3",
+                f"values-{TOTAL_FORM_COUNT}": "3",
+                f"values-{INITIAL_FORM_COUNT}": "3",
+            }
+        )
+        self.assertIs(form.is_valid(), False)
+
+        html = form.as_div()
+        self.assertEqual(html.count('aria-invalid="true"'), 1)
+        self.assertIn('aria-describedby="id_values_1_error"', html)
+
+    def test_child_help_text_renders_once_under_the_rows(self):
+        """The child's help text renders one time and every row points at it."""
+        form = self.HelpTextForm(initial={"values": ["a", "b"]})
+
+        for layout in self.LAYOUTS:
+            with self.subTest(layout=layout):
+                html = getattr(form, layout)()
+                tag = "span" if layout == "as_p" else "div"
+                self.assertEqual(html.count("ROWHELP"), 1)
+                self.assertIn(
+                    f'<{tag} class="helptext" id="{self.HELP_TEXT_ID}">ROWHELP</{tag}>',
+                    html,
+                )
+                # Two rendered rows plus the empty-row template.
+                self.assertEqual(
+                    html.count(f'aria-describedby="{self.HELP_TEXT_ID}"'), 3
+                )
+
+    def test_child_label_is_never_rendered(self):
+        """A row has no label of its own; the field's legend names the group."""
+        form = self.HelpTextForm(initial={"values": ["a"]})
+
+        for layout in self.LAYOUTS:
+            with self.subTest(layout=layout):
+                self.assertEqual(getattr(form, layout)().count("ROWLABEL"), 0)
+
+    def test_no_child_help_text_renders_nothing(self):
+        """A child without help text adds no element and no reference."""
+        form = SequenceForm(initial={"values": ["a"]})
+
+        for layout in self.LAYOUTS:
+            with self.subTest(layout=layout):
+                html = getattr(form, layout)()
+                self.assertNotIn("helptext", html)
+                self.assertNotIn("aria-describedby", html)
+
+    def test_no_render_path_writes_the_shared_child_render_state(self):
+        """Each row form deep-copies the child field, so the shared widget is
+        never the one a row renders with.
+
+        ``BaseForm.__init__`` deep-copies ``base_fields``, and the row form
+        class holds the child field, so ``_row_context`` always reaches a
+        per-row widget. Nothing has to undo a mutation after the row loop.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.ListField(nestingdolls.MappingField(MappingPointForm))
+
+        form = Form(initial={"values": [{"a": 1, "label": "one"}]})
+        child_widget = form.fields["values"].widget.child_field.widget
+        sentinel = child_widget.RenderState()
+        child_widget.render_state = sentinel
+
+        form.as_div()
+
+        self.assertIs(child_widget.render_state, sentinel)
 
 
 if __name__ == "__main__":  # pragma: no cover

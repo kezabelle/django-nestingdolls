@@ -41,6 +41,20 @@ class NamedTupleFieldCleaningTestCase(SimpleTestCase):
         self.assertIsInstance(cleaned, NamedTuplePoint)
         self.assertEqual(cleaned, NamedTuplePoint(x=1, y=2))
 
+    def test_cleaned_output_cleans_again(self):
+        """The named tuple ``compress`` produced is valid input for ``clean``.
+
+        ``initial_value`` already normalises a named tuple, so ``to_python``
+        accepts the same shape.
+        """
+        field = nestingdolls.NamedTupleField(
+            NamedTuplePointForm, output=NamedTuplePoint
+        )
+
+        once = field.clean({"x": "1", "y": "2"})
+
+        self.assertEqual(field.clean(once), once)
+
     def test_required_field_rejects_missing_submission(self):
         """A required field with no submitted value reports "required"."""
 
