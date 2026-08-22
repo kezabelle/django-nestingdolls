@@ -150,70 +150,39 @@ DEMO_TEMPLATE = Template(
     <head>
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
     <title>Nesting Doll Forms (Demo)</title>
-    <style type="text/css">
-    body {
-        max-width: 60rem;
-        margin: 1rem auto;
-        font-family: system-ui, -apple-system, sans-serif;
-        font-size: 1rem;
-    }
-    button[type="submit"], a[href] {
-        border: 0;
-        background: transparent;
-        text-decoration: underline;
-        font-size: 1rem;
-        padding: 0;
-        margin: 0;
-        display: inline;
-        line-height: normal;
-        cursor: pointer;
-        color: #0000FF;
-    }
-    nav a { margin-right: 1rem; }
-    form > div,
-    form fieldset > div {
-        display: flex;
-        flex-direction: column;
-        margin: 1rem 0;
-    }
-    form label {
-        cursor: pointer;
-        font-weight: bold;
-        margin-bottom: 0.5rem;
-    }
-    form input {
-        border-radius: 3px;
-        border: 1px solid black;
-        font-size: 1rem;
-        padding: 0.5rem;
-    }
-    </style>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
     </head>
     <body>
-
+    <main class="container">
     <nav>
+    <details class="dropdown">
+    <summary role="button" class="outline">Examples</summary>
     <ul>{% for url_name, label in pages %}<li><a href="{% url url_name %}">{{ label }}</a></li>{% endfor %}</ul>
+    </details>
+    <details class="dropdown">
+    <summary role="button" class="outline">Layouts</summary>
+    <ul>{% for layout in layouts %}<li><a href="?layout={{ layout }}">{{ layout }}</a></li>{% endfor %}</ul>
+    </details>
     </nav>
     <h1>{{ title }}</h1>
     <p>{{ description }}</p>
-    <p>Layout:
-      <a href="?">default</a>{% for layout in layouts %}
-      <a href="?layout={{ layout }}">{{ layout }}</a>{% endfor %}
-    </p>
 
     <form method="GET" action="" autocomplete="off">
     {{ form_html }}
     {{ form.media }}
+    <div class="grid">
     <button type="submit" name="do-it" value="yep">Submit</button>
-    <a href="{{ reset_url }}">Reset</a>
+    <button type="reset">Reset</a>
+    </div>
     </form>
 
     {% if output %}
     <hr>
     <pre>{{ output }}</pre>
     {% endif %}
-
+    </main>
     </body>
 </html>
     """)

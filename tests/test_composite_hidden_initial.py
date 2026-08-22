@@ -3,43 +3,43 @@
 from __future__ import annotations
 
 import unittest
+from datetime import UTC, datetime
 
-from django.test.utils import setup_test_environment, teardown_test_environment
-
-from .support import (
+from django import forms
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.forms.formsets import (
     INITIAL_FORM_COUNT,
     MAX_NUM_FORM_COUNT,
     MIN_NUM_FORM_COUNT,
     TOTAL_FORM_COUNT,
-    MultiValueDict,
-    QueryDict,
-    SimpleTestCase,
-    SimpleUploadedFile,
-    datetime,
-    forms,
-    nestingdolls,
 )
+from django.http import QueryDict
+from django.test.utils import setup_test_environment, teardown_test_environment
+from django.utils.datastructures import MultiValueDict
+
+import nestingdolls
+
+from .support.forms.sequence import (
+    HiddenInitialIntegerSequenceForm,
+)
+from .support.testcases import CompositeFieldTestCase
 
 
-def setUpModule():
+def setUpModule() -> None:
+    """Set up the module test environment."""
     setup_test_environment()
 
 
-def tearDownModule():
+def tearDownModule() -> None:
+    """Tear down the module test environment."""
     teardown_test_environment()
 
 
-class CompositeHiddenInitialRenderingTestCase(SimpleTestCase):
+class CompositeHiddenInitialRenderingTestCase(CompositeFieldTestCase):
     """These tests check composite hidden initial rendering."""
 
-    def test_hidden_initial_markup_and_change_detection(self):
+    def test_hidden_initial_markup_and_change_detection(self) -> None:
         """Hidden initial rows drive change detection and survive an invalid redisplay."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(
-                forms.IntegerField(), initial=[1], show_hidden_initial=True
-            )
-
         data = QueryDict(
             f"values-{TOTAL_FORM_COUNT}=1&values-{INITIAL_FORM_COUNT}=0&values-0=1&"
             f"initial-values-{TOTAL_FORM_COUNT}=1&"
@@ -47,7 +47,7 @@ class CompositeHiddenInitialRenderingTestCase(SimpleTestCase):
             f"initial-values-{MIN_NUM_FORM_COUNT}=0&"
             f"initial-values-{MAX_NUM_FORM_COUNT}=1000&initial-values-0=1"
         )
-        form = Form(data)
+        form = HiddenInitialIntegerSequenceForm(data)
 
         self.assertIs(form.has_changed(), False)
         html = form.as_p()
@@ -77,33 +77,38 @@ class CompositeHiddenInitialRenderingTestCase(SimpleTestCase):
             f"initial-values-{TOTAL_FORM_COUNT}=1&"
             f"initial-values-{INITIAL_FORM_COUNT}=1&initial-values-0=not-an-integer"
         )
-        self.assertIs(Form(malformed_initial).has_changed(), True)
+        self.assertIs(
+            HiddenInitialIntegerSequenceForm(malformed_initial).has_changed(), True
+        )
 
         changed = data.copy()
         changed["values-0"] = "2"
-        self.assertIs(Form(changed).has_changed(), True)
+        self.assertIs(HiddenInitialIntegerSequenceForm(changed).has_changed(), True)
 
         legacy = QueryDict(
             f"values-{TOTAL_FORM_COUNT}=1&values-{INITIAL_FORM_COUNT}=0&values-0=1",
             mutable=True,
         )
         legacy.setlist("initial-values", ["1"])
-        self.assertIs(Form(legacy).has_changed(), False)
+        self.assertIs(HiddenInitialIntegerSequenceForm(legacy).has_changed(), False)
 
-        invalid = Form(
+        invalid = HiddenInitialIntegerSequenceForm(
             QueryDict(
                 "values-TOTAL_FORMS=1&values-INITIAL_FORMS=0&values-0=bad&"
                 "initial-values-TOTAL_FORMS=1&"
                 "initial-values-INITIAL_FORMS=1&initial-values-0=7"
             )
         )
-        self.assertIs(invalid.is_valid(), False)
+        self.assertFormInvalid(invalid)
         self.assertInHTML(
             '<input type="hidden" name="initial-values-0" value="7" id="initial-id_values_0">',
             invalid.as_p(),
         )
 
-    def assertSequenceCollectionHiddenInitialIsUnchanged(self, field_class, initial):
+    def assertSequenceCollectionHiddenInitialIsUnchanged(  # noqa: D102
+        self, field_class: object, initial: object
+    ) -> None:
+
         class Form(forms.Form):
             values = field_class(
                 forms.IntegerField(),
@@ -120,37 +125,37 @@ class CompositeHiddenInitialRenderingTestCase(SimpleTestCase):
         )
         self.assertIs(form.has_changed(), False)
 
-    def test_list_hidden_initial_round_trips_integer_child(self):
+    def test_list_hidden_initial_round_trips_integer_child(self) -> None:
         """A list hidden initial keeps one integer child unchanged."""
         self.assertSequenceCollectionHiddenInitialIsUnchanged(
             nestingdolls.ListField, [1]
         )
 
-    def test_tuple_hidden_initial_round_trips_integer_child(self):
+    def test_tuple_hidden_initial_round_trips_integer_child(self) -> None:
         """A tuple hidden initial keeps one integer child unchanged."""
         self.assertSequenceCollectionHiddenInitialIsUnchanged(
             nestingdolls.TupleField, (1,)
         )
 
-    def test_set_hidden_initial_round_trips_integer_child(self):
+    def test_set_hidden_initial_round_trips_integer_child(self) -> None:
         """A set hidden initial keeps one integer child unchanged."""
         self.assertSequenceCollectionHiddenInitialIsUnchanged(
             nestingdolls.SetField, {1}
         )
 
-    def test_frozen_set_hidden_initial_round_trips_integer_child(self):
+    def test_frozen_set_hidden_initial_round_trips_integer_child(self) -> None:
         """A frozen set hidden initial keeps one integer child unchanged."""
         self.assertSequenceCollectionHiddenInitialIsUnchanged(
             nestingdolls.FrozenSetField, frozenset({1})
         )
 
-    def test_compound_and_file_children_use_their_own_hidden_widgets(self):
+    def test_compound_and_file_children_use_their_own_hidden_widgets(self) -> None:
         """A compound child hides every subwidget; a file child hides no filename."""
 
         class CompoundForm(forms.Form):
             values = nestingdolls.ListField(
                 forms.SplitDateTimeField(),
-                initial=[datetime(2024, 1, 2, 3, 4, 5)],
+                initial=[datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)],
                 show_hidden_initial=True,
             )
 
@@ -195,7 +200,7 @@ class CompositeHiddenInitialRenderingTestCase(SimpleTestCase):
         uploaded = FileForm(data, files=MultiValueDict({"files-0": [upload]}))
         self.assertIs(uploaded.has_changed(), True)
 
-    def test_hidden_initial_recurses_through_nested_composites(self):
+    def test_hidden_initial_recurses_through_nested_composites(self) -> None:
         """Hidden initial parsing recurses through alternating composites."""
 
         class PointForm(forms.Form):
@@ -248,7 +253,7 @@ class CompositeHiddenInitialRenderingTestCase(SimpleTestCase):
         )
         self.assertIs(container.has_changed(), False)
 
-    def assertHiddenSequenceMarkupIsMinimal(self, html):
+    def assertHiddenSequenceMarkupIsMinimal(self, html: object) -> None:  # noqa: D102
         self.assertEqual(html.count('name="initial-values-0"'), 1)
         self.assertEqual(html.count('id="initial-id_values_0"'), 1)
         for name in (
@@ -262,45 +267,29 @@ class CompositeHiddenInitialRenderingTestCase(SimpleTestCase):
         self.assertNotIn('name="initial-values-__prefix__"', html)
         self.assertNotIn('data-sequence-field="initial-values"', html)
 
-    def test_hidden_initial_markup_is_minimal_with_as_p(self):
+    def test_hidden_initial_markup_is_minimal_with_as_p(self) -> None:
         """The paragraph helper keeps hidden sequence markup minimal."""
+        self.assertHiddenSequenceMarkupIsMinimal(
+            HiddenInitialIntegerSequenceForm().as_p()
+        )
 
-        class Form(forms.Form):
-            values = nestingdolls.ListField(
-                forms.IntegerField(), initial=[1], show_hidden_initial=True
-            )
-
-        self.assertHiddenSequenceMarkupIsMinimal(Form().as_p())
-
-    def test_hidden_initial_markup_is_minimal_with_as_div(self):
+    def test_hidden_initial_markup_is_minimal_with_as_div(self) -> None:
         """The div helper keeps hidden sequence markup minimal."""
+        self.assertHiddenSequenceMarkupIsMinimal(
+            HiddenInitialIntegerSequenceForm().as_div()
+        )
 
-        class Form(forms.Form):
-            values = nestingdolls.ListField(
-                forms.IntegerField(), initial=[1], show_hidden_initial=True
-            )
-
-        self.assertHiddenSequenceMarkupIsMinimal(Form().as_div())
-
-    def test_hidden_initial_markup_is_minimal_with_as_ul(self):
+    def test_hidden_initial_markup_is_minimal_with_as_ul(self) -> None:
         """The list helper keeps hidden sequence markup minimal."""
+        self.assertHiddenSequenceMarkupIsMinimal(
+            HiddenInitialIntegerSequenceForm().as_ul()
+        )
 
-        class Form(forms.Form):
-            values = nestingdolls.ListField(
-                forms.IntegerField(), initial=[1], show_hidden_initial=True
-            )
-
-        self.assertHiddenSequenceMarkupIsMinimal(Form().as_ul())
-
-    def test_hidden_initial_markup_is_minimal_with_as_table(self):
+    def test_hidden_initial_markup_is_minimal_with_as_table(self) -> None:
         """The table helper keeps hidden sequence markup minimal."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(
-                forms.IntegerField(), initial=[1], show_hidden_initial=True
-            )
-
-        self.assertHiddenSequenceMarkupIsMinimal(Form().as_table())
+        self.assertHiddenSequenceMarkupIsMinimal(
+            HiddenInitialIntegerSequenceForm().as_table()
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

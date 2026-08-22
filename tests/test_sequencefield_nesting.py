@@ -4,39 +4,51 @@ from __future__ import annotations
 
 import unittest
 
-from django.test.utils import setup_test_environment, teardown_test_environment
-
-from .support import (
+from django import forms
+from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.forms.formsets import (
     DEFAULT_MAX_NUM,
     DELETION_FIELD_NAME,
     INITIAL_FORM_COUNT,
     TOTAL_FORM_COUNT,
-    ListFormBindingUnitTestCase,
-    SimpleTestCase,
-    SimpleUploadedFile,
-    ValidationError,
-    forms,
-    nestingdolls,
-    override_settings,
 )
+from django.test import override_settings
+from django.test.utils import setup_test_environment, teardown_test_environment
+
+import nestingdolls
+
+from .support.forms.sequence import (
+    BoundedNestedIntegerSequenceForm,
+    NestedIntegerSequenceForm,
+    OptionalBCSequenceForm,
+    OptionalRequiredTextSequenceForm,
+    RequiredBCSequenceForm,
+    RequiredBSequenceForm,
+    SequenceForm,
+)
+from .support.testcases import CompositeFieldTestCase, TestQueryDict
 
 
-def setUpModule():
+def setUpModule() -> None:
+    """Set up the module test environment."""
     setup_test_environment()
 
 
-def tearDownModule():
+def tearDownModule() -> None:
+    """Tear down the module test environment."""
     teardown_test_environment()
 
 
-@override_settings(ROOT_URLCONF="tests.support")
-class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
+@override_settings(ROOT_URLCONF="tests.support.urls")
+class SequenceFieldNestingTestCase(CompositeFieldTestCase):
     """Tests sequences nested in sequences and mappings.
 
     The tests cover nested change detection, the shared row cap, sparse file
-    rows, nested deletion, and nested row errors."""
+    rows, nested deletion, and nested row errors.
+    """
 
-    def test_nested_change_detection_uses_child_semantics(self):
+    def test_nested_change_detection_uses_child_semantics(self) -> None:
         """Nested change detection delegates to the child field's comparison."""
         tuple_field = nestingdolls.ListField(
             nestingdolls.TupleField(
@@ -73,13 +85,15 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
         )
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
-    def test_nested_initial_rendering_reserves_rows_before_leaf_preparation(self):
+    def test_nested_initial_rendering_reserves_rows_before_leaf_preparation(
+        self,
+    ) -> None:
         """Rendering clips nested initials before preparing excess leaf values."""
 
         class CountingField(forms.IntegerField):
             preparations = 0
 
-            def prepare_value(self, value):
+            def prepare_value(self, value: object) -> object:
                 CountingField.preparations += 1
                 return super().prepare_value(value)
 
@@ -124,30 +138,36 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
         self.assertEqual(rendered_small_leaves, 8)
         self.assertEqual(CountingField.preparations, 8)
 
-    def test_prepare_value_keeps_a_row_the_nested_child_refuses(self):
+    def test_prepare_value_keeps_a_row_the_nested_child_refuses(self) -> None:
         """A row that the nested child cannot read stays in the prepared rows."""
         field = nestingdolls.ListField(
             nestingdolls.ListField(forms.CharField(), required=False), required=False
         )
         self.assertEqual(field.prepare_value([["a"], "scalar"]), [["a"], "scalar"])
 
-    def assertSubmissionMaximum(self, limits, keys, expected):
+    def assertSubmissionMaximum(  # noqa: D102
+        self, limits: object, keys: object, expected: object
+    ) -> None:
         with override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=keys):
             self.assertEqual(limits.submission_max, expected)
 
-    def test_submission_max_uses_absolute_maximum_at_django_key_limit_1000(self):
+    def test_submission_max_uses_absolute_maximum_at_django_key_limit_1000(
+        self,
+    ) -> None:
         """A Django key limit of 1000 uses the absolute maximum."""
         limits = nestingdolls.ListField(forms.CharField()).limits
         self.assertEqual(limits.absolute_max, 2000)
         self.assertSubmissionMaximum(limits, 1000, 2000)
 
-    def test_submission_max_uses_django_key_limit_5000(self):
+    def test_submission_max_uses_django_key_limit_5000(self) -> None:
         """A Django key limit of 5000 sets the submission maximum."""
         self.assertSubmissionMaximum(
             nestingdolls.ListField(forms.CharField()).limits, 5000, 5000
         )
 
-    def test_submission_max_uses_absolute_maximum_at_django_key_limit_10(self):
+    def test_submission_max_uses_absolute_maximum_at_django_key_limit_10(
+        self,
+    ) -> None:
         """A Django key limit of 10 uses the absolute maximum."""
         self.assertSubmissionMaximum(
             nestingdolls.ListField(forms.CharField()).limits, 10, 2000
@@ -155,34 +175,36 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
 
     def test_submission_max_uses_absolute_maximum_when_django_key_limit_is_disabled(
         self,
-    ):
+    ) -> None:
         """A disabled Django key limit uses the absolute maximum."""
         self.assertSubmissionMaximum(
             nestingdolls.ListField(forms.CharField()).limits, None, 2000
         )
 
-    def test_submission_max_uses_default_when_django_key_limit_is_zero(self):
+    def test_submission_max_uses_default_when_django_key_limit_is_zero(self) -> None:
         """A zero Django key limit uses the default submission maximum."""
         limits = nestingdolls.ListField(
             forms.CharField(), max_length=10, absolute_max=10
         ).limits
         self.assertSubmissionMaximum(limits, 0, DEFAULT_MAX_NUM)
 
-    def test_submission_max_uses_default_when_django_key_limit_is_none(self):
+    def test_submission_max_uses_default_when_django_key_limit_is_none(self) -> None:
         """A none Django key limit uses the default submission maximum."""
         limits = nestingdolls.ListField(
             forms.CharField(), max_length=10, absolute_max=10
         ).limits
         self.assertSubmissionMaximum(limits, None, DEFAULT_MAX_NUM)
 
-    def test_submission_max_uses_absolute_maximum_when_django_key_limit_is_lower(self):
+    def test_submission_max_uses_absolute_maximum_when_django_key_limit_is_lower(
+        self,
+    ) -> None:
         """A lower Django key limit uses the absolute maximum."""
         limits = nestingdolls.ListField(
             forms.CharField(), max_length=10, absolute_max=10
         ).limits
         self.assertSubmissionMaximum(limits, 5, limits.absolute_max)
 
-    def test_client_accepts_an_exact_nested_submission_total(self):
+    def test_client_accepts_an_exact_nested_submission_total(self) -> None:
         """Client accepts a nested submission that uses the shared cap exactly.
 
         Both the outer row and the inner rows are declared initial, so they
@@ -206,26 +228,17 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
         self.assertEqual([len(rows) for rows in payload["values"]], [1999])
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
-    def test_nested_whole_values_share_one_row_limit(self):
+    def test_nested_whole_values_share_one_row_limit(self) -> None:
         """A decoded nested value can spend the shared cap exactly."""
+        form = BoundedNestedIntegerSequenceForm({"outer": [list(range(9))]})
 
-        class Form(forms.Form):
-            outer = nestingdolls.ListField(
-                nestingdolls.ListField(
-                    forms.IntegerField(),
-                    max_length=10,
-                    absolute_max=10,
-                ),
-                max_length=10,
-                absolute_max=10,
-            )
-
-        form = Form({"outer": [list(range(9))]})
-
-        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertFormValid(form)
         self.assertEqual(form.cleaned_data["outer"], [list(range(9))])
 
-    def assertNestedRowBlankness(self, inner_required, extra_data, expected):
+    def assertNestedRowBlankness(  # noqa: D102
+        self, inner_required: object, extra_data: object, expected: object
+    ) -> None:
+
         class Form(forms.Form):
             values = nestingdolls.ListField(
                 nestingdolls.ListField(forms.CharField(), required=inner_required),
@@ -242,10 +255,10 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
             }
         )
 
-        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertFormValid(form)
         self.assertEqual(form.cleaned_data["values"], expected)
 
-    def test_untouched_nested_row_cleans_away_as_blank(self):
+    def test_untouched_nested_row_cleans_away_as_blank(self) -> None:
         """An untouched nested row is blank, so its required child never runs.
 
         A rendered row submits its nested formset's management keys, and
@@ -253,15 +266,15 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
         """
         self.assertNestedRowBlankness(True, {"values-0-0": ""}, [])
 
-    def test_untouched_nested_row_builds_no_phantom_element(self):
+    def test_untouched_nested_row_builds_no_phantom_element(self) -> None:
         """An untouched nested row with an optional child adds no empty list."""
         self.assertNestedRowBlankness(False, {"values-0-0": ""}, [])
 
-    def test_nested_row_with_a_value_still_cleans_through(self):
+    def test_nested_row_with_a_value_still_cleans_through(self) -> None:
         """A nested row carrying a value is not blank."""
         self.assertNestedRowBlankness(True, {"values-0-0": "abc"}, [["abc"]])
 
-    def test_nested_delete_key_alone_leaves_the_outer_row_blank(self):
+    def test_nested_delete_key_alone_leaves_the_outer_row_blank(self) -> None:
         """A checked nested delete box is structure, not outer-row content."""
         self.assertNestedRowBlankness(
             True,
@@ -273,13 +286,13 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
         )
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
-    def test_nested_whole_values_reject_shared_row_limit_overflow(self):
+    def test_nested_whole_values_reject_shared_row_limit_overflow(self) -> None:
         """A decoded child list cannot overdraw its parent sequence budget."""
 
         class CountingField(forms.IntegerField):
             cleans = 0
 
-            def clean(self, value):
+            def clean(self, value: object) -> object:
                 type(self).cleans += 1
                 return super().clean(value)
 
@@ -296,19 +309,19 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
 
         form = Form({"outer": [list(range(10))]})
 
-        self.assertIs(form.is_valid(), False)
+        self.assertFormInvalid(form)
         error = form.errors.as_data()["outer"][0]
         self.assertEqual(error.code, "too_many_forms")
         self.assertEqual(CountingField.cleans, 0)
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
-    def test_nested_mapping_values_reject_shared_row_limit_overflow(self):
+    def test_nested_mapping_values_reject_shared_row_limit_overflow(self) -> None:
         """A mapping row discovers its nested sequence under the parent cap."""
 
         class CountingField(forms.IntegerField):
             cleans = 0
 
-            def clean(self, value):
+            def clean(self, value: object) -> object:
                 type(self).cleans += 1
                 return super().clean(value)
 
@@ -328,32 +341,24 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
 
         form = Form({"outer": [{"values": list(range(10))}]})
 
-        self.assertIs(form.is_valid(), False)
+        self.assertFormInvalid(form)
         error = form.errors.as_data()["outer"][0]
         self.assertEqual(error.code, "too_many_forms")
         self.assertEqual(CountingField.cleans, 0)
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
-    def test_unbound_nested_initial_rendering_counts_parent_rows_before_children(self):
+    def test_unbound_nested_initial_rendering_counts_parent_rows_before_children(
+        self,
+    ) -> None:
         """An unbound form renders nine inner inputs because its outer row spends one cap slot."""
-
-        class Form(forms.Form):
-            outer = nestingdolls.ListField(
-                nestingdolls.ListField(
-                    forms.IntegerField(),
-                    max_length=10,
-                    absolute_max=10,
-                ),
-                max_length=10,
-                absolute_max=10,
-            )
-
-        html = Form(initial={"outer": [list(range(10))]}).as_p()
+        html = BoundedNestedIntegerSequenceForm(
+            initial={"outer": [list(range(10))]}
+        ).as_p()
 
         self.assertIn('name="outer-0-8"', html)
         self.assertNotIn('name="outer-0-9"', html)
 
-    def test_client_pairs_managed_sparse_data_and_file_rows_by_index(self):
+    def test_client_pairs_managed_sparse_data_and_file_rows_by_index(self) -> None:
         """Managed sparse data and file indexes identify the same row.
 
         The management total owns each row index. A gap does not change the
@@ -371,9 +376,8 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertJSONEqual(
-            response.content,
+        self.assertJSONResponse(
+            response,
             {
                 "valid": True,
                 "rows": [
@@ -385,7 +389,7 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
             },
         )
 
-    def test_client_deletes_a_nested_row_and_redisplays_it_as_deleted(self):
+    def test_client_deletes_a_nested_row_and_redisplays_it_as_deleted(self) -> None:
         """Deleting a nested row removes it and renders it deleted.
 
         A nested sequence has no bound field of its own to read its rows'
@@ -416,7 +420,7 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
         )
         self.assertNotIn('value="deleted-me"', payload["html"])
 
-    def test_client_attaches_a_nested_row_error_to_that_nested_row(self):
+    def test_client_attaches_a_nested_row_error_to_that_nested_row(self) -> None:
         """A nested row error appears at its failing input.
 
         An error inside a nested row belongs to that row, not to the row
@@ -438,15 +442,15 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
         self.assertEqual(response.status_code, 200)
         html = response.json()["html"]
         self.assertIn('<span class="errorlist" id="id_values_0_1_error">', html)
-        self.assertIn('aria-describedby="id_values_0_1_error"', html)
+        self.assertErrorReferenceResolves(html, "id_values_0_1_error")
 
-    def test_row_bucketing_runs_once_for_each_input_source(self):
+    def test_row_bucketing_runs_once_for_each_input_source(self) -> None:
         """The parsed input cohort owns row bucketing for its full request lifetime."""
 
         class CountingWidget(nestingdolls.SequenceWidget):
             key_visits = 0
 
-            def read_input(self, data, files, name):
+            def read_input(self, data: object, files: object, name: object) -> object:
                 CountingWidget.key_visits += len(data) + len(files)
                 return super().read_input(data, files, name)
 
@@ -466,11 +470,11 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
 
         self.assertEqual(len(form["values"].data), row_count)
         extraction_visits = CountingWidget.key_visits
-        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertFormValid(form)
         self.assertEqual(CountingWidget.key_visits, extraction_visits)
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=10)
-    def test_field_clean_of_nested_values_pays_each_level_cap(self):
+    def test_field_clean_of_nested_values_pays_each_level_cap(self) -> None:
         """Nested ``clean()`` calls use each level's own cap.
 
         A ``clean()`` call has no request keys. It does not open the shared
@@ -480,7 +484,7 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
         class CountingField(forms.CharField):
             cleans = 0
 
-            def clean(self, value):
+            def clean(self, value: object) -> object:
                 CountingField.cleans += 1
                 return super().clean(value)
 
@@ -510,7 +514,7 @@ class NestedSequenceFieldTestCase(ListFormBindingUnitTestCase):
         self.assertEqual(error.params["child_code"], "too_many_forms")
 
 
-class SequenceScalarRowTestCase(ListFormBindingUnitTestCase):
+class SequenceFieldScalarRowTestCase(CompositeFieldTestCase):
     """A scalar row's own validation outcome is the same in either input style.
 
     Cleaning a whole value already uses a fast path that reports each
@@ -520,9 +524,8 @@ class SequenceScalarRowTestCase(ListFormBindingUnitTestCase):
     proven against both input styles.
     """
 
-    def assertScalarRowError(self, form):
-        """Assert row 1 of a 3-row int list shows its own inline error."""
-        self.assertIs(form.is_valid(), False)
+    def assertScalarRowError(self, form: object) -> None:  # noqa: D102
+        self.assertFormInvalid(form)
         error = form.errors.as_data()["values"][0]
         self.assertEqual(error.code, "item_invalid")
         self.assertEqual(error.params["item"], 1)
@@ -530,107 +533,85 @@ class SequenceScalarRowTestCase(ListFormBindingUnitTestCase):
         self.assertEqual(html.count("errorlist"), 1)
         self.assertEqual(html.count('aria-invalid="true"'), 1)
         self.assertIn('name="values-1" value="bad"', html)
-        self.assertIn('aria-describedby="id_values_1_error"', html)
+        self.assertErrorReferenceResolves(html, "id_values_1_error")
         self.assertInHTML(
             '<span class="errorlist" id="id_values_1_error">Enter a whole number.</span>',
             html,
         )
 
-    def assertScalarRowsValid(self, form):
-        """Assert a valid 3-row int list renders every row with no error markup."""
-        self.assertIs(form.is_valid(), True, form.errors)
+    def assertScalarRowsValid(self, form: object) -> None:  # noqa: D102
+        self.assertFormValid(form)
         html = form.as_p()
         self.assertNotIn("errorlist", html)
         for index, value in enumerate((1, 2, 3)):
             self.assertIn(f'name="values-{index}" value="{value}"', html)
 
-    def test_scalar_row_error_via_whole_value(self):
+    def test_scalar_row_error_via_whole_value(self) -> None:
         """A bad row in a whole-value scalar list shows its own error, not silence."""
+        self.assertScalarRowError(SequenceForm({"values": [1, "bad", 3]}))
 
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField())
-
-        self.assertScalarRowError(
-            self.build_whole_value_form(Form, "values", [1, "bad", 3])
-        )
-
-    def test_scalar_row_error_via_querydict(self):
+    def test_scalar_row_error_via_querydict(self) -> None:
         """A bad row in a prefixed-row scalar list shows its own error, not silence."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField())
-
         self.assertScalarRowError(
-            self.build_querydict_form(
-                Form,
-                {
-                    f"values-{TOTAL_FORM_COUNT}": "3",
-                    f"values-{INITIAL_FORM_COUNT}": "3",
-                    "values-0": "1",
-                    "values-1": "bad",
-                    "values-2": "3",
-                },
+            SequenceForm(
+                TestQueryDict.from_dict(
+                    {
+                        f"values-{TOTAL_FORM_COUNT}": "3",
+                        f"values-{INITIAL_FORM_COUNT}": "3",
+                        "values-0": "1",
+                        "values-1": "bad",
+                        "values-2": "3",
+                    }
+                )
             )
         )
 
-    def test_scalar_rows_valid_via_whole_value(self):
+    def test_scalar_rows_valid_via_whole_value(self) -> None:
         """A valid whole-value scalar list renders every row with no error markup."""
+        self.assertScalarRowsValid(SequenceForm({"values": [1, 2, 3]}))
 
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField())
-
-        self.assertScalarRowsValid(
-            self.build_whole_value_form(Form, "values", [1, 2, 3])
-        )
-
-    def test_scalar_rows_valid_via_querydict(self):
+    def test_scalar_rows_valid_via_querydict(self) -> None:
         """A valid prefixed-row scalar list renders every row with no error markup."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField())
-
         self.assertScalarRowsValid(
-            self.build_querydict_form(
-                Form,
-                {
-                    f"values-{TOTAL_FORM_COUNT}": "3",
-                    f"values-{INITIAL_FORM_COUNT}": "3",
-                    "values-0": "1",
-                    "values-1": "2",
-                    "values-2": "3",
-                },
+            SequenceForm(
+                TestQueryDict.from_dict(
+                    {
+                        f"values-{TOTAL_FORM_COUNT}": "3",
+                        f"values-{INITIAL_FORM_COUNT}": "3",
+                        "values-0": "1",
+                        "values-1": "2",
+                        "values-2": "3",
+                    }
+                )
             )
         )
 
 
-class SequenceMappingRowTestCase(ListFormBindingUnitTestCase):
+class SequenceFieldMappingRowTestCase(CompositeFieldTestCase):
     """A mapping row's own validation outcome is the same in either input style.
 
-    Same regression guard as ``SequenceScalarRowTestCase``, for a row
+    Same regression guard as ``SequenceFieldScalarRowTestCase``, for a row
     whose child is itself a ``DictField``, including the edge case where
     a row carries no submitted keys at all yet must still validate as
     real, present data rather than an untouched placeholder.
     """
 
-    def assertMappingRowError(self, form):
-        """Assert row 1's missing required child shows its own inline error."""
-        self.assertIs(form.is_valid(), False)
+    def assertMappingRowError(self, form: object) -> None:  # noqa: D102
+        self.assertFormInvalid(form)
         error = form.errors.as_data()["a"][0]
         self.assertEqual(error.code, "item_invalid")
         self.assertEqual(error.params["item"], 1)
         self.assertEqual(error.params["child_code"], "required")
+        self.assertBoundFieldErrors(form, "a", [])
         html = form.as_p()
-        self.assertInHTML(
-            '<span class="errorlist" id="id_a-1-b_error">This field is required.</span>',
-            html,
-        )
+        self.assertRenderedMessageCount(html, "This field is required.")
+        self.assertErrorReferenceResolves(html, "id_a-1-b_error")
+        self.assertErrorElementIsAbsent(html, "id_a_1_error")
         self.assertIn('name="a-0-b" value="2"', html)
-        self.assertIn('aria-describedby="id_a-1-b_error"', html)
         self.assertIn('name="a-1-c" value="3"', html)
 
-    def assertMappingRowsValid(self, form):
-        """Assert a valid mapping row list cleans and renders every child."""
-        self.assertIs(form.is_valid(), True, form.errors)
+    def assertMappingRowsValid(self, form: object) -> None:  # noqa: D102
+        self.assertFormValid(form)
         self.assertEqual(
             form.cleaned_data["a"], [{"b": 2, "c": None}, {"b": None, "c": 3}]
         )
@@ -639,223 +620,152 @@ class SequenceMappingRowTestCase(ListFormBindingUnitTestCase):
         self.assertIn('name="a-0-b" value="2"', html)
         self.assertIn('name="a-1-c" value="3"', html)
 
-    def assertKeylessRowIsRequired(self, form):
-        """Assert an empty-dict/keyless row is real data, not skippable.
+    def assertKeylessRowIsRequired(self, form: object) -> None:  # noqa: D102
+        self.assertFormInvalid(form)
+        self.assertFormErrorCode(form, "a", "item_invalid")
+        html = form.as_p()
+        self.assertRenderedMessageCount(html, "This field is required.")
+        self.assertRegex(html, r'id="id_a(?:_0|-0-b)_error"')
 
-        A whole-value list has no prefixed row keys to leave blank. Every entry
-        in the list is data the caller gave, even an empty mapping.
-        Cleaning already validates every row unconditionally; rendering
-        must not silently skip this row the way it skips an unfilled
-        extra formset row from a browser.
-        """
-        self.assertIs(form.is_valid(), False)
-        self.assertEqual(form.errors.as_data()["a"][0].code, "item_invalid")
-        self.assertInHTML(
-            '<span class="errorlist" id="id_a_0_error">This field is required.</span>',
-            form.as_p(),
-        )
-
-    def test_mapping_row_error_via_whole_value(self):
+    def test_mapping_row_error_via_whole_value(self) -> None:
         """A missing required child in a whole-value mapping row shows its error."""
+        self.assertMappingRowError(RequiredBCSequenceForm({"a": [{"b": 2}, {"c": 3}]}))
 
-        class Row(forms.Form):
-            b = forms.IntegerField()
-            c = forms.IntegerField(required=False)
-
-        class Form(forms.Form):
-            a = nestingdolls.ListField(nestingdolls.DictField(Row))
-
-        self.assertMappingRowError(
-            self.build_whole_value_form(Form, "a", [{"b": 2}, {"c": 3}])
-        )
-
-    def test_mapping_row_error_via_querydict(self):
+    def test_mapping_row_error_via_querydict(self) -> None:
         """A missing required child in a prefixed-row mapping row shows its error."""
-
-        class Row(forms.Form):
-            b = forms.IntegerField()
-            c = forms.IntegerField(required=False)
-
-        class Form(forms.Form):
-            a = nestingdolls.ListField(nestingdolls.DictField(Row))
-
         self.assertMappingRowError(
-            self.build_querydict_form(
-                Form,
-                {
-                    f"a-{TOTAL_FORM_COUNT}": "2",
-                    f"a-{INITIAL_FORM_COUNT}": "2",
-                    "a-0-b": "2",
-                    "a-1-c": "3",
-                },
+            RequiredBCSequenceForm(
+                TestQueryDict.from_dict(
+                    {
+                        f"a-{TOTAL_FORM_COUNT}": "2",
+                        f"a-{INITIAL_FORM_COUNT}": "2",
+                        "a-0-b": "2",
+                        "a-1-c": "3",
+                    }
+                )
             )
         )
 
-    def test_mapping_rows_valid_via_whole_value(self):
+    def test_mapping_rows_valid_via_whole_value(self) -> None:
         """A valid whole-value mapping row list renders and cleans every child."""
+        self.assertMappingRowsValid(OptionalBCSequenceForm({"a": [{"b": 2}, {"c": 3}]}))
 
-        class Row(forms.Form):
-            b = forms.IntegerField(required=False)
-            c = forms.IntegerField(required=False)
-
-        class Form(forms.Form):
-            a = nestingdolls.ListField(nestingdolls.DictField(Row))
-
-        self.assertMappingRowsValid(
-            self.build_whole_value_form(Form, "a", [{"b": 2}, {"c": 3}])
-        )
-
-    def test_mapping_rows_valid_via_querydict(self):
+    def test_mapping_rows_valid_via_querydict(self) -> None:
         """A valid prefixed-row mapping row list renders and cleans every child."""
-
-        class Row(forms.Form):
-            b = forms.IntegerField(required=False)
-            c = forms.IntegerField(required=False)
-
-        class Form(forms.Form):
-            a = nestingdolls.ListField(nestingdolls.DictField(Row))
-
         self.assertMappingRowsValid(
-            self.build_querydict_form(
-                Form,
-                {
-                    f"a-{TOTAL_FORM_COUNT}": "2",
-                    f"a-{INITIAL_FORM_COUNT}": "2",
-                    "a-0-b": "2",
-                    "a-1-c": "3",
-                },
+            OptionalBCSequenceForm(
+                TestQueryDict.from_dict(
+                    {
+                        f"a-{TOTAL_FORM_COUNT}": "2",
+                        f"a-{INITIAL_FORM_COUNT}": "2",
+                        "a-0-b": "2",
+                        "a-1-c": "3",
+                    }
+                )
             )
         )
 
-    def test_mapping_row_with_no_keys_via_whole_value(self):
+    def test_mapping_row_with_no_keys_via_whole_value(self) -> None:
         """An empty-dict whole-value row is real data, not an untouched placeholder."""
+        self.assertKeylessRowIsRequired(RequiredBSequenceForm({"a": [{}]}))
 
-        class Row(forms.Form):
-            b = forms.IntegerField()
-
-        class Form(forms.Form):
-            a = nestingdolls.ListField(nestingdolls.DictField(Row))
-
-        self.assertKeylessRowIsRequired(self.build_whole_value_form(Form, "a", [{}]))
-
-    def test_mapping_row_with_no_keys_via_querydict(self):
+    def test_mapping_row_with_no_keys_via_querydict(self) -> None:
         """A declared row with no submitted keys is real data too, not skippable."""
-
-        class Row(forms.Form):
-            b = forms.IntegerField()
-
-        class Form(forms.Form):
-            a = nestingdolls.ListField(nestingdolls.DictField(Row))
-
         self.assertKeylessRowIsRequired(
-            self.build_querydict_form(
-                Form, {f"a-{TOTAL_FORM_COUNT}": "1", f"a-{INITIAL_FORM_COUNT}": "1"}
+            RequiredBSequenceForm(
+                TestQueryDict.from_dict(
+                    {
+                        f"a-{TOTAL_FORM_COUNT}": "1",
+                        f"a-{INITIAL_FORM_COUNT}": "1",
+                    }
+                )
             )
         )
 
 
-class SequenceNestedListRowTestCase(ListFormBindingUnitTestCase):
+class SequenceFieldNestedListRowTestCase(CompositeFieldTestCase):
     """A leaf two levels deep inside a nested list validates the same in either style.
 
-    Same regression guard as ``SequenceScalarRowTestCase``, one nesting
+    Same regression guard as ``SequenceFieldScalarRowTestCase``, one nesting
     level deeper: a whole ``ListField(ListField(...))`` value's inner
     row error must still render inline, not just clean correctly.
     """
 
-    def assertNestedLeafError(self, form):
-        """Assert the bad leaf at outer row 0, inner row 1 shows its own error."""
-        self.assertIs(form.is_valid(), False)
+    def assertNestedLeafError(self, form: object) -> None:  # noqa: D102
+        self.assertFormInvalid(form)
+        self.assertBoundFieldErrors(form, "outer", [])
         html = form.as_p()
-        self.assertInHTML(
-            '<span class="errorlist" id="id_outer_0_1_error">Enter a whole number.</span>',
-            html,
-        )
+        self.assertRenderedMessageCount(html, "Enter a whole number.")
+        self.assertErrorReferenceResolves(html, "id_outer_0_1_error")
+        self.assertErrorElementIsAbsent(html, "id_outer_0_error")
         self.assertIn('name="outer-0-1" value="bad"', html)
 
-    def test_nested_list_leaf_error_via_whole_value(self):
+    def test_nested_list_leaf_error_via_whole_value(self) -> None:
         """A bad leaf two levels deep in a whole-value nested list still shows its error."""
+        self.assertNestedLeafError(NestedIntegerSequenceForm({"outer": [[1, "bad"]]}))
 
-        class Form(forms.Form):
-            outer = nestingdolls.ListField(nestingdolls.ListField(forms.IntegerField()))
-
-        self.assertNestedLeafError(
-            self.build_whole_value_form(Form, "outer", [[1, "bad"]])
-        )
-
-    def test_nested_list_leaf_error_via_querydict(self):
+    def test_nested_list_leaf_error_via_querydict(self) -> None:
         """A bad leaf two levels deep in a prefixed-row nested list still shows its error."""
-
-        class Form(forms.Form):
-            outer = nestingdolls.ListField(nestingdolls.ListField(forms.IntegerField()))
-
         self.assertNestedLeafError(
-            self.build_querydict_form(
-                Form,
-                {
-                    f"outer-{TOTAL_FORM_COUNT}": "1",
-                    f"outer-{INITIAL_FORM_COUNT}": "1",
-                    f"outer-0-{TOTAL_FORM_COUNT}": "2",
-                    f"outer-0-{INITIAL_FORM_COUNT}": "2",
-                    "outer-0-0": "1",
-                    "outer-0-1": "bad",
-                },
+            NestedIntegerSequenceForm(
+                TestQueryDict.from_dict(
+                    {
+                        f"outer-{TOTAL_FORM_COUNT}": "1",
+                        f"outer-{INITIAL_FORM_COUNT}": "1",
+                        f"outer-0-{TOTAL_FORM_COUNT}": "2",
+                        f"outer-0-{INITIAL_FORM_COUNT}": "2",
+                        "outer-0-0": "1",
+                        "outer-0-1": "bad",
+                    }
+                )
             )
         )
 
-    def test_nested_list_direct_scalar_is_invalid_sequence_input(self):
+    def test_nested_list_direct_scalar_is_invalid_sequence_input(self) -> None:
         """A direct nested scalar is not coerced into one inner row."""
-
-        class Form(forms.Form):
-            outer = nestingdolls.ListField(nestingdolls.ListField(forms.IntegerField()))
-
-        form = Form(
+        form = NestedIntegerSequenceForm(
             {
                 f"outer-{TOTAL_FORM_COUNT}": "1",
                 f"outer-{INITIAL_FORM_COUNT}": "0",
                 "outer-0": "1",
             }
         )
-        self.assertIs(form.is_valid(), False)
+        self.assertFormInvalid(form)
         error = form.errors.as_data()["outer"][0]
         self.assertEqual(error.code, "item_invalid")
         self.assertEqual(error.child_code, "invalid")
 
 
-class NestedParserRegressionTestCase(SimpleTestCase):
+class SequenceFieldNestedParserRegressionTestCase(CompositeFieldTestCase):
     """Tests request parser edge cases.
 
     Text indexes do not bind rows. An unknown mapping initial stays one
-    renderable row."""
+    renderable row.
+    """
 
-    def test_unrecognized_mapping_initial_becomes_one_renderable_row(self):
+    def test_unrecognized_mapping_initial_becomes_one_renderable_row(self) -> None:
         """A mapping that is not flattened sequence data remains one raw row."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.CharField(), required=False)
-
         value = {"unexpected": "saved"}
-        form = Form(initial={"values": value})
+        form = OptionalRequiredTextSequenceForm(initial={"values": value})
 
         self.assertEqual(form["values"].initial, [value])
         self.assertIn("unexpected", str(form["values"]))
 
-    def assertTextIndexDoesNotBind(self, data):
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField())
+    def assertTextIndexDoesNotBind(self, data: object) -> None:  # noqa: D102
 
-        form = Form(data)
-        self.assertIs(form.is_valid(), False)
-        self.assertEqual(form.errors.as_data()["values"][0].code, "required")
+        form = SequenceForm(data)
+        self.assertFormInvalid(form)
+        self.assertFormErrorCode(form, "values", "required")
 
-    def test_bracket_text_index_does_not_bind(self):
+    def test_bracket_text_index_does_not_bind(self) -> None:
         """A bracket text index does not bind a sequence row."""
         self.assertTextIndexDoesNotBind({"values[text]": "1"})
 
-    def test_dot_text_index_does_not_bind(self):
+    def test_dot_text_index_does_not_bind(self) -> None:
         """A dot text index does not bind a sequence row."""
         self.assertTextIndexDoesNotBind({"values.text": "1"})
 
-    def test_nested_bracket_text_index_does_not_bind(self):
+    def test_nested_bracket_text_index_does_not_bind(self) -> None:
         """A nested bracket text index does not bind a sequence row."""
         self.assertTextIndexDoesNotBind({"values[text][a]": "1"})
 

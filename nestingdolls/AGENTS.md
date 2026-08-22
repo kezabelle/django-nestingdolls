@@ -40,16 +40,17 @@ is progressive enhancement only.
 - Bound child forms and formsets: `boundfield.py`.
 - Item and input errors: `errors.py`.
 - Form-layout render bridge and startup: `patches.py`, `apps.py`, and
-  `tests/test_patches.py`.
+  `tests/test_form_layout_patch.py`.
 - Mapping templates: `templates/nestingdolls/mapping/` and
-  `tests/test_dictfield_*.py`.
+  `tests/test_mappingfield_*.py`.
 - Sequence templates: `templates/nestingdolls/sequence/` and
-  `tests/test_listfield_*.py`.
+  `tests/test_sequencefield_*.py`.
 - Named-tuple and dataclass output: `fields.py`,
   `tests/test_namedtuplefield_*.py`, and `tests/test_dataclassfield_*.py`.
 - Shared composite behavior: the three internal bases and the assertions in
-  `tests/testcases.py`.
-- Hostile row costs and limits: `tests/test_hostile.py` and `pathological.py`.
+  `tests/support/testcases.py`.
+- Hostile row costs and limits: `tests/test_hostile_input.py` and
+  `pathological.py`.
 - Browser controller and artifact: `static/nestingdolls/sequence.ts` and the
   committed `sequence.js`.
 

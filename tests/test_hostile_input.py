@@ -15,7 +15,6 @@ import unittest
 from urllib.parse import urlencode
 
 import django
-from django import forms
 from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.forms.formsets import (
@@ -24,11 +23,8 @@ from django.forms.formsets import (
     MIN_NUM_FORM_COUNT,
     TOTAL_FORM_COUNT,
 )
-from django.http import JsonResponse
-from django.test import SimpleTestCase, override_settings
+from django.test import override_settings
 from django.test.utils import setup_test_environment, teardown_test_environment
-from django.urls import path
-from django.views import View
 
 import nestingdolls
 
@@ -45,375 +41,35 @@ if not settings.configured:
         ],
     )
     django.setup()
+from .support.forms.hostile import (
+    OptionalIntegerSequenceMappingValueForm,
+)
+from .support.forms.sequence import (
+    NestedSequenceDeletionForm,
+)
+from .support.testcases import CompositeFieldTestCase
 
 
-def setUpModule():
+def setUpModule() -> None:
+    """Set up the module test environment."""
     # The client tests render bound forms.
     # Use Django's instrumented template environment.
     setup_test_environment()
 
 
-def tearDownModule():
+def tearDownModule() -> None:
+    """Tear down the module test environment."""
     teardown_test_environment()
 
 
 # One marker appears in the rendered HTML for each sequence row, and one more
 # for the inert template row of each sequence level.
-ROW_MARKER = "data-sequence-index="
 
 
-class HostileProbeView(View):
-    """Bind one static form to the request and report what a user can see."""
-
-    form_class = None
-    field_name = "values"
-    show_html = False
-    form_kwargs = None
-    # Django itself calls has_changed() before _clean_fields() whenever a form
-    # is empty_permitted, so change detection is a real entry point into row
-    # extraction and not only an application's own call.
-    change_detection_first = False
-
-    def post(self, request):
-        form = self.form_class(request.POST, request.FILES, **(self.form_kwargs or {}))
-        if self.change_detection_first:
-            form.has_changed()
-        valid = form.is_valid()
-        stored = form.errors.as_data()
-        data = {
-            "valid": valid,
-            "value": form.cleaned_data.get(self.field_name) if valid else None,
-            "errors": {
-                name: [error.code for error in errors]
-                for name, errors in stored.items()
-            },
-            "child_codes": {
-                name: [
-                    error.params.get("child_code") for error in errors if error.params
-                ]
-                for name, errors in stored.items()
-            },
-            "messages": {name: list(errors) for name, errors in form.errors.items()},
-        }
-        if self.show_html:
-            # A failed submission comes back to the browser as HTML, so the
-            # size and the row count of that page are part of the contract.
-            html = form.as_p()
-            data["rendered_rows"] = html.count(ROW_MARKER)
-            data["rendered_bytes"] = len(html)
-            data["html"] = html
-        return JsonResponse(data)
-
-
-class SequenceHostileFixtures(SimpleTestCase):
-    """Hold the sequence forms that the hostile routes bind."""
-
-    class SplitDateTimeListForm(forms.Form):
-        values = nestingdolls.ListField(forms.SplitDateTimeField(), required=False)
-
-    class IntegerListForm(forms.Form):
-        values = nestingdolls.ListField(forms.IntegerField(), required=False)
-
-    class NarrowListForm(forms.Form):
-        values = nestingdolls.ListField(
-            forms.IntegerField(), required=False, max_length=3, absolute_max=5
-        )
-
-    class NestedTextListForm(forms.Form):
-        values = nestingdolls.ListField(
-            nestingdolls.ListField(forms.CharField(required=False), required=False),
-            required=False,
-        )
-
-    class TriplyNestedListForm(forms.Form):
-        values = nestingdolls.ListField(
-            nestingdolls.ListField(
-                nestingdolls.ListField(forms.CharField(required=False), required=False),
-                required=False,
-            ),
-            required=False,
-        )
-
-    class ManySiblingListFieldsForm(forms.Form):
-        a = nestingdolls.ListField(
-            nestingdolls.ListField(forms.CharField(required=False), required=False),
-            required=False,
-        )
-        b = nestingdolls.ListField(
-            nestingdolls.ListField(forms.CharField(required=False), required=False),
-            required=False,
-        )
-        c = nestingdolls.ListField(
-            nestingdolls.ListField(forms.CharField(required=False), required=False),
-            required=False,
-        )
-        d = nestingdolls.ListField(
-            nestingdolls.ListField(forms.CharField(required=False), required=False),
-            required=False,
-        )
-        e = nestingdolls.ListField(
-            nestingdolls.ListField(forms.CharField(required=False), required=False),
-            required=False,
-        )
-        f = nestingdolls.ListField(
-            nestingdolls.ListField(forms.CharField(required=False), required=False),
-            required=False,
-        )
-        g = nestingdolls.ListField(
-            nestingdolls.ListField(forms.CharField(required=False), required=False),
-            required=False,
-        )
-        h = nestingdolls.ListField(
-            nestingdolls.ListField(forms.CharField(required=False), required=False),
-            required=False,
-        )
-
-    class NestedTypedListForm(forms.Form):
-        values = nestingdolls.ListField(
-            nestingdolls.ListField(
-                forms.IntegerField(), required=False, min_length=2, max_length=4
-            ),
-            required=False,
-        )
-
-    class AggregateCapForm(forms.Form):
-        values = nestingdolls.ListField(
-            nestingdolls.ListField(
-                forms.CharField(required=False), max_length=50, absolute_max=50
-            ),
-            required=False,
-            max_length=50,
-            absolute_max=50,
-        )
-
-    class DeepBracketForm(forms.Form):
-        values = nestingdolls.ListField(forms.CharField(), required=False)
-
-    class RowUploadForm(forms.Form):
-        class RowForm(forms.Form):
-            label = forms.CharField(required=False)
-            upload = forms.FileField(required=False)
-
-        values = nestingdolls.ListField(nestingdolls.DictField(RowForm), required=False)
-
-    class JsonSetForm(forms.Form):
-        values = nestingdolls.SetField(forms.JSONField(), required=False)
-
-
-class MappingHostileFixtures(SimpleTestCase):
-    """Hold the mapping forms that the hostile routes bind."""
-
-    class TripleMappingForm(forms.Form):
-        class Level1Form(forms.Form):
-            class Level2Form(forms.Form):
-                leaf = forms.IntegerField()
-
-            child = nestingdolls.DictField(Level2Form)
-
-        value = nestingdolls.DictField(Level1Form)
-
-    class OptionalTripleMappingForm(forms.Form):
-        class Level1Form(forms.Form):
-            class Level2Form(forms.Form):
-                leaf = forms.IntegerField(required=False)
-
-            child = nestingdolls.DictField(Level2Form, required=False)
-
-        value = nestingdolls.DictField(Level1Form, required=False)
-
-    class MappingListForm(forms.Form):
-        class InnerForm(forms.Form):
-            rows = nestingdolls.ListField(forms.IntegerField(), required=False)
-
-        value = nestingdolls.DictField(InnerForm, required=False)
-
-    class ChoicesMappingForm(forms.Form):
-        class ChoicesForm(forms.Form):
-            choices = forms.MultipleChoiceField(
-                choices=[("a", "a"), ("b", "b")], required=False
-            )
-
-        value = nestingdolls.DictField(ChoicesForm, required=False)
-
-    class PrefixedMappingForm(forms.Form):
-        class PointForm(forms.Form):
-            a = forms.IntegerField()
-
-        value = nestingdolls.DictField(PointForm)
-
-    class PlainMappingForm(forms.Form):
-        class PointForm(forms.Form):
-            a = forms.IntegerField()
-            label = forms.CharField(required=False)
-
-        value = nestingdolls.DictField(PointForm, required=False)
-
-    class ManySiblingSequencesForm(forms.Form):
-        class InnerForm(forms.Form):
-            a = nestingdolls.ListField(
-                nestingdolls.ListField(forms.CharField(required=False), required=False),
-                required=False,
-            )
-            b = nestingdolls.ListField(
-                nestingdolls.ListField(forms.CharField(required=False), required=False),
-                required=False,
-            )
-            c = nestingdolls.ListField(
-                nestingdolls.ListField(forms.CharField(required=False), required=False),
-                required=False,
-            )
-            d = nestingdolls.ListField(
-                nestingdolls.ListField(forms.CharField(required=False), required=False),
-                required=False,
-            )
-            e = nestingdolls.ListField(
-                nestingdolls.ListField(forms.CharField(required=False), required=False),
-                required=False,
-            )
-            f = nestingdolls.ListField(
-                nestingdolls.ListField(forms.CharField(required=False), required=False),
-                required=False,
-            )
-            g = nestingdolls.ListField(
-                nestingdolls.ListField(forms.CharField(required=False), required=False),
-                required=False,
-            )
-            h = nestingdolls.ListField(
-                nestingdolls.ListField(forms.CharField(required=False), required=False),
-                required=False,
-            )
-
-        value = nestingdolls.DictField(InnerForm, required=False)
-
-
-urlpatterns = [
-    path(
-        "hostile-split-datetime-list/",
-        HostileProbeView.as_view(
-            form_class=SequenceHostileFixtures.SplitDateTimeListForm,
-            show_html=True,
-        ),
-    ),
-    path(
-        "hostile-integer-list/",
-        HostileProbeView.as_view(form_class=SequenceHostileFixtures.IntegerListForm),
-    ),
-    path(
-        "hostile-narrow-list/",
-        HostileProbeView.as_view(form_class=SequenceHostileFixtures.NarrowListForm),
-    ),
-    path(
-        "hostile-nested-text-list/",
-        HostileProbeView.as_view(
-            form_class=SequenceHostileFixtures.NestedTextListForm,
-            show_html=True,
-        ),
-    ),
-    path(
-        "hostile-changed-first-nested-list/",
-        HostileProbeView.as_view(
-            form_class=SequenceHostileFixtures.NestedTextListForm,
-            change_detection_first=True,
-            show_html=True,
-        ),
-    ),
-    path(
-        "hostile-empty-permitted-nested-list/",
-        HostileProbeView.as_view(
-            form_class=SequenceHostileFixtures.NestedTextListForm,
-            form_kwargs={"empty_permitted": True, "use_required_attribute": False},
-        ),
-    ),
-    path(
-        "hostile-triply-nested-list/",
-        HostileProbeView.as_view(
-            form_class=SequenceHostileFixtures.TriplyNestedListForm,
-        ),
-    ),
-    path(
-        "hostile-many-sibling-list-fields/",
-        HostileProbeView.as_view(
-            form_class=SequenceHostileFixtures.ManySiblingListFieldsForm,
-        ),
-    ),
-    path(
-        "hostile-nested-typed-list/",
-        HostileProbeView.as_view(
-            form_class=SequenceHostileFixtures.NestedTypedListForm
-        ),
-    ),
-    path(
-        "hostile-aggregate-cap-list/",
-        HostileProbeView.as_view(
-            form_class=SequenceHostileFixtures.AggregateCapForm,
-            show_html=True,
-        ),
-    ),
-    path(
-        "hostile-deep-bracket-list/",
-        HostileProbeView.as_view(form_class=SequenceHostileFixtures.DeepBracketForm),
-    ),
-    path(
-        "hostile-row-upload-list/",
-        HostileProbeView.as_view(form_class=SequenceHostileFixtures.RowUploadForm),
-    ),
-    path(
-        "hostile-json-set/",
-        HostileProbeView.as_view(form_class=SequenceHostileFixtures.JsonSetForm),
-    ),
-    path(
-        "hostile-triple-mapping/",
-        HostileProbeView.as_view(
-            form_class=MappingHostileFixtures.TripleMappingForm, field_name="value"
-        ),
-    ),
-    path(
-        "hostile-optional-triple-mapping/",
-        HostileProbeView.as_view(
-            form_class=MappingHostileFixtures.OptionalTripleMappingForm,
-            field_name="value",
-        ),
-    ),
-    path(
-        "hostile-mapping-list/",
-        HostileProbeView.as_view(
-            form_class=MappingHostileFixtures.MappingListForm, field_name="value"
-        ),
-    ),
-    path(
-        "hostile-choices-mapping/",
-        HostileProbeView.as_view(
-            form_class=MappingHostileFixtures.ChoicesMappingForm, field_name="value"
-        ),
-    ),
-    path(
-        "hostile-prefixed-mapping/",
-        HostileProbeView.as_view(
-            form_class=MappingHostileFixtures.PrefixedMappingForm,
-            field_name="value",
-            form_kwargs={"prefix": "outer"},
-        ),
-    ),
-    path(
-        "hostile-plain-mapping/",
-        HostileProbeView.as_view(
-            form_class=MappingHostileFixtures.PlainMappingForm, field_name="value"
-        ),
-    ),
-    path(
-        "hostile-many-sibling-sequences-mapping/",
-        HostileProbeView.as_view(
-            form_class=MappingHostileFixtures.ManySiblingSequencesForm,
-            field_name="value",
-        ),
-    ),
-]
-
-
-class HostileClientTestCase(SimpleTestCase):
+class HostileRequestClientTestCase(CompositeFieldTestCase):
     """Give the hostile tests one way to send a raw, ordered request body."""
 
-    def post_raw(self, url, pairs):
+    def post_raw(self, url: object, pairs: object) -> object:
         """Send an ordered URL-encoded body, which a dict payload cannot spell."""
         return self.client.post(
             url,
@@ -422,25 +78,24 @@ class HostileClientTestCase(SimpleTestCase):
         )
 
 
-@override_settings(ROOT_URLCONF=__name__)
-@override_settings(ROOT_URLCONF=__name__)
-class HostileRequestBodyTestCase(HostileClientTestCase):
+@override_settings(ROOT_URLCONF="tests.support.urls")
+class HostileRequestBodyTestCase(HostileRequestClientTestCase):
     """A hostile request body does not cause a server error.
 
     Each test sends a body that no browser form sends. The view returns a client
-    error or an empty submission."""
+    error or an empty submission.
+    """
 
-    def test_client_survives_a_body_that_is_not_form_data(self):
+    def test_client_survives_a_body_that_is_not_form_data(self) -> None:
         """A JSON body carries no form controls and gives an empty submission."""
         response = self.client.post(
             "/hostile-integer-list/",
             data='{"values": [1, 2]}',
             content_type="application/json",
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [])
+        self.assertJSONResponseContains(response, {"value": []})
 
-    def test_client_survives_a_malformed_multipart_body(self):
+    def test_client_survives_a_malformed_multipart_body(self) -> None:
         """A truncated multipart body gives a client error, never a server error."""
         response = self.client.post(
             "/hostile-row-upload-list/",
@@ -450,7 +105,7 @@ class HostileRequestBodyTestCase(HostileClientTestCase):
         self.assertLess(response.status_code, 500)
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FILES=2)
-    def test_client_survives_more_uploads_than_the_request_allows(self):
+    def test_client_survives_more_uploads_than_the_request_allows(self) -> None:
         """Django refuses the extra uploads, and the view does not fail."""
         response = self.client.post(
             "/hostile-row-upload-list/",
@@ -465,14 +120,15 @@ class HostileRequestBodyTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 400)
 
 
-@override_settings(ROOT_URLCONF=__name__)
-class HostileRowKeyTestCase(HostileClientTestCase):
+@override_settings(ROOT_URLCONF="tests.support.urls")
+class HostileRowKeyTestCase(HostileRequestClientTestCase):
     """A malformed row key binds no row.
 
     Each test sends a row key that managed spelling does not permit. The key
-    binds no row, and valid rows stay in the value."""
+    binds no row, and valid rows stay in the value.
+    """
 
-    def test_client_ignores_a_deeply_nested_bracket_row_key(self):
+    def test_client_ignores_a_deeply_nested_bracket_row_key(self) -> None:
         """A key with thousands of bracket groups gives an ordinary response."""
         response = self.post_raw(
             "/hostile-deep-bracket-list/",
@@ -483,10 +139,9 @@ class HostileRowKeyTestCase(HostileClientTestCase):
                 ("values-0", "kept"),
             ),
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], ["kept"])
+        self.assertJSONResponseContains(response, {"value": ["kept"]})
 
-    def assertMalformedBracketKeyDoesNotBind(self, key):
+    def assertMalformedBracketKeyDoesNotBind(self, key: object) -> None:  # noqa: D102
         response = self.client.post(
             "/hostile-integer-list/",
             {
@@ -496,30 +151,29 @@ class HostileRowKeyTestCase(HostileClientTestCase):
                 "values-0": "1",
             },
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [1])
+        self.assertJSONResponseContains(response, {"value": [1]})
 
-    def test_client_ignores_open_bracket_row_key(self):
+    def test_client_ignores_open_bracket_row_key(self) -> None:
         """An open bracket row key does not bind a row."""
         self.assertMalformedBracketKeyDoesNotBind("values[")
 
-    def test_client_ignores_empty_bracket_row_key(self):
+    def test_client_ignores_empty_bracket_row_key(self) -> None:
         """An empty bracket row key does not bind a row."""
         self.assertMalformedBracketKeyDoesNotBind("values[]")
 
-    def test_client_ignores_bracket_then_text_row_key(self):
+    def test_client_ignores_bracket_then_text_row_key(self) -> None:
         """A bracket then text row key does not bind a row."""
         self.assertMalformedBracketKeyDoesNotBind("values[]0")
 
-    def test_client_ignores_unbalanced_bracket_row_key(self):
+    def test_client_ignores_unbalanced_bracket_row_key(self) -> None:
         """An unbalanced bracket row key does not bind a row."""
         self.assertMalformedBracketKeyDoesNotBind("values]0[")
 
-    def test_client_ignores_negative_bracket_row_key(self):
+    def test_client_ignores_negative_bracket_row_key(self) -> None:
         """A negative bracket row key does not bind a row."""
         self.assertMalformedBracketKeyDoesNotBind("values[-1]")
 
-    def test_client_ignores_a_row_index_longer_than_the_digit_limit(self):
+    def test_client_ignores_a_row_index_longer_than_the_digit_limit(self) -> None:
         """A row index with more digits than the limit names no row."""
         response = self.client.post(
             "/hostile-integer-list/",
@@ -530,12 +184,11 @@ class HostileRowKeyTestCase(HostileClientTestCase):
                 "values-0": "1",
             },
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [1])
+        self.assertJSONResponseContains(response, {"value": [1]})
 
     def test_client_ignores_invisible_characters_in_row_keys_and_keeps_them_in_values(
         self,
-    ):
+    ) -> None:
         """A zero-width space stays in a value and names no row."""
         response = self.client.post(
             "/hostile-nested-text-list/",
@@ -548,10 +201,9 @@ class HostileRowKeyTestCase(HostileClientTestCase):
                 "values-0-\u200b1": "ignored",
             },
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [["text\u200bwith marks"]])
+        self.assertJSONResponseContains(response, {"value": [["text\u200bwith marks"]]})
 
-    def test_client_ignores_non_ascii_digit_row_indexes_at_every_level(self):
+    def test_client_ignores_non_ascii_digit_row_indexes_at_every_level(self) -> None:
         """A Unicode digit names no row at an outer or an inner level."""
         response = self.client.post(
             "/hostile-nested-text-list/",
@@ -565,10 +217,9 @@ class HostileRowKeyTestCase(HostileClientTestCase):
                 "values-0-\u00b2": "inner superscript index",
             },
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [["kept"]])
+        self.assertJSONResponseContains(response, {"value": [["kept"]]})
 
-    def test_client_ignores_row_indexes_that_cannot_name_a_form(self):
+    def test_client_ignores_row_indexes_that_cannot_name_a_form(self) -> None:
         """Oversized and overlong indexes do not reach the formset."""
         response = self.client.post(
             "/hostile-integer-list/",
@@ -580,18 +231,18 @@ class HostileRowKeyTestCase(HostileClientTestCase):
                 "values-12345678": "ignored",
             },
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [5])
+        self.assertJSONResponseContains(response, {"value": [5]})
 
 
-@override_settings(ROOT_URLCONF=__name__)
-class HostileRowValueTestCase(HostileClientTestCase):
+@override_settings(ROOT_URLCONF="tests.support.urls")
+class HostileRowValueTestCase(HostileRequestClientTestCase):
     """A hostile row value gets a validation error, not a crash.
 
     Each test sends a value that a field cannot clean. The view returns an
-    ordinary response, and the error names the cause."""
+    ordinary response, and the error names the cause.
+    """
 
-    def test_client_accepts_a_managed_compound_child_row(self):
+    def test_client_accepts_a_managed_compound_child_row(self) -> None:
         """A managed compound child row returns a valid response."""
         managed = self.client.post(
             "/hostile-split-datetime-list/",
@@ -605,19 +256,23 @@ class HostileRowValueTestCase(HostileClientTestCase):
         self.assertEqual(managed.status_code, 200)
         self.assertIs(managed.json()["valid"], True)
 
-    def assertCompoundChildWholeValueDoesNotRaise(self, body):
+    def assertCompoundChildWholeValueDoesNotRaise(self, body: object) -> None:  # noqa: D102
         response = self.client.post("/hostile-split-datetime-list/", body)
         self.assertEqual(response.status_code, 200)
 
-    def test_client_survives_a_scalar_whole_value_for_compound_child_rows(self):
+    def test_client_survives_a_scalar_whole_value_for_compound_child_rows(
+        self,
+    ) -> None:
         """A scalar whole value for a compound row does not return HTTP 500."""
         self.assertCompoundChildWholeValueDoesNotRaise({"values": "abc"})
 
-    def test_client_survives_a_list_whole_value_for_compound_child_rows(self):
+    def test_client_survives_a_list_whole_value_for_compound_child_rows(self) -> None:
         """A list whole value for a compound row does not return HTTP 500."""
         self.assertCompoundChildWholeValueDoesNotRaise({"values": ["a", "b"]})
 
-    def test_client_reports_an_unhashable_json_row_as_a_validation_error(self):
+    def test_client_reports_an_unhashable_json_row_as_a_validation_error(
+        self,
+    ) -> None:
         """A JSON array in a set row returns a validation error.
 
         ``JSONField`` accepts an array, but a Python ``set`` cannot hash it.
@@ -635,7 +290,7 @@ class HostileRowValueTestCase(HostileClientTestCase):
         self.assertIs(body["valid"], False)
         self.assertEqual(body["errors"], {"values": ["unhashable"]})
 
-    def test_client_reports_a_null_byte_in_a_row_as_a_validation_error(self):
+    def test_client_reports_a_null_byte_in_a_row_as_a_validation_error(self) -> None:
         """A null byte gives Django's field error, not a broken response."""
         response = self.client.post(
             "/hostile-nested-text-list/",
@@ -656,11 +311,11 @@ class HostileRowValueTestCase(HostileClientTestCase):
         )
 
 
-@override_settings(ROOT_URLCONF=__name__)
-class HostileSequenceManagementTestCase(HostileClientTestCase):
+@override_settings(ROOT_URLCONF="tests.support.urls")
+class HostileSequenceManagementTestCase(HostileRequestClientTestCase):
     """Send management controls that a browser never sends."""
 
-    def test_client_keeps_rows_when_a_total_ends_in_a_decimal_zero(self):
+    def test_client_keeps_rows_when_a_total_ends_in_a_decimal_zero(self) -> None:
         """A decimal total must retain its submitted rows.
 
         Django's ``IntegerField`` accepts a trailing decimal zero, so
@@ -686,10 +341,11 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
                 "values-1": "2",
             },
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [1, 2])
+        self.assertJSONResponseContains(response, {"value": [1, 2]})
 
-    def test_client_keeps_a_negative_total_as_zero_rows_without_an_error(self):
+    def test_client_keeps_a_negative_total_as_zero_rows_without_an_error(
+        self,
+    ) -> None:
         """A negative total buys no rows, and asking for none is not an overdraw.
 
         Django's bound ``total_form_count`` is ``min(TOTAL_FORMS,
@@ -714,7 +370,7 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
                 self.assertIs(body["valid"], True)
                 self.assertEqual(body["value"], [])
 
-    def assertJunkManagementControlIsRejected(self, name):
+    def assertJunkManagementControlIsRejected(self, name: object) -> None:  # noqa: D102
         response = self.client.post(
             "/hostile-integer-list/",
             {
@@ -733,15 +389,15 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
             "ManagementForm data is missing or has been tampered with", message
         )
 
-    def test_client_rejects_junk_minimum_forms_control(self):
+    def test_client_rejects_junk_minimum_forms_control(self) -> None:
         """A junk minimum forms control rejects the submission."""
         self.assertJunkManagementControlIsRejected(MIN_NUM_FORM_COUNT)
 
-    def test_client_rejects_junk_maximum_forms_control(self):
+    def test_client_rejects_junk_maximum_forms_control(self) -> None:
         """A junk maximum forms control rejects the submission."""
         self.assertJunkManagementControlIsRejected(MAX_NUM_FORM_COUNT)
 
-    def test_client_keeps_the_last_of_two_duplicate_row_values(self):
+    def test_client_keeps_the_last_of_two_duplicate_row_values(self) -> None:
         """Two values under one row key give the last value, as Django does."""
         response = self.post_raw(
             "/hostile-integer-list/",
@@ -752,10 +408,9 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
                 ("values-0", "2"),
             ),
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [2])
+        self.assertJSONResponseContains(response, {"value": [2]})
 
-    def test_client_ignores_a_deletion_control_named_after_the_field(self):
+    def test_client_ignores_a_deletion_control_named_after_the_field(self) -> None:
         """A ``DELETE`` control on the field itself removes no row."""
         response = self.client.post(
             "/hostile-integer-list/",
@@ -767,15 +422,14 @@ class HostileSequenceManagementTestCase(HostileClientTestCase):
                 "values-1": "2",
             },
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [1, 2])
+        self.assertJSONResponseContains(response, {"value": [1, 2]})
 
 
-@override_settings(ROOT_URLCONF=__name__)
-class HostileNestedForgeryTestCase(HostileClientTestCase):
+@override_settings(ROOT_URLCONF="tests.support.urls")
+class HostileNestedForgeryTestCase(HostileRequestClientTestCase):
     """Send one extra key that is spelled like a nested composite child."""
 
-    def test_client_keeps_inner_rows_beside_a_forged_row_name_key(self):
+    def test_client_keeps_inner_rows_beside_a_forged_row_name_key(self) -> None:
         """A forged row-name key cannot replace unambiguous inner row keys."""
         control = self.client.post(
             "/hostile-nested-text-list/",
@@ -800,10 +454,11 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
                 "values-0-0": "kept",
             },
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [["kept"]])
+        self.assertJSONResponseContains(response, {"value": [["kept"]]})
 
-    def test_client_does_not_blame_the_user_data_for_a_forged_row_name_key(self):
+    def test_client_does_not_blame_the_user_data_for_a_forged_row_name_key(
+        self,
+    ) -> None:
         """A forged row-name key must not replace valid typed rows.
 
         The unambiguous typed row keys win over the forged whole-row text,
@@ -834,10 +489,11 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
                 "values-0-1": "2",
             },
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [[1, 2]])
+        self.assertJSONResponseContains(response, {"value": [[1, 2]]})
 
-    def test_client_keeps_the_leaf_of_a_nested_mapping_beside_a_forged_key(self):
+    def test_client_keeps_the_leaf_of_a_nested_mapping_beside_a_forged_key(
+        self,
+    ) -> None:
         """A forged mapping key cannot replace an unambiguous nested leaf."""
         control = self.post_raw(
             "/hostile-triple-mapping/",
@@ -849,10 +505,11 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
             "/hostile-triple-mapping/",
             (("value-child", "forged"), ("value-child-leaf", "1")),
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], {"child": {"leaf": 1}})
+        self.assertJSONResponseContains(response, {"value": {"child": {"leaf": 1}}})
 
-    def test_client_keeps_an_optional_nested_leaf_beside_an_empty_forged_key(self):
+    def test_client_keeps_an_optional_nested_leaf_beside_an_empty_forged_key(
+        self,
+    ) -> None:
         """An empty forged key must not discard an optional nested leaf.
 
         An empty exact-name value does not become an empty mapping. The
@@ -862,10 +519,11 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
             "/hostile-optional-triple-mapping/",
             (("value-child", ""), ("value-child-leaf", "1")),
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], {"child": {"leaf": 1}})
+        self.assertJSONResponseContains(response, {"value": {"child": {"leaf": 1}}})
 
-    def test_client_keeps_prefixed_list_rows_beside_a_forged_field_name_key(self):
+    def test_client_keeps_prefixed_list_rows_beside_a_forged_field_name_key(
+        self,
+    ) -> None:
         """A forged field-name key cannot replace unambiguous prefixed row keys."""
         control = self.client.post(
             "/hostile-integer-list/",
@@ -888,10 +546,11 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
                 "values-1": "2",
             },
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [1, 2])
+        self.assertJSONResponseContains(response, {"value": [1, 2]})
 
-    def test_client_ignores_a_forged_file_upload_beside_prefixed_list_rows(self):
+    def test_client_ignores_a_forged_file_upload_beside_prefixed_list_rows(
+        self,
+    ) -> None:
         """A forged file upload under the field name cannot replace prefixed row keys."""
         response = self.client.post(
             "/hostile-integer-list/",
@@ -903,12 +562,11 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
                 "values": SimpleUploadedFile("forged.txt", b"forged"),
             },
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [1, 2])
+        self.assertJSONResponseContains(response, {"value": [1, 2]})
 
     def test_client_keeps_prefixed_mapping_children_beside_a_forged_field_name_key(
         self,
-    ):
+    ) -> None:
         """A forged field-name key cannot replace unambiguous prefixed mapping children."""
         control = self.post_raw(
             "/hostile-plain-mapping/",
@@ -920,10 +578,11 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
             "/hostile-plain-mapping/",
             (("value", "forged"), ("value-a", "1"), ("value-label", "kept")),
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], {"a": 1, "label": "kept"})
+        self.assertJSONResponseContains(response, {"value": {"a": 1, "label": "kept"}})
 
-    def test_client_validates_a_lone_forged_scalar_instead_of_an_empty_list(self):
+    def test_client_validates_a_lone_forged_scalar_instead_of_an_empty_list(
+        self,
+    ) -> None:
         """An exact-name scalar with no rows is validated, not silently dropped."""
         response = self.client.post(
             "/hostile-integer-list/",
@@ -936,39 +595,35 @@ class HostileNestedForgeryTestCase(HostileClientTestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertIs(body["valid"], False)
-        self.assertTrue(body["errors"]["values"])
+        self.assertNotEqual(body["errors"]["values"], {})
 
-    def test_client_validates_a_lone_forged_scalar_instead_of_an_empty_mapping(self):
+    def test_client_validates_a_lone_forged_scalar_instead_of_an_empty_mapping(
+        self,
+    ) -> None:
         """An exact-name scalar with no children is validated, not silently dropped."""
         response = self.client.post("/hostile-plain-mapping/", {"value": "save"})
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertIs(body["valid"], False)
-        self.assertTrue(body["errors"]["value"])
+        self.assertNotEqual(body["errors"]["value"], {})
 
 
-@override_settings(ROOT_URLCONF=__name__)
-class HostileRenderCostTestCase(HostileClientTestCase):
+@override_settings(ROOT_URLCONF="tests.support.urls")
+class HostileRenderCostTestCase(HostileRequestClientTestCase):
     """Measure the page that a hostile submission makes the server build."""
 
-    def assertForgedTextRowDoesNotRender(self, letter):
+    def test_forged_text_row_does_not_render_scalar_characters(self) -> None:
+        """A forged text row does not render any scalar character as a row."""
         response = self.client.post("/hostile-nested-text-list/", {"values": "abc"})
         self.assertEqual(response.status_code, 200)
-        self.assertNotIn(f'value="{letter}"', response.json()["html"])
+        html = response.json()["html"]
+        self.assertNotIn('value="a"', html)
+        self.assertNotIn('value="b"', html)
+        self.assertNotIn('value="c"', html)
 
-    def test_forged_text_row_does_not_render_letter_a(self):
-        """A forged text row does not render the letter a as a row."""
-        self.assertForgedTextRowDoesNotRender("a")
-
-    def test_forged_text_row_does_not_render_letter_b(self):
-        """A forged text row does not render the letter b as a row."""
-        self.assertForgedTextRowDoesNotRender("b")
-
-    def test_forged_text_row_does_not_render_letter_c(self):
-        """A forged text row does not render the letter c as a row."""
-        self.assertForgedTextRowDoesNotRender("c")
-
-    def test_client_cannot_expand_one_text_key_into_thousands_of_rendered_rows(self):
+    def test_client_cannot_expand_one_text_key_into_thousands_of_rendered_rows(
+        self,
+    ) -> None:
         """A single text key must not create thousands of rows.
 
         A text value renders as one row, so a small request cannot buy a
@@ -986,7 +641,9 @@ class HostileRenderCostTestCase(HostileClientTestCase):
             f"and {payload['rendered_bytes']} bytes",
         )
 
-    def test_aggregate_row_rejection_does_not_quote_a_respected_per_level_limit(self):
+    def test_aggregate_row_rejection_does_not_quote_a_respected_per_level_limit(
+        self,
+    ) -> None:
         """A shared-budget error must name the shared budget.
 
         When the shared budget runs out, cleaning reports ``too_many_forms``.
@@ -1007,7 +664,9 @@ class HostileRenderCostTestCase(HostileClientTestCase):
         self.assertEqual(body["errors"], {"values": ["too_many_forms"]})
         self.assertNotIn("at most 50 forms", " ".join(body["messages"]["values"]))
 
-    def test_a_rejected_oversized_submission_does_not_redisplay_its_rows(self):
+    def test_a_rejected_oversized_submission_does_not_redisplay_its_rows(
+        self,
+    ) -> None:
         """A rejected submission must not render rejected rows.
 
         Cleaning and rendering share the overflow decision, so a refused
@@ -1033,7 +692,9 @@ class HostileRenderCostTestCase(HostileClientTestCase):
             f"and {body['rendered_bytes']} bytes",
         )
 
-    def test_client_cannot_multiply_default_row_caps_with_a_handful_of_keys(self):
+    def test_client_cannot_multiply_default_row_caps_with_a_handful_of_keys(
+        self,
+    ) -> None:
         """Nested totals cannot exceed the default shared cap.
 
         Three outer rows with 900 inner rows claim 2703 rows. The default
@@ -1055,8 +716,8 @@ class HostileRenderCostTestCase(HostileClientTestCase):
         self.assertEqual(body["errors"], {"values": ["too_many_forms"]})
 
 
-@override_settings(ROOT_URLCONF=__name__)
-class HostileRowBudgetTestCase(HostileClientTestCase):
+@override_settings(ROOT_URLCONF="tests.support.urls")
+class HostileRowBudgetTestCase(HostileRequestClientTestCase):
     """Measure the cost to reject hostile nested submissions.
 
     ``submission_countdown`` stops nested totals from multiplying rows. Other
@@ -1083,7 +744,7 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
 
     def test_client_pays_similar_cost_for_a_concentrated_or_spread_out_claim(
         self,
-    ):
+    ) -> None:
         """A spread claim costs about the same as a concentrated claim.
 
         Each ``read_input`` call reserves rows from one shared budget. Both request
@@ -1100,9 +761,8 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
         cheap_start = time.perf_counter()
         cheap_response = self.client.post("/hostile-nested-text-list/", cheap_payload)
         cheap_elapsed = time.perf_counter() - cheap_start
-        self.assertEqual(cheap_response.status_code, 200)
-        self.assertEqual(
-            cheap_response.json()["errors"], {"values": ["too_many_forms"]}
+        self.assertJSONResponseContains(
+            cheap_response, {"errors": {"values": ["too_many_forms"]}}
         )
 
         # The same 2000-row claim, spread across 499 sibling rows instead of
@@ -1122,9 +782,8 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
             "/hostile-nested-text-list/", expensive_payload
         )
         expensive_elapsed = time.perf_counter() - expensive_start
-        self.assertEqual(expensive_response.status_code, 200)
-        self.assertEqual(
-            expensive_response.json()["errors"], {"values": ["too_many_forms"]}
+        self.assertJSONResponseContains(
+            expensive_response, {"errors": {"values": ["too_many_forms"]}}
         )
 
         # Both requests reach the same correct verdict from a similar number
@@ -1157,7 +816,9 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
             self.assertIs(response.json()["valid"], False)
         return best
 
-    def test_client_pays_at_most_linear_cost_for_sibling_mapping_children(self):
+    def test_client_pays_at_most_linear_cost_for_sibling_mapping_children(
+        self,
+    ) -> None:
         """Sibling sequences in a mapping have independent shared budgets.
 
         This matches Django formsets. The form author fixes the sibling count. This
@@ -1189,7 +850,7 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
             "formsets accept",
         )
 
-    def test_client_pays_at_most_linear_cost_for_sibling_list_fields(self):
+    def test_client_pays_at_most_linear_cost_for_sibling_list_fields(self) -> None:
         """Sibling ``ListField`` instances have independent shared budgets.
 
         This is the mapping test without ``DictField``. The form author fixes the
@@ -1218,7 +879,7 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
             "formsets accept",
         )
 
-    def test_client_pays_bounded_cost_three_sequence_levels_deep(self):
+    def test_client_pays_bounded_cost_three_sequence_levels_deep(self) -> None:
         """The shared budget limits work at a third nesting level.
 
         Two outer rows, two middle rows, and 2000 inner rows claim up to 8000 rows.
@@ -1251,7 +912,7 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
             f"{elapsed:.3f}s to correctly reject",
         )
 
-    def _count_rows_built(self):
+    def _count_rows_built(self) -> object:
         """Count row forms built while the returned counter is in scope.
 
         Wall-clock budgets catch a runaway cost but not a small regression.
@@ -1262,7 +923,7 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
         formset_class = nestingdolls.SequenceWidget.RowFormSet
         original = formset_class._construct_form
 
-        def counting(inner_self, index, **kwargs):
+        def counting(inner_self: object, index: object, **kwargs: object) -> object:
             built.append(index)
             return original(inner_self, index, **kwargs)
 
@@ -1270,7 +931,7 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
         self.addCleanup(setattr, formset_class, "_construct_form", original)
         return built
 
-    def _count_formsets_built(self):
+    def _count_formsets_built(self) -> object:
         """Count formsets built while the returned counter is in scope.
 
         Row counts do not detect empty child formsets built after the shared
@@ -1280,7 +941,7 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
         widget_class = nestingdolls.SequenceWidget
         original = widget_class.new_formset
 
-        def counting(inner_self, *args, **kwargs):
+        def counting(inner_self: object, *args: object, **kwargs: object) -> object:
             built.append(kwargs["prefix"])
             return original(inner_self, *args, **kwargs)
 
@@ -1288,7 +949,7 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
         self.addCleanup(setattr, widget_class, "new_formset", original)
         return built
 
-    def test_overflow_skips_empty_later_child_formsets(self):
+    def test_overflow_skips_empty_later_child_formsets(self) -> None:
         """Reject overflow and skip child-formset setup that cannot admit a row.
 
         The first inner row's overdraw unwinds extraction, so the 19 outer
@@ -1300,16 +961,13 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
             "values", outer_total=20, inner_total=2000
         )
         built = self._count_formsets_built()
-        form = SequenceHostileFixtures.NestedTextListForm(data=payload)
+        form = NestedSequenceDeletionForm(data=payload)
 
-        self.assertFalse(form.is_valid())
-        self.assertEqual(
-            form.errors.as_data()["values"][0].code,
-            "too_many_forms",
-        )
+        self.assertFormInvalid(form)
+        self.assertFormErrorCode(form, "values", "too_many_forms")
         self.assertEqual(built, ["values", "values-0", "values"])
 
-    def test_overflow_keeps_no_row_a_forged_claim_bought(self):
+    def test_overflow_keeps_no_row_a_forged_claim_bought(self) -> None:
         """Keep no row past the budget alive to the end of the response.
 
         Building a row is bounded work; keeping one is not. Every surviving
@@ -1329,21 +987,18 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
             "values", outer_total=20, inner_total=2000
         )
         built = self._count_rows_built()
-        form = SequenceHostileFixtures.NestedTextListForm(data=payload)
+        form = NestedSequenceDeletionForm(data=payload)
         bound_field = form["values"]
 
         self.assertIs(bound_field.submission_overflow, True)
         self.assertEqual(list(bound_field.formset.forms), [])
         self.assertEqual(bound_field.data, [])
-        self.assertFalse(form.is_valid())
-        self.assertEqual(
-            form.errors.as_data()["values"][0].code,
-            "too_many_forms",
-        )
+        self.assertFormInvalid(form)
+        self.assertFormErrorCode(form, "values", "too_many_forms")
         # The claim did buy row construction. Nothing may outlive it.
         self.assertGreater(len(built), 0)
 
-    def test_claim_after_exact_budget_still_records_overflow(self):
+    def test_claim_after_exact_budget_still_records_overflow(self) -> None:
         """Let the claim after exact budget use record overflow.
 
         Zero is not overflow. The next child must read its claim and be the
@@ -1358,15 +1013,12 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
             "values-1-TOTAL_FORMS": "1",
             "values-1-INITIAL_FORMS": "0",
         }
-        form = SequenceHostileFixtures.NestedTextListForm(data=payload)
+        form = NestedSequenceDeletionForm(data=payload)
 
-        self.assertFalse(form.is_valid())
-        self.assertEqual(
-            form.errors.as_data()["values"][0].code,
-            "too_many_forms",
-        )
+        self.assertFormInvalid(form)
+        self.assertFormErrorCode(form, "values", "too_many_forms")
 
-    def test_negative_total_forms_cannot_refund_the_shared_budget(self):
+    def test_negative_total_forms_cannot_refund_the_shared_budget(self) -> None:
         """Refuse a negative claim instead of paying it back into the budget.
 
         Django's bound ``total_form_count`` is ``min(TOTAL_FORMS,
@@ -1381,16 +1033,15 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
         )
         payload[f"values-0-{TOTAL_FORM_COUNT}"] = "-1000000"
         built = self._count_rows_built()
-        form = SequenceHostileFixtures.NestedTextListForm(data=payload)
+        form = NestedSequenceDeletionForm(data=payload)
 
-        self.assertFalse(form.is_valid())
-        self.assertEqual(
-            form.errors.as_data()["values"][0].code,
-            "too_many_forms",
-        )
+        self.assertFormInvalid(form)
+        self.assertFormErrorCode(form, "values", "too_many_forms")
         self.assertLessEqual(len(built), 2010)
 
-    def test_client_cannot_bypass_the_shared_budget_with_change_detection(self):
+    def test_client_cannot_bypass_the_shared_budget_with_change_detection(
+        self,
+    ) -> None:
         """Change detection reserves rows from the same budget cleaning uses.
 
         ``Form.has_changed()`` extracts every row before any field is cleaned,
@@ -1421,7 +1072,9 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
             "a fresh budget instead of sharing one",
         )
 
-    def test_client_cannot_bypass_the_shared_budget_with_empty_permitted(self):
+    def test_client_cannot_bypass_the_shared_budget_with_empty_permitted(
+        self,
+    ) -> None:
         """An ``empty_permitted`` form shares the budget too.
 
         ``BaseForm.full_clean`` calls ``has_changed()`` itself for such a form,
@@ -1442,7 +1095,7 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
             "keys claiming 40000 rows",
         )
 
-    def test_client_sees_a_reported_rejection_not_a_silent_truncation(self):
+    def test_client_sees_a_reported_rejection_not_a_silent_truncation(self) -> None:
         """A clipped submission is rejected, not quietly cut down to size.
 
         Extraction records that the budget ran out. Cleaning reads the already
@@ -1462,7 +1115,7 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
         self.assertIs(body["valid"], False)
         self.assertEqual(body["errors"], {"values": ["too_many_forms"]})
 
-    def test_client_keeps_exact_budget_use_valid_after_change_detection(self):
+    def test_client_keeps_exact_budget_use_valid_after_change_detection(self) -> None:
         """Spending the budget exactly still succeeds on the extraction path.
 
         The shared budget must bound hostile multiplication without rejecting a
@@ -1478,7 +1131,9 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
         body = response.json()
         self.assertIs(body["valid"], True, body["errors"])
 
-    def test_client_keeps_a_legitimate_submission_whole_after_change_detection(self):
+    def test_client_keeps_a_legitimate_submission_whole_after_change_detection(
+        self,
+    ) -> None:
         """Change detection must not consume the rows cleaning needs.
 
         A budget spent twice on the same rows would halve it and could reject or
@@ -1505,7 +1160,9 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
         # rows it was sent, and change detection does not double the work.
         self.assertLessEqual(len(built), 16, len(built))
 
-    def test_change_detection_without_initial_rows_validates_no_row_form(self):
+    def test_change_detection_without_initial_rows_validates_no_row_form(
+        self,
+    ) -> None:
         """Change detection answers from extracted values alone.
 
         ``SequenceBoundField._has_changed`` compares extracted values, and
@@ -1517,19 +1174,19 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
         ``has_changed()`` itself for every ``empty_permitted`` form, and
         a hostile submission carries no initial rows, so the validation
         pass would be unread work on every rejection this class measures.
-        ``test_listfield`` holds the other side of the boundary: with
+        ``test_sequencefield_binding`` holds the other side of the boundary: with
         initial rows, a delete mark must still report a change.
         """
         payload = self._amplified_sequence_payload(
             "values", outer_total=2, inner_total=3
         )
-        form = SequenceHostileFixtures.NestedTextListForm(payload)
+        form = NestedSequenceDeletionForm(payload)
 
         validations = []
         formset_class = nestingdolls.SequenceWidget.RowFormSet
         original = formset_class.full_clean
 
-        def counting(inner_self, *args, **kwargs):
+        def counting(inner_self: object, *args: object, **kwargs: object) -> object:
             validations.append(inner_self.prefix)
             return original(inner_self, *args, **kwargs)
 
@@ -1540,7 +1197,7 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
         self.assertIs(form.has_changed(), False)
         self.assertEqual(validations, [])
 
-    def test_rendering_a_bound_mapping_builds_no_second_row_formset(self):
+    def test_rendering_a_bound_mapping_builds_no_second_row_formset(self) -> None:
         """Rendering a bound mapping reuses the rows that cleaning built.
 
         ``BoundField.as_widget`` always computes ``value()``, and the base
@@ -1559,10 +1216,10 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
             "value-rows-0": "1",
             "value-rows-1": "2",
         }
-        form = MappingHostileFixtures.MappingListForm(payload)
+        form = OptionalIntegerSequenceMappingValueForm(payload)
         built = self._count_rows_built()
 
-        self.assertIs(form.is_valid(), True, form.errors)
+        self.assertFormValid(form)
         rows_from_cleaning = len(built)
         self.assertGreater(rows_from_cleaning, 0)
 
@@ -1571,26 +1228,26 @@ class HostileRowBudgetTestCase(HostileClientTestCase):
         self.assertEqual(len(built), rows_from_cleaning)
 
 
-@override_settings(ROOT_URLCONF=__name__)
-class HostileFormPrefixTestCase(HostileClientTestCase):
+@override_settings(ROOT_URLCONF="tests.support.urls")
+class HostileFormPrefixTestCase(HostileRequestClientTestCase):
     """Send the same mapping child under more than one accepted spelling."""
 
-    def test_client_ignores_unprefixed_controls_on_a_prefixed_form(self):
+    def test_client_ignores_unprefixed_controls_on_a_prefixed_form(self) -> None:
         """A control without the form prefix reaches no field."""
         response = self.client.post("/hostile-prefixed-mapping/", {"value-a": "9"})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["errors"], {"value": ["required"]})
+        self.assertJSONResponseContains(response, {"errors": {"value": ["required"]}})
 
-    def test_client_prefers_the_prefixed_control_over_a_forged_bare_control(self):
+    def test_client_prefers_the_prefixed_control_over_a_forged_bare_control(
+        self,
+    ) -> None:
         """A prefixed control wins when both spellings arrive."""
         response = self.post_raw(
             "/hostile-prefixed-mapping/",
             (("value-a", "9"), ("outer-value-a", "5")),
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], {"a": 5})
+        self.assertJSONResponseContains(response, {"value": {"a": 5}})
 
-    def test_client_drops_an_undeclared_child_inside_a_sequence_row(self):
+    def test_client_drops_an_undeclared_child_inside_a_sequence_row(self) -> None:
         """A child name that no row form declares stays out of the value."""
         response = self.client.post(
             "/hostile-row-upload-list/",
@@ -1601,8 +1258,9 @@ class HostileFormPrefixTestCase(HostileClientTestCase):
                 "values-0-untrusted": "dropped",
             },
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["value"], [{"label": "kept", "upload": None}])
+        self.assertJSONResponseContains(
+            response, {"value": [{"label": "kept", "upload": None}]}
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -2,26 +2,32 @@
 
 from __future__ import annotations
 
+import dataclasses
 import unittest
 
+from django import forms
+from django.core.exceptions import ImproperlyConfigured
+from django.test import SimpleTestCase
 from django.test.utils import setup_test_environment, teardown_test_environment
 
-from .support import (
+import nestingdolls
+
+from .support.forms.outputs import (
     DataclassPoint,
-    DataclassPointForm,
-    ImproperlyConfigured,
-    SimpleTestCase,
-    dataclasses,
-    forms,
-    nestingdolls,
+    OutputPointForm,
+    PointWithExtraFieldForm,
+    PointWithRemovedYForm,
+    PointWithZForm,
 )
 
 
-def setUpModule():
+def setUpModule() -> None:
+    """Set up the module test environment."""
     setup_test_environment()
 
 
-def tearDownModule():
+def tearDownModule() -> None:
+    """Tear down the module test environment."""
     teardown_test_environment()
 
 
@@ -29,21 +35,22 @@ class DataclassFieldConstructionTestCase(SimpleTestCase):
     """Make sure ``DataclassField`` accepts or rejects an ``output`` type.
 
     The field checks the ``output`` names against the fields that the child Form
-    class declares."""
+    class declares.
+    """
 
-    def test_rejects_a_non_dataclass_output(self):
+    def test_rejects_a_non_dataclass_output(self) -> None:
+        """Test rejects a non dataclass output."""
         with self.assertRaises(ImproperlyConfigured):
-            nestingdolls.DataclassField(DataclassPointForm, output=tuple)
+            nestingdolls.DataclassField(OutputPointForm, output=tuple)
 
-    def test_rejects_mismatched_output_names(self):
-        class WrongForm(forms.Form):
-            x = forms.IntegerField()
-            z = forms.IntegerField()
-
+    def test_rejects_mismatched_output_names(self) -> None:
+        """Test rejects mismatched output names."""
         with self.assertRaises(ImproperlyConfigured):
-            nestingdolls.DataclassField(WrongForm, output=DataclassPoint)
+            nestingdolls.DataclassField(PointWithZForm, output=DataclassPoint)
 
-    def test_rejects_an_output_with_non_constructor_fields(self):
+    def test_rejects_an_output_with_non_constructor_fields(self) -> None:
+        """Test rejects an output with non constructor fields."""
+
         @dataclasses.dataclass
         class PointWithDerivedValue:
             x: int
@@ -58,40 +65,24 @@ class DataclassFieldConstructionTestCase(SimpleTestCase):
         with self.assertRaises(ImproperlyConfigured):
             nestingdolls.DataclassField(Form, output=PointWithDerivedValue)
 
-    def test_infers_type_from_base_fields_and_fills_removed_fields(self):
-        class Form(forms.Form):
-            x = forms.IntegerField()
-            y = forms.IntegerField()
+    def test_infers_type_from_base_fields_and_fills_removed_fields(self) -> None:
+        """Test infers type from base fields and fills removed fields."""
+        cleaned = nestingdolls.DataclassField(PointWithRemovedYForm).clean({"x": "1"})
 
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.fields.pop("y")
-
-        cleaned = nestingdolls.DataclassField(Form).clean({"x": "1"})
-
-        self.assertTrue(dataclasses.is_dataclass(cleaned))
+        self.assertIs(dataclasses.is_dataclass(cleaned), True)
         self.assertEqual(cleaned.x, 1)
         self.assertIsNone(cleaned.y)
 
-    def test_custom_output_fills_a_field_removed_in_init(self):
+    def test_custom_output_fills_a_field_removed_in_init(self) -> None:
         """A custom output has a name for a field that ``__init__`` removes from the Form."""
-
-        class Form(forms.Form):
-            x = forms.IntegerField()
-            y = forms.IntegerField()
-
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.fields.pop("y")
-
-        cleaned = nestingdolls.DataclassField(Form, output=DataclassPoint).clean(
-            {"x": "1"}
-        )
+        cleaned = nestingdolls.DataclassField(
+            PointWithRemovedYForm, output=DataclassPoint
+        ).clean({"x": "1"})
 
         self.assertIsInstance(cleaned, DataclassPoint)
         self.assertEqual(cleaned, DataclassPoint(x=1, y=None))
 
-    def test_rejects_an_output_that_matches_only_runtime_fields(self):
+    def test_rejects_an_output_that_matches_only_runtime_fields(self) -> None:
         """The output must use names declared by the Form.
 
         Do not use fields after ``__init__`` runs.
@@ -101,28 +92,14 @@ class DataclassFieldConstructionTestCase(SimpleTestCase):
         class XOnly:
             x: int
 
-        class Form(forms.Form):
-            x = forms.IntegerField()
-            y = forms.IntegerField()
-
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.fields.pop("y")
-
         with self.assertRaises(ImproperlyConfigured):
-            nestingdolls.DataclassField(Form, output=XOnly)
+            nestingdolls.DataclassField(PointWithRemovedYForm, output=XOnly)
 
-    def test_field_added_in_init_cleans_under_the_default_output(self):
+    def test_field_added_in_init_cleans_under_the_default_output(self) -> None:
         """The Form adds a field in ``__init__``. The default output does not include it."""
-
-        class Form(forms.Form):
-            x = forms.IntegerField()
-
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.fields["extra"] = forms.IntegerField(required=False)
-
-        cleaned = nestingdolls.DataclassField(Form).clean({"x": "1", "extra": "2"})
+        cleaned = nestingdolls.DataclassField(PointWithExtraFieldForm).clean(
+            {"x": "1", "extra": "2"}
+        )
 
         self.assertEqual(cleaned.x, 1)
         self.assertEqual([field.name for field in dataclasses.fields(cleaned)], ["x"])

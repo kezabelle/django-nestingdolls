@@ -5,7 +5,7 @@ MYPY := $(UV_RUN) mypy
 NPM := npm --silent
 
 PYTHON_TEST_FILES := $(wildcard tests/test_*.py)
-PYTHON_SUPPORT_FILES := tests/support.py tests/testcases.py
+PYTHON_SUPPORT_FILES := $(wildcard tests/support/*.py tests/support/forms/*.py)
 PYTHON_FILES := demo.py nestingdolls pathological.py $(PYTHON_TEST_FILES) $(PYTHON_SUPPORT_FILES) mypy_settings.py
 COMPILED_JS := nestingdolls/static/nestingdolls/sequence.js
 

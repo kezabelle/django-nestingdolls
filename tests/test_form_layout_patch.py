@@ -1,3 +1,5 @@
+"""Test support module."""
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -33,6 +35,16 @@ if not settings.configured:
         ],
     )
     django.setup()
+from .support.forms.composite import (
+    CompositePointAndSequenceForm,
+)
+from .support.forms.mapping import (
+    RequiredMappingPointForm,
+)
+from .support.forms.sequence import (
+    MinimumOneIntegerSequenceForm,
+    MinimumTwoIntegerSequenceForm,
+)
 
 
 @contextmanager
@@ -64,23 +76,14 @@ def squashed(html: str) -> str:
     return " ".join(html.split())
 
 
-class UninstalledApplicationPointForm(forms.Form):
-    a = forms.IntegerField()
-    label = forms.CharField(required=False)
-
-
-class UninstalledApplicationCompositeForm(forms.Form):
-    point = nestingdolls.MappingField(UninstalledApplicationPointForm)
-    values = nestingdolls.ListField(forms.IntegerField(), min_length=2)
-
-
-class FormRenderingPatchTestCase(SimpleTestCase):
+class FormLayoutPatchInstallationTestCase(SimpleTestCase):
     """Test the safety of the form-rendering patch.
 
     The patch installs one time only. It keeps render wrappers from other
-    libraries. It does not change forms that have no composite fields."""
+    libraries. It does not change forms that have no composite fields.
+    """
 
-    def test_installation_is_idempotent(self):
+    def test_installation_is_idempotent(self) -> None:
         """Repeated installation keeps one wrapper around the original renderer.
 
         ``AppConfig.ready()`` can run more than once in one process. It calls
@@ -101,7 +104,7 @@ class FormRenderingPatchTestCase(SimpleTestCase):
         self.assertIs(BaseForm.nestingdolls_original_render, original_render)
         self.assertIs(getattr(BaseForm.render, "__wrapped__", None), original_render)
 
-    def test_patch_wraps_an_existing_render_customization(self):
+    def test_patch_wraps_an_existing_render_customization(self) -> None:
         """The patch preserves an existing render wrapper and its layout."""
         wrapper_layouts = []
         widget_layouts = []
@@ -144,7 +147,7 @@ class FormRenderingPatchTestCase(SimpleTestCase):
         self.assertIs(html, render_results[-1])
         self.assertIs(BaseForm.nestingdolls_original_render, original_render)
 
-    def test_patch_is_a_pass_through_for_forms_without_composite_fields(self):
+    def test_patch_is_a_pass_through_for_forms_without_composite_fields(self) -> None:
         """The patch does not change HTML for a form without composite fields."""
 
         class PlainForm(forms.Form):
@@ -158,13 +161,14 @@ class FormRenderingPatchTestCase(SimpleTestCase):
         self.assertEqual(patched_html, unpatched_html)
 
 
-class FormLayoutTrackingTestCase(SimpleTestCase):
+class FormLayoutPatchStateTestCase(SimpleTestCase):
     """Test that the patch records the active form layout.
 
     Each render gives its layout to its nested widgets. An error or nested render
-    does not change a different render."""
+    does not change a different render.
+    """
 
-    def test_patch_resets_layout_after_render_error(self):
+    def test_patch_resets_layout_after_render_error(self) -> None:
         """A render error restores the default layout for the next render."""
 
         class ExplodingWidget(forms.TextInput):
@@ -178,7 +182,7 @@ class FormLayoutTrackingTestCase(SimpleTestCase):
             Form().as_p()
         self.assertEqual(FormLayout.current(), FormLayout.div)
 
-    def assertRendererPassesLayoutToNestedWidget(self, renderer):
+    def assertRendererPassesLayoutToNestedWidget(self, renderer: object) -> None:  # noqa: D102
         widget_layouts = []
 
         class LayoutWidget(forms.TextInput):
@@ -202,36 +206,29 @@ class FormLayoutTrackingTestCase(SimpleTestCase):
         self.assertIn('name="child-value"', html)
 
     @override_settings(INSTALLED_APPS=("django.forms", "nestingdolls"))
-    def test_django_templates_renderer_passes_layout_to_nested_widget(self):
+    def test_django_templates_renderer_passes_layout_to_nested_widget(self) -> None:
         """The Django templates renderer passes the paragraph layout to its child."""
         self.assertRendererPassesLayoutToNestedWidget(DjangoTemplates())
 
     @override_settings(INSTALLED_APPS=("django.forms", "nestingdolls"))
-    def test_template_settings_renderer_passes_layout_to_nested_widget(self):
+    def test_template_settings_renderer_passes_layout_to_nested_widget(self) -> None:
         """The template settings renderer passes the paragraph layout to its child."""
         self.assertRendererPassesLayoutToNestedWidget(TemplatesSetting())
 
-    def test_default_render_uses_the_renderer_form_template_layout(self):
+    def test_default_render_uses_the_renderer_form_template_layout(self) -> None:
         """``{{ form }}`` picks the layout of the renderer's own form template."""
 
         class PRenderer(DjangoTemplates):
             form_template_name = "django/forms/p.html"
 
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField(), min_length=1)
-
-        html = squashed(str(Form(renderer=PRenderer())))
+        html = squashed(str(MinimumOneIntegerSequenceForm(renderer=PRenderer())))
 
         self.assertIn('<span data-widget="sequence"', html)
         self.assertNotIn('<div data-widget="sequence"', html)
 
-    def test_nested_default_render_does_not_inherit_the_outer_layout(self):
+    def test_nested_default_render_does_not_inherit_the_outer_layout(self) -> None:
         """A ``{{ inner_form }}`` inside ``as_table()`` renders its own div layout."""
-
-        class InnerForm(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField(), min_length=1)
-
-        inner_form = InnerForm()
+        inner_form = MinimumOneIntegerSequenceForm()
 
         class EmbeddingWidget(forms.TextInput):
             def render(self, *args: object, **kwargs: object) -> str:
@@ -245,7 +242,7 @@ class FormLayoutTrackingTestCase(SimpleTestCase):
         self.assertIn('<div data-widget="sequence"', html)
         self.assertNotIn('<table role="presentation">', html)
 
-    def test_custom_template_render_keeps_the_active_layout(self):
+    def test_custom_template_render_keeps_the_active_layout(self) -> None:
         """``form.render("custom.html")`` inside ``as_p()`` uses the ``p`` layout.
 
         A custom template can contain a form in any layout.
@@ -259,10 +256,7 @@ class FormLayoutTrackingTestCase(SimpleTestCase):
                     return self.engine.from_string("{{ form.values }}")
                 return super().get_template(template_name)
 
-        class InnerForm(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField(), min_length=1)
-
-        inner_form = InnerForm(renderer=CustomTemplateRenderer())
+        inner_form = MinimumOneIntegerSequenceForm(renderer=CustomTemplateRenderer())
 
         class EmbeddingWidget(forms.TextInput):
             def render(self, *args: object, **kwargs: object) -> str:
@@ -277,23 +271,16 @@ class FormLayoutTrackingTestCase(SimpleTestCase):
         self.assertNotIn('<div data-widget="sequence"', html)
 
 
-class UnpatchedWidgetRenderingTestCase(SimpleTestCase):
+class UnpatchedCompositeWidgetRenderingTestCase(SimpleTestCase):
     """Test that composite widgets render without the patch.
 
     The mapping widget and sequence widget show their wrappers and child inputs
-    when Django uses its original renderer."""
+    when Django uses its original renderer.
+    """
 
-    def test_mapping_widget_renders_without_patch(self):
+    def test_mapping_widget_renders_without_patch(self) -> None:
         """A mapping widget renders its wrapper and child inputs without the patch."""
-
-        class PointForm(forms.Form):
-            a = forms.IntegerField()
-            label = forms.CharField(required=False)
-
-        class Form(forms.Form):
-            point = nestingdolls.MappingField(PointForm)
-
-        form = Form(initial={"point": {"a": 9, "label": "layout"}})
+        form = RequiredMappingPointForm(initial={"point": {"a": 9, "label": "layout"}})
 
         with without_form_rendering_patch():
             html = form.as_p()
@@ -303,13 +290,9 @@ class UnpatchedWidgetRenderingTestCase(SimpleTestCase):
         self.assertIn('name="point-a"', html)
         self.assertIn('name="point-label"', html)
 
-    def test_sequence_widget_renders_without_patch(self):
+    def test_sequence_widget_renders_without_patch(self) -> None:
         """A sequence widget renders its wrapper and row inputs without the patch."""
-
-        class Form(forms.Form):
-            values = nestingdolls.ListField(forms.IntegerField(), min_length=2)
-
-        form = Form()
+        form = MinimumTwoIntegerSequenceForm()
 
         with without_form_rendering_patch():
             html = form.as_p()
@@ -320,17 +303,20 @@ class UnpatchedWidgetRenderingTestCase(SimpleTestCase):
         self.assertIn('name="values-1"', html)
 
 
-class TemplateDiscoveryTestCase(SimpleTestCase):
+class FormLayoutTemplateDiscoveryTestCase(SimpleTestCase):
     """Test how project settings control template discovery.
 
     The default renderer finds widget templates only when the project installs
     the app. The template-settings renderer finds templates through project
-    template directories."""
+    template directories.
+    """
 
     @override_settings(INSTALLED_APPS=("nestingdolls",))
-    def test_installing_the_app_resolves_templates_and_tracks_paragraph_layout(self):
+    def test_installing_the_app_resolves_templates_and_tracks_paragraph_layout(
+        self,
+    ) -> None:
         """The default renderer finds templates and the patch selects paragraph widgets."""
-        html = squashed(UninstalledApplicationCompositeForm().as_p())
+        html = squashed(CompositePointAndSequenceForm().as_p())
 
         self.assertIn('<span data-widget="mapping"', html)
         self.assertIn('<span data-widget="sequence"', html)
@@ -348,7 +334,7 @@ class TemplateDiscoveryTestCase(SimpleTestCase):
             }
         ],
     )
-    def test_default_renderer_ignores_template_dirs_without_the_app(self):
+    def test_default_renderer_ignores_template_dirs_without_the_app(self) -> None:
         """The default form renderer does not load project template settings."""
         with (
             without_form_rendering_patch(),
@@ -356,7 +342,7 @@ class TemplateDiscoveryTestCase(SimpleTestCase):
                 TemplateDoesNotExist, "nestingdolls/mapping/div.html"
             ),
         ):
-            UninstalledApplicationCompositeForm().as_p()
+            CompositePointAndSequenceForm().as_p()
 
     @override_settings(
         INSTALLED_APPS=("django.forms",),
@@ -369,10 +355,12 @@ class TemplateDiscoveryTestCase(SimpleTestCase):
             }
         ],
     )
-    def test_template_settings_renderer_uses_template_dirs_without_the_app(self):
+    def test_template_settings_renderer_uses_template_dirs_without_the_app(
+        self,
+    ) -> None:
         """The template-settings renderer finds widgets, but cannot track helpers."""
         with without_form_rendering_patch():
-            html = squashed(UninstalledApplicationCompositeForm().as_p())
+            html = squashed(CompositePointAndSequenceForm().as_p())
 
         self.assertIn('<div data-widget="mapping"', html)
         self.assertIn('<div data-widget="sequence"', html)
