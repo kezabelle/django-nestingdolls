@@ -1,0 +1,8 @@
+prune tests
+
+include AGENTS.md
+include nestingdolls/AGENTS.md
+include CHANGELOG.md
+include nestingdolls/static/AGENTS.md
+include nestingdolls/templates/AGENTS.md
+include tests/AGENTS.md

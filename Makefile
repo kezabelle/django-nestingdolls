@@ -62,7 +62,7 @@ test-django: ## Run the suite against Django version $(DJANGO).
 pathological: ## Measure what hostile nested submissions cost. Not part of check.
 	$(PYTHON) pathological.py $(ARGS)
 
-distcheck: ## Build both distributions from the tracked tree and check their metadata.
+distcheck: ## Build both distributions from the tracked tree and check their metadata and contents.
 	@tmp=$$(mktemp -d) ; \
 	status=0 ; \
 	git archive --format=tar $$(git write-tree) | tar -xf - -C $$tmp && \
@@ -70,9 +70,17 @@ distcheck: ## Build both distributions from the tracked tree and check their met
 	$(UV_RUN) twine check --strict $$tmp/dist/* && \
 	sdist_files=$$(tar -tzf $$tmp/dist/*.tar.gz) && \
 	echo "$$sdist_files" | grep -q '/LICENSE$$' && \
+	echo "$$sdist_files" | grep -Eq '^[^/]+/AGENTS\.md$$' && \
+	echo "$$sdist_files" | grep -q '/nestingdolls/AGENTS.md$$' && \
+	echo "$$sdist_files" | grep -Eq '^[^/]+/CHANGELOG\.md$$' && \
+	echo "$$sdist_files" | grep -q '/nestingdolls/static/AGENTS.md$$' && \
+	echo "$$sdist_files" | grep -q '/nestingdolls/templates/AGENTS.md$$' && \
+	echo "$$sdist_files" | grep -q '/tests/AGENTS.md$$' && \
 	echo "$$sdist_files" | grep -q '/nestingdolls/templates/nestingdolls/sequence/row.html$$' && \
 	echo "$$sdist_files" | grep -q '/nestingdolls/static/nestingdolls/sequence.js$$' && \
-	echo "$$sdist_files" | grep -q '/nestingdolls/py.typed$$' || status=1 ; \
+	echo "$$sdist_files" | grep -q '/nestingdolls/py.typed$$' && \
+	! echo "$$sdist_files" | grep -q '/tests/test_' && \
+	! echo "$$sdist_files" | grep -q '/tests/support/' || status=1 ; \
 	if [ $$status -ne 0 ]; then \
 		cat $$tmp/build.log ; \
 		echo "packaging metadata incomplete: the tracked tree does not build a publishable distribution."; \

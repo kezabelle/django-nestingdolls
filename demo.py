@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 import django
 from django import forms
 from django.conf import settings
+from django.contrib.staticfiles.views import serve as serve_static_file
 from django.db import models
 from django.http import Http404, HttpResponse
 from django.template import Context, Template
@@ -46,6 +47,7 @@ if not settings.configured:
         USE_TZ=True,
         STATIC_URL="/static/",
         TIME_ZONE="UTC",
+        STATICFILES_DIRS=(HERE,),
         TEMPLATES=[
             {
                 "BACKEND": "django.template.backends.django.DjangoTemplates",
@@ -104,6 +106,10 @@ class LineItemForm(forms.Form):
 
 
 class ListOfMappingsForm(forms.Form):
+    delivery_method = forms.ChoiceField(
+        choices=[("standard", "Standard"), ("express", "Express")]
+    )
+    contact_email = forms.EmailField()
     items = ListField(
         nestingdolls.MappingField(LineItemForm), min_length=1, max_length=5
     )
@@ -227,42 +233,60 @@ DEMO_TEMPLATE = Template(
     table th {
       vertical-align: top;
     }
+    table td, table th {
+        padding-left: 0;
+        padding-right: 0;
+    }
     ul ul {
       font-size: 100%;
     }
+    /*
     html.is-changing .transition-fade {
       transition: opacity 0.15s;
       opacity: 1;
     }
     html.is-animating .transition-fade { opacity: 0; }
+    */
     </style>
     </head>
     <body>
     <main{% if selected_library == "swup" %} id="swup" class="container transition-fade"{% else %} class="container"{% endif %}{% if selected_library == "htmx" %} hx-boost="true" hx-ext="preload"{% elif selected_library == "unpoly" %} up-main{% elif selected_library == "taxijs" %} data-taxi{% endif %}>
     {% if selected_library == "taxijs" %}<div data-taxi-view>{% endif %}
-    <nav>
-    <ul>
-    <li>
-    <details class="dropdown">
-    <summary>Examples</summary>
-    <ul>{% for url_name, label in pages %}<li><a href="{% url url_name layout=selected_layout jslibrary=selected_library %}"{% if selected_library == "unpoly" %} up-follow{% endif %}{{ preload_attribute }}{% if url_name == current_page %} aria-current="page"{% endif %}>{{ label }}</a></li>{% endfor %}</ul>
-    </details>
-    </li>
-    <li>
-    <details class="dropdown">
-    <summary >Layouts</summary>
-    <ul>{% for layout, layout_label in layouts %}<li><a href="{% url current_page layout=layout jslibrary=selected_library %}"{% if selected_library == "unpoly" %} up-follow{% endif %}{% if layout == selected_layout %} aria-current="page"{% endif %}>{{ layout_label }}</a></li>{% endfor %}</ul>
-    </details>
-    </li>
-    <li>
-    <details class="dropdown">
-    <summary>JavaScript</summary>
-    <ul>{% for library, library_label in libraries %}<li><a href="{% url current_page layout=selected_layout jslibrary=library %}" hx-boost="false" up-follow="false" data-taxi-ignore mu-disabled data-no-swup {% if library == selected_library %} aria-current="page"{% endif %}>{{ library_label }}</a></li>{% endfor %}</ul>
-    </details>
-    </li>
-    </ul>
-    </nav>
 
+    <header>
+        <div style="display:flex;justify-content:center;">
+            <img src="/logo.png" alt="nestingdolls">
+        </div>
+        <div>
+
+        <div style="display:flex;justify-content:center;gap: 1rem;">
+            <div>
+                <details class="dropdown">
+                <summary>Examples</summary>
+                <ul>{% for url_name, label in pages %}<li><a href="{% url url_name layout=selected_layout jslibrary=selected_library %}"{% if selected_library == "unpoly" %} up-follow{% endif %}{{ preload_attribute }}{% if url_name == current_page %} aria-current="page"{% endif %}>{{ label }}</a></li>{% endfor %}</ul>
+                </details>
+            </div>
+            <div>
+                <details class="dropdown">
+                <summary >Layouts</summary>
+                <ul>{% for layout, layout_label in layouts %}<li><a href="{% url current_page layout=layout jslibrary=selected_library %}"{% if selected_library == "unpoly" %} up-follow{% endif %}{% if layout == selected_layout %} aria-current="page"{% endif %}>{{ layout_label }}</a></li>{% endfor %}</ul>
+                </details>
+            </div>
+            <div>
+                <details class="dropdown">
+                <summary>JavaScript</summary>
+                <ul>{% for library, library_label in libraries %}<li><a href="{% url current_page layout=selected_layout jslibrary=library %}" hx-boost="false" up-follow="false" data-taxi-ignore mu-disabled data-no-swup {% if library == selected_library %} aria-current="page"{% endif %}>{{ library_label }}</a></li>{% endfor %}</ul>
+                </details>
+            </div>
+        </div>
+
+        <section style="text-align:center;padding: 1rem 0;margin: 0;">
+        <h1 style="margin:0; font-size: 1rem;">{{ title }}</h1>
+        <h2 style="font-size: 0.75rem;font-weight:normal;margin:0;">{{ description }}</h2>
+        </section>
+
+        </div>
+    </header>
     {% if output %}
     <dialog open closedby="closerequest">
     <article>
@@ -278,11 +302,6 @@ DEMO_TEMPLATE = Template(
     </footer>
     </dialog>
     {% endif %}
-
-    <section style="padding: 1rem 0;margin: 0;">
-    <h1 style="margin:0; font-size: 1rem;">{{ title }}</h1>
-    <h2 style="font-size: 0.75rem;font-weight:normal;margin:0;">{{ description }}</h2>
-    </section>
 
     <section>
     <form method="GET" action="{{ reset_url }}" autocomplete="off"{% if selected_library == "unpoly" %} up-submit{% elif selected_library == "swup" %} data-swup-form{% endif %}>
@@ -432,9 +451,9 @@ class MappingsView(DemoView):
 class ListOfMappingsView(DemoView):
     form_class = ListOfMappingsForm
     title = "List of mappings"
-    description = "Add and remove structured line items."
+    description = "Choose delivery details and add structured line items."
     initial: ClassVar[dict[str, object]] = {
-        "items": [{"description": "Widget", "quantity": 2}]
+        "delivery_method": "standard",
     }
 
 
@@ -464,6 +483,12 @@ class CollectionTypesView(DemoView):
 
 urlpatterns = [
     path("favicon.ico", FaviconView.as_view(), name="favicon"),
+    path(
+        "logo.png",
+        serve_static_file,
+        {"path": "nestingdolls.png"},
+        name="logo",
+    ),
     path(
         "",
         RedirectView.as_view(

@@ -1,8 +1,11 @@
-# django-nestingdolls
+![django-nestingdolls](./nestingdolls.png)
 
-Django's ordinary form fields are good for flat data, but fall flat as soon 
-as you might want any nesting, forcing instead toward separate formset 
-configuration and orchestration. 
+# nestingdolls
+
+Django's ordinary form fields are good for flat data, but fall _**flat**_ (hah!)
+as soon as you might want any nesting, forcing instead toward separate formset 
+configuration and orchestration. It'd be nicer if it were simpler, and more
+declarative...
 
 You know that thing where a form has collected an address, an order, or a
 schedule, then hands you a flat dictionary and says, good luck with that?
@@ -19,9 +22,37 @@ The child forms and fields still do the grown-up work: widgets, type
 conversion, validation, file uploads, and errors. These fields just make sure
 the bits that belong together don't wander off and become loose keys.
 
+## A micro example
+
+Here's a small snapshot of how simple it is, with a form which allows for 
+multiple subforms:
+
+```python
+
+# normal Django form!
+class LineItemForm(forms.Form):
+    description = forms.CharField()
+    quantity = forms.IntegerField(min_value=1)
+
+
+class ListOfMappingsForm(forms.Form):
+    # normal Django field
+    delivery_method = forms.ChoiceField(choices=[("standard", "Standard"), ("express", "Express")])
+    # normal Django field
+    contact_email = forms.EmailField()
+    # here's our special magic new fields!
+    items = nestingdolls.ListField(nestingdolls.DictField(LineItemForm), min_length=1, max_length=5)
+```
+
+and that small definition gives us:
+
+![list of mappings](./nestingdolls-list-of-dicts.gif)
+
+(this example is taken from the git repository's `demo.py`)
+
 ## Install
 
-`django-nestingdolls` needs Python 3.12+ and Django 5.2+.
+`django-nestingdolls` expects Python 3.12+ and Django 5.2+.
 
 ```sh
 python -m pip install django-nestingdolls

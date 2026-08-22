@@ -36,6 +36,7 @@ dependencies = [
 Homepage = "https://github.com/kezabelle/django-nestingdolls"
 Source = "https://github.com/kezabelle/django-nestingdolls"
 Issues = "https://github.com/kezabelle/django-nestingdolls/issues"
+Changelog = "https://github.com/kezabelle/django-nestingdolls/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
