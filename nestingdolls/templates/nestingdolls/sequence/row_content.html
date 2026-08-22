@@ -11,7 +11,6 @@
 The include path here is a variable, but it always comes from Widget.template_name. 
 Never let this path come from submitted data; an attacker could then load any template.
 {% endcomment %}
-{% include row.subwidget.template_name with widget=row.subwidget only %}
 {% comment %}
 The p layout passes ``span`` as ``row_tag``. Its row is inside a Django ``p``.
 Use phrasing content in that row. A ``ul`` start tag closes the ``p``.
@@ -24,3 +23,4 @@ The other layouts include Django's ``ul`` error template.
     {% include "django/forms/errors/list/ul.html" with errors=row.errors error_class=row.errors.error_class only %}
   {% endif %}
 {% endif %}
+{% include row.subwidget.template_name with widget=row.subwidget only %}

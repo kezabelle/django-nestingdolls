@@ -219,6 +219,19 @@ class MappingFieldErrorRenderingTestCase(CompositeFieldTestCase):
         form = OptionalMappingPointForm({"point-a": "bad"})
         self.assertManualVisibleFieldsRenderMessageOnce(form, "Enter a whole number.")
 
+    def test_child_errors_precede_inputs_in_every_layout(self) -> None:
+        """A child error precedes its input in every Django layout."""
+        form = RequiredMappingPointForm({"point-a": "bad"})
+        self.assertFormInvalid(form)
+
+        for layout in ("as_p", "as_table", "as_div", "as_ul"):
+            with self.subTest(layout=layout):
+                html = getattr(form, layout)()
+                self.assertLess(
+                    html.index("Enter a whole number."),
+                    html.index('name="point-a"'),
+                )
+
     def test_multiple_outer_validator_messages_stay_visible(self) -> None:
         """A mapping validator keeps both outer messages."""
 

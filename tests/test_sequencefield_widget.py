@@ -185,7 +185,11 @@ class SequenceWidgetIntegrationTestCase(CompositeFieldTestCase):
             html,
         )
         self.assertIn("data-sequence-actions", html)
-        self.assertIn("nestingdolls/sequence.js", str(form.media))
+        media = str(form.media)
+        self.assertIn("nestingdolls/sequence.js", media)
+        self.assertIn('id="nestingdolls-sequence"', media)
+        self.assertIn('hx-preserve="true"', media)
+        self.assertIn('up-keep="true"', media)
 
         # An invalid bound render keeps the sequence markup in the active layout.
         invalid = MinimumTwoIntegerSequenceForm(
@@ -307,6 +311,25 @@ class SequenceWidgetIntegrationTestCase(CompositeFieldTestCase):
         self.assertIn("data-sequence-empty-row", html)
         self.assertRenderedMessageCount(html, "Enter a whole number.")
         self.assertErrorReferenceResolves(html, "id_values_0_error")
+
+    def test_row_errors_precede_inputs_in_every_layout(self) -> None:
+        """A row error precedes its input in every Django layout."""
+        form = SequenceSubmissionForm(
+            {
+                "values-0": "bad",
+                "values-TOTAL_FORMS": "1",
+                "values-INITIAL_FORMS": "0",
+            }
+        )
+        self.assertFormInvalid(form)
+
+        for layout in ("as_p", "as_table", "as_div", "as_ul"):
+            with self.subTest(layout=layout):
+                html = getattr(form, layout)()
+                self.assertLess(
+                    html.index("Enter a whole number."),
+                    html.index('name="values-0"'),
+                )
 
     def test_compound_row_error_markup_describes_each_child_widget(self) -> None:
         """A compound row error describes each child input."""
