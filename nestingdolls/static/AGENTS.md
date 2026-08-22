@@ -157,6 +157,10 @@ Know these facts:
 - Announce nothing in the page. Send `nestingdolls:sequence-ready`, `-add`,
   `-remove`, and `-change`. Keep `-add` and `-remove` cancelable, and stop the
   action when `dispatch()` returns `false`. The host page owns messages.
+- A host that replaces sequence markup can dispatch
+  `nestingdolls:sequence-enhance` on `document` after insertion. The
+  controller scans the document for unenhanced widgets. Keep this signal
+  framework-neutral; do not add a framework-specific host event.
 
 ## Comments
 

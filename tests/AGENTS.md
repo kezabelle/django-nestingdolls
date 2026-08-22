@@ -114,6 +114,8 @@ database fixtures. Name files `test_*.py`, classes `*TestCase`, and methods
 `sequence.js` with `dom.window.eval`; do not convert it to TypeScript.
 
 - Assert DOM state and dispatched events; the script has no test API.
+- Test the host `nestingdolls:sequence-enhance` signal after inserting a
+  widget. It is a document-level request for enhancement, not a widget event.
 - Reuse the four layout fixtures, `row()`, `rowsContainer()`, and `build()`.
   A row-markup behavior must run against every layout through a shared helper.
 - Use `enhancementFailure()` when malformed markup or a widget can fail

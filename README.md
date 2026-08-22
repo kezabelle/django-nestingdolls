@@ -429,3 +429,7 @@ something? I dunno!
 
 `preventDefault()` stops an add or removal.
 
+If your page replaces sequence markup after it loads, dispatch
+`new Event("nestingdolls:sequence-enhance")` on `document` after insertion.
+The helpers rescan the document and enhance the new sequence widgets.
+

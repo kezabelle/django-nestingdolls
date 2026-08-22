@@ -20,7 +20,7 @@ from django.forms.formsets import (
 )
 from django.forms.utils import ErrorList
 from django.forms.widgets import Media as WidgetMedia
-from django.forms.widgets import MultiWidget, Widget
+from django.forms.widgets import MultiWidget, Script, Widget
 from django.utils.datastructures import MultiValueDict
 from django.utils.functional import cached_property
 
@@ -333,11 +333,11 @@ class MappingWidget(CompositeWidget):
         return any(field.widget.needs_multipart_form for field in self.fields.values())
 
     def _child_media(self) -> WidgetMedia:
-        """Return the media of the child Form.
-
-        ``BaseForm.media`` already aggregates every child widget's media.
-        """
-        return self.form_class().media
+        """Return media from the cached child fields."""
+        media = WidgetMedia()
+        for field in self.fields.values():
+            media += field.widget.media
+        return media
 
     def __deepcopy__(self, memo: dict[int, object]) -> Self:
         """Copy this widget. Do not share its cached child widgets.
@@ -533,7 +533,14 @@ class SequenceWidget(CompositeWidget):
     class Media:
         """Load the script that adds and removes rows in the browser."""
 
-        js = ("nestingdolls/sequence.js",)
+        js = (
+            Script(
+                "nestingdolls/sequence.js",
+                defer=True,
+                id="nestingdolls-sequence",
+                **{"hx-preserve": "true", "up-keep": "true"},
+            ),
+        )
 
     @property
     def child_field(self) -> Field:

@@ -195,6 +195,16 @@ these bubbling `CustomEvent`s:
 | `nestingdolls:sequence-change` | After an add or remove synchronizes controls and focus | `{action: 'add' or 'remove', index, row}` | No |
 | `nestingdolls:sequence-ready` | Once, when enhancement starts | `null` | No |
 
+If a host replaces sequence markup after the first page load, it can request
+enhancement with:
+
+```js
+document.dispatchEvent(new Event("nestingdolls:sequence-enhance"))
+```
+
+Dispatch the event on `document` after insertion. The controller scans the
+document and enhances every sequence widget that it has not enhanced before.
+
 A sequence nested in a freshly added row sends its own
 `nestingdolls:sequence-ready` before the outer sequence sends
 `nestingdolls:sequence-change`.

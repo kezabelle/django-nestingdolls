@@ -896,6 +896,92 @@ test("enhancement emits one ready event per widget", () => {
   assert.deepEqual(readyTargets, [outerRoot, nestedRoot]);
 });
 
+function assertFragmentEventEnhancesSequence(dispatch) {
+  const dom = build("<main></main>");
+  const { document } = dom.window;
+  const target = document.querySelector("main");
+  assert.ok(target);
+  target.innerHTML = `
+    <div
+      data-widget="sequence"
+      data-sequence-maximum="2"
+      data-sequence-absolute-maximum="2"
+    >
+      <input type="hidden" value="1" data-sequence-total>
+      <div data-sequence-rows>
+        <div data-sequence-row data-sequence-index="0">
+          <input name="values-0">
+        </div>
+      </div>
+      <template data-sequence-empty-row>
+        <div data-sequence-row>
+          <input name="values-__prefix__">
+        </div>
+      </template>
+      <template data-sequence-remove-button>
+        <button type="button" data-sequence-remove>Remove</button>
+      </template>
+      <template data-sequence-add-button>
+        <button type="button" data-sequence-add>Add</button>
+      </template>
+    </div>
+  `;
+
+  let enhancementRequests = 0;
+  document.addEventListener("nestingdolls:sequence-enhance", () => {
+    enhancementRequests += 1;
+  });
+  dispatch(dom, target);
+  assert.equal(enhancementRequests, 1);
+
+  const root = target.querySelector('[data-widget="sequence"]');
+  assert.ok(root);
+  const addButton = root.querySelector("[data-sequence-add]");
+  assert.ok(addButton);
+  assert.equal(root.querySelectorAll("[data-sequence-remove]").length, 1);
+
+  addButton.click();
+  assert.equal(root.querySelectorAll("[data-sequence-row]").length, 2);
+}
+
+test("htmx load enhances sequence widgets in swapped content", () => {
+  assertFragmentEventEnhancesSequence((dom, target) => {
+    dom.window.document.dispatchEvent(
+      new dom.window.CustomEvent("htmx:load", { detail: { elt: target } }),
+    );
+  });
+});
+
+test("Unpoly insertion enhances sequence widgets in swapped content", () => {
+  assertFragmentEventEnhancesSequence((dom, target) => {
+    target.dispatchEvent(
+      new dom.window.Event("up:fragment:inserted", { bubbles: true }),
+    );
+  });
+});
+
+test("a host enhancement signal enhances swapped sequence widgets", () => {
+  assertFragmentEventEnhancesSequence((dom) => {
+    dom.window.document.dispatchEvent(
+      new dom.window.Event("nestingdolls:sequence-enhance"),
+    );
+  });
+});
+
+test("mu navigation enhances sequence widgets in swapped content", () => {
+  assertFragmentEventEnhancesSequence((dom) => {
+    dom.window.document.dispatchEvent(new dom.window.Event("mu:after-render"));
+  });
+});
+
+test("Swup navigation enhances sequence widgets in replaced content", () => {
+  assertFragmentEventEnhancesSequence((dom) => {
+    dom.window.document.dispatchEvent(
+      new dom.window.CustomEvent("swup:content:replace"),
+    );
+  });
+});
+
 test("a forced click past the limit adds nothing", () => {
   const dom = build(
     `

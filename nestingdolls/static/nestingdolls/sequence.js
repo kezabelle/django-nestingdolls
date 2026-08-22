@@ -274,11 +274,35 @@
         enhancedWidgets.add(root);
         dispatch(root, "nestingdolls:sequence-ready", null);
     }
-    function start() {
-        document
+    function requestEnhancement() {
+        document.dispatchEvent(new Event("nestingdolls:sequence-enhance"));
+    }
+    function enhanceWidgets(parent) {
+        if (parent instanceof HTMLElement && parent.matches(sequenceWidgetSelector)) {
+            enhanceWidget(parent);
+        }
+        parent
             .querySelectorAll(sequenceWidgetSelector)
             .forEach(enhanceWidget);
     }
+    function start() {
+        enhanceWidgets(document);
+    }
+    // Framework integrations request enhancement through the public event. This
+    // gives hosts and integrations one path after markup replacement.
+    document.addEventListener("nestingdolls:sequence-enhance", start);
+    // htmx swaps form markup without a page load.
+    // https://htmx.org/events/#htmx:load
+    document.addEventListener("htmx:load", requestEnhancement);
+    // Unpoly emits this event after it inserts or updates a fragment.
+    // https://unpoly.com/up:fragment:inserted
+    document.addEventListener("up:fragment:inserted", requestEnhancement);
+    // Swup emits this document event after it replaces the content containers.
+    // https://swup.js.org/hooks/#triggering-dom-events
+    document.addEventListener("swup:content:replace", requestEnhancement);
+    // µJS emits this event after it replaces page content.
+    // https://mujs.org/documentation
+    document.addEventListener("mu:after-render", requestEnhancement);
     if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", start);
         return;
