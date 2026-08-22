@@ -797,6 +797,44 @@ class ListFieldErrorDisplayTestCase(CompositeErrorDisplayAssertions, SimpleTestC
             "Enter a whole number.",
         )
 
+    def test_nested_child_item_errors_do_not_repeat_on_parent_row(self):
+        """Nested reviewer errors render beside reviewers, not their milestone."""
+
+        class MilestoneForm(forms.Form):
+            reviewers = nestingdolls.ListField(
+                forms.EmailField(), required=False, max_length=3
+            )
+
+        class Form(forms.Form):
+            milestones = nestingdolls.ListField(
+                nestingdolls.MappingField(MilestoneForm), min_length=1, max_length=4
+            )
+
+        form = Form(
+            {
+                f"milestones-{TOTAL_FORM_COUNT}": "1",
+                f"milestones-{INITIAL_FORM_COUNT}": "1",
+                f"milestones-{MIN_NUM_FORM_COUNT}": "1",
+                f"milestones-{MAX_NUM_FORM_COUNT}": "4",
+                "milestones-0-DELETE": "",
+                f"milestones-0-reviewers-{TOTAL_FORM_COUNT}": "3",
+                f"milestones-0-reviewers-{INITIAL_FORM_COUNT}": "1",
+                f"milestones-0-reviewers-{MIN_NUM_FORM_COUNT}": "0",
+                f"milestones-0-reviewers-{MAX_NUM_FORM_COUNT}": "3",
+                "milestones-0-reviewers-0": "Grace@example.com",
+                "milestones-0-reviewers-1": "gg",
+                "milestones-0-reviewers-2": "asgsgasg",
+            }
+        )
+        self.assertIs(form.is_valid(), False)
+
+        html = form.as_div()
+
+        self.assertEqual(html.count("Enter a valid email address."), 2)
+        self.assertIn('aria-describedby="id_milestones-0-reviewers_1_error"', html)
+        self.assertIn('aria-describedby="id_milestones-0-reviewers_2_error"', html)
+        self.assertNotIn('id="id_milestones_0_error"', html)
+
     def test_multiple_outer_validator_messages_stay_visible(self):
         """A sequence validator keeps both outer messages."""
 

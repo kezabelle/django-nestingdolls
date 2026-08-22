@@ -907,11 +907,7 @@ class SequenceWidget(CompositeWidget):
             child_value = None
         context = child_widget.get_context(child.html_name, child_value, child_attrs)
         subwidget: dict[str, object] = context["widget"]
-        errors = [
-            message
-            for error in form.errors.as_data().get(row_value_name, [])
-            for message in error.messages
-        ]
+        errors = list(child.errors)
         row: dict[str, object] = {
             "index": index,
             "delete_name": f"{form.prefix}-{DELETION_FIELD_NAME}",
@@ -924,8 +920,11 @@ class SequenceWidget(CompositeWidget):
         id_value = child_attrs.get("id")
         child_id = id_value if isinstance(id_value, str) else None
         # Use the form error class and renderer for row errors.
+        # django-stubs excludes lazy translation promises that Django accepts.
         row["errors"] = form.error_class(
-            errors, renderer=form.renderer, field_id=child_id
+            errors,  # type: ignore[arg-type]
+            renderer=form.renderer,
+            field_id=child_id,
         )
         error_id = f"{child_id}_error" if child_id else None
         self._mark_row_invalid(subwidget, error_id)
