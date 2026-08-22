@@ -271,7 +271,14 @@ class MappingField(CompositeField):
         missing or scalar submission has no bound subform, so the base field
         reports the ordinary "invalid" or "required" error.
         """
-        if self.disabled or not bound_field.is_bound_subform:
+        if self.disabled:
+            return super()._clean_bound_field(bound_field)  # type: ignore[misc]
+        if not bound_field.is_bound_subform:
+            if bound_field.data is None and (
+                bound_field.html_name in bound_field.form.data
+                or bound_field.html_name in bound_field.form.files
+            ):
+                raise MappingInputValidationError(self.error_messages["invalid"])
             return super()._clean_bound_field(bound_field)  # type: ignore[misc]
         return self._clean_child_form(bound_field.subform)
 

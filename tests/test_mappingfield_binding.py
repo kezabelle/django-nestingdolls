@@ -156,6 +156,24 @@ class MappingFieldBindingTestCase(CompositeFieldTestCase):
             },
         )
 
+    def test_exact_none_with_initial_file_is_invalid_mapping_input(self) -> None:
+        """A present null cannot retain an initial file as a mapping submission."""
+
+        class ChildForm(forms.Form):
+            document = forms.FileField(required=False)
+
+        class Form(forms.Form):
+            asset = nestingdolls.MappingField(ChildForm, required=False)
+
+        initial = SimpleUploadedFile("saved.txt", b"saved")
+        form = Form(
+            {"asset": None},
+            initial={"asset": {"document": initial}},
+        )
+
+        self.assertFormInvalid(form)
+        self.assertFormErrorCode(form, "asset", "invalid")
+
     def test_rejects_non_mapping_input(self) -> None:
         """It rejects an exact scalar value."""
         form = RequiredMappingPointForm({"point": "not a mapping"})

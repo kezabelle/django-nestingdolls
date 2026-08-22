@@ -80,6 +80,24 @@ class CompositeWidgetBaseContractTestCase(SimpleTestCase):
         with self.assertRaises(NotImplementedError):
             str(widget.media)
 
+    def test_mapping_media_reuses_cached_fields(self) -> None:
+        """Reading mapping media does not build another child Form."""
+
+        class CountingForm(forms.Form):
+            value = forms.CharField()
+            instances = 0
+
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                type(self).instances += 1
+                super().__init__(*args, **kwargs)
+
+        field = nestingdolls.MappingField(CountingForm)
+
+        _ = field.widget.media
+        _ = field.widget.media
+
+        self.assertEqual(CountingForm.instances, 2)
+
     def test_widget_media_merges_every_declaration_in_the_mro(self) -> None:
         """A widget subclass adds media without removing inherited media.
 

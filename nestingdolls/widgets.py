@@ -761,6 +761,10 @@ class SequenceWidget(CompositeWidget):
             source = files
         else:
             source = None
+        # For exact input, SequenceBoundField already did this scan.
+        # Do it again. Do not add a parameter for its result.
+        # Custom SequenceWidget classes can override this public Django method
+        # with three arguments. An added argument would break those classes.
         has_row_input = self.has_row_input(data, files, name)
         if (
             source is None

@@ -65,6 +65,25 @@ class SequenceFieldBindingTestCase(CompositeFieldTestCase):
             response, {"valid": True, "values": [1, 2, 3], "errors": {}}
         )
 
+    def test_exact_sequence_input_accepts_a_legacy_widget_override(self) -> None:
+        """Exact input keeps Django's three-argument widget extraction hook."""
+
+        class LegacyWidget(nestingdolls.SequenceWidget):
+            def value_from_datadict(
+                self, data: object, files: object, name: object
+            ) -> object:
+                return super().value_from_datadict(data, files, name)
+
+        class Form(forms.Form):
+            values = nestingdolls.SequenceField(
+                forms.IntegerField(), widget=LegacyWidget
+            )
+
+        form = Form({"values": ["1", "2"]})
+
+        self.assertFormValid(form)
+        self.assertEqual(form.cleaned_data["values"], [1, 2])
+
     def test_client_accepts_prefixed_row_list_rows(self) -> None:
         """Django-managed prefixed rows submit the same scalar list."""
         response = self.client.post(

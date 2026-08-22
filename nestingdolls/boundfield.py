@@ -216,14 +216,10 @@ class MappingBoundField(CompositeBoundField):
         widget = self.field.widget
         if widget.has_child_keys(self.form.data, self.form.files, self.html_name):
             return True
-        # An exact value is the value under this field's own name.
-        exact_value = None
         if self.html_name in self.form.data:
-            exact_value = self.form.data.get(self.html_name)
-        elif self.html_name in self.form.files:
-            exact_value = self.form.files.get(self.html_name)
-        if exact_value is not None:
-            return isinstance(exact_value, Mapping)
+            return isinstance(self.form.data.get(self.html_name), Mapping)
+        if self.html_name in self.form.files:
+            return isinstance(self.form.files.get(self.html_name), Mapping)
         return (
             isinstance(self.initial, dict)
             and bool(self.initial)
