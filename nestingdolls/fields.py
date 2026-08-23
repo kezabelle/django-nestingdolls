@@ -137,7 +137,8 @@ class MappingField(CompositeField):
         bound_field_class: type[MappingBoundField] | None = None,
     ) -> None:
         """Configure a fixed mapping field."""
-        if not isinstance(form_class, type) or not issubclass(form_class, BaseForm):
+        # Untyped callers must receive the documented configuration error.
+        if not isinstance(form_class, type) or not issubclass(form_class, BaseForm):  # type: ignore[redundant-expr]
             raise ImproperlyConfigured(
                 "form_class argument for MappingField must be a BaseForm subclass"
             )

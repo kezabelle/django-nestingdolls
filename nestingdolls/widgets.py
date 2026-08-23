@@ -404,7 +404,7 @@ class SequenceWidget(CompositeWidget):
             for source in (self.data, self.files):
                 getlist = getattr(source, "getlist", None)
                 for key in source:
-                    if not isinstance(key, str) or key[:start] != prefix:
+                    if key[:start] != prefix:
                         continue
                     end = key.find("-", start)
                     last_name = key.rpartition("-")[2]
@@ -703,11 +703,7 @@ class SequenceWidget(CompositeWidget):
         start = len(prefix)
         for source in (data, files):
             for key in source:
-                if (
-                    isinstance(key, str)
-                    and key[:start] == prefix
-                    and "0" <= key[start : start + 1] <= "9"
-                ):
+                if key[:start] == prefix and "0" <= key[start : start + 1] <= "9":
                     return True
         return False
 
