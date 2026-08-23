@@ -385,6 +385,60 @@ matching layouts without the app, call
 `nestingdolls.patches.install_form_rendering_patch()` once at startup - your own
 `AppConfig.ready()` is a good place.
 
+### Use django-pattern-library
+
+If you use [django-pattern-library](https://torchbox.github.io/django-pattern-library/),
+render a real Django form in the pattern. `DictField` and `ListField` need the
+widget context Django creates while rendering a bound field, so a standalone
+widget pattern or YAML context will not do.
+
+Put a form pattern in one of the directories configured for the pattern
+library. Render it like the form template your application uses:
+
+```django
+{# templates/patterns/forms/conference.html #}
+{{ form.media }}
+<form method="post">
+  {{ form.as_div }}
+</form>
+```
+
+Give the pattern its form with a template-specific context modifier:
+
+```python
+# myapp/pattern_contexts.py
+from pattern_library import register_context_modifier
+
+from .forms import ConferenceForm
+
+
+@register_context_modifier(template="patterns/forms/conference.html")
+def add_conference_form(*, context, request):
+    context["form"] = ConferenceForm(
+        initial={
+            "agenda": {
+                "host": "Ada",
+                "sessions": [{"room": "Aster", "seats": 20}],
+            }
+        }
+    )
+```
+
+Then add that directory to `PATTERN_LIBRARY`:
+
+```python
+PATTERN_LIBRARY = {
+    "SECTIONS": (
+        ("forms", ["patterns/forms"]),
+    ),
+}
+```
+
+Make separate patterns and context modifiers for valid, invalid, and deeply
+nested states. The modifier can construct the Django form or bound fields that
+each state needs; a YAML context cannot. Keep `{{ form.media }}` in the pattern
+or its base template so sequence controls load.
+
 ## Design notes
 
 ### Why a `Form` for mappings and a `Field` for sequences
