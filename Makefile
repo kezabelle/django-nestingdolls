@@ -69,6 +69,7 @@ distcheck: ## Build both distributions from the tracked tree and check their met
 	uv build --out-dir $$tmp/dist $$tmp >$$tmp/build.log 2>&1 && \
 	$(UV_RUN) twine check --strict $$tmp/dist/* && \
 	sdist_files=$$(tar -tzf $$tmp/dist/*.tar.gz) && \
+	wheel_files=$$(unzip -Z1 $$tmp/dist/*.whl) && \
 	echo "$$sdist_files" | grep -q '/LICENSE$$' && \
 	echo "$$sdist_files" | grep -Eq '^[^/]+/AGENTS\.md$$' && \
 	echo "$$sdist_files" | grep -q '/nestingdolls/AGENTS.md$$' && \
@@ -80,7 +81,10 @@ distcheck: ## Build both distributions from the tracked tree and check their met
 	echo "$$sdist_files" | grep -q '/nestingdolls/static/nestingdolls/sequence.js$$' && \
 	echo "$$sdist_files" | grep -q '/nestingdolls/py.typed$$' && \
 	! echo "$$sdist_files" | grep -q '/tests/test_' && \
-	! echo "$$sdist_files" | grep -q '/tests/support/' || status=1 ; \
+	! echo "$$sdist_files" | grep -q '/tests/support/' && \
+	package_docs=$$(git ls-tree -r --name-only $$(git write-tree) -- nestingdolls | grep -E '^nestingdolls/(.*/)?(AGENTS|README)\.md$$' | sort) && \
+	wheel_docs=$$(echo "$$wheel_files" | grep -E '^nestingdolls/(.*/)?(AGENTS|README)\.md$$' | sort) && \
+	test "$$wheel_docs" = "$$package_docs" || status=1 ; \
 	if [ $$status -ne 0 ]; then \
 		cat $$tmp/build.log ; \
 		echo "packaging metadata incomplete: the tracked tree does not build a publishable distribution."; \

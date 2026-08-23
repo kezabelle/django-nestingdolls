@@ -57,7 +57,10 @@ version = { attr = "nestingdolls.__version__" }
 
 [tool.setuptools.package-data]
 nestingdolls = [
+    "AGENTS.md",
     "README.md",
+    "**/AGENTS.md",
+    "**/README.md",
     "py.typed",
     "static/**/*.js",
     "static/**/*.ts",
