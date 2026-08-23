@@ -1,4 +1,4 @@
-![django-nestingdolls](./nestingdolls.png)
+![django-nestingdolls](https://raw.githubusercontent.com/kezabelle/django-nestingdolls/main/nestingdolls.png)
 
 # nestingdolls
 
@@ -46,7 +46,7 @@ class ListOfMappingsForm(forms.Form):
 
 and that small definition gives us:
 
-![list of mappings](./nestingdolls-list-of-dicts.gif)
+![list of mappings](https://raw.githubusercontent.com/kezabelle/django-nestingdolls/main/nestingdolls-list-of-dicts.gif)
 
 (this example is taken from the git repository's `demo.py`)
 
