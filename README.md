@@ -432,6 +432,30 @@ It's the same as `SetField`, but giving back an immutable `frozenset` instead.
 | `absolute_max` | The hard cap on submitted rows, including rows Django must reject before cleaning. |
 
 
+## Progressive enhancement
+
+There's a `sequence.js` file attached to all `SequenceField` for use with 
+Django's normal static/form media stuff.
+
+It exists to allow for add and removal of "rows" (e.g. "add another copy of 
+this integer field") in the same way Django's admin inlines do. It's 
+vanilla JS, and emits a few events (see below). It obeys the min/max values
+for the field, disabling the add/remove buttons as necessary.
+
+The buttons are client-side generated and do not exist directly in the HTML
+except through the use of a `<template>` node on the appropriate widget.
+
+The demo gif at the top of this document showcases it in action, fwiw.
+
+It should support integration out of the box with:
+- [htmx](https://htmx.org/)
+- [Unpoly](https://unpoly.com/)
+- [swup](https://swup.js.org/)
+- [µJS](https://mujs.org/)
+- [Taxi.js](https://taxi.js.org/)
+
+at least for the simple configuration cases.
+
 ## Design notes
 
 ### The render patch
