@@ -25,6 +25,7 @@ script does not run.
 | `make tscheck` | Checks types. Writes nothing. |
 | `make jstest` | Runs the jsdom tests on the compiled file. |
 | `make jsdrift` | Rebuilds, compares with `cmp`, and restores the file that was on disk. Fails when `sequence.js` is not the current build of `sequence.ts`. |
+| `make jscov` | Runs the jsdom tests with node coverage of `sequence.js`. Not part of `check`. |
 
 Do this after each TypeScript edit, in this order:
 
@@ -59,8 +60,8 @@ Know these facts:
 - The file is a classic script. Do not write `import`, `export`,
   `import.meta`, a dynamic `import()`, or a top-level `await`. One `export`
   makes the output a module. Django loads the file with a plain `<script>` tag
-  through `SequenceWidget.Media.js`, and the tests run it with
-  `dom.window.eval`. Both break.
+  through `SequenceWidget.Media.js`, and the tests run it as a classic script
+  in each jsdom window with `vm.Script`. Both break.
 - Only the DOM and ES2022 globals exist. `process`, `require`, `module`,
   `Buffer`, and `__dirname` are not available. No downlevel transform runs,
   so write only what an ES2022 browser gives you.
@@ -150,10 +151,13 @@ Know these facts:
 - Disable an unavailable button and set `aria-disabled`. Never hide it. A
   hidden button leaves the accessibility tree.
 - Hide a removed row with `hidden` and with inline `display: none`, keep its
-  delete input enabled, and disable each of its other controls.
-- Client limit checks improve the interface only. `data-sequence-maximum` and
-  `data-sequence-absolute-maximum` come from the server, and the server checks
-  every limit again. Never treat a client check as protection.
+  own delete input enabled, and disable each of its other controls, nested
+  delete inputs included.
+- Client limit checks improve the interface only. `data-sequence-minimum`,
+  `data-sequence-maximum`, and `data-sequence-absolute-maximum` come from the
+  server, and the server checks every limit again. `data-sequence-minimum` is
+  the removal floor: `min_length` for a required field, `0` for an optional
+  one. Never treat a client check as protection.
 - Announce nothing in the page. Send `nestingdolls:sequence-ready`, `-add`,
   `-remove`, and `-change`. Keep `-add` and `-remove` cancelable, and stop the
   action when `dispatch()` returns `false`. The host page owns messages.

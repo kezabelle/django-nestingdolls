@@ -32,19 +32,22 @@ Keep the top-level template names stable. Python selects them by name.
   widgets. Keep widget-specific structure local.
 - Prefer small, obvious templates with explicit `only` includes over clever
   template abstraction. Keep whitespace handling simple.
+- `as_div()` puts a composite in Django's `<fieldset>`, which holds the outer
+  help and error references. The other layouts have no fieldset, so their
+  composite wrapper gets `role="group"` and those references instead, from
+  `wrapper_attrs` or `group_attrs`. Rows and child controls do not repeat them.
+- Sequence rows print `row.widget_html`, which `SequenceWidget` renders with
+  the row form's renderer. Do not include the child template instead.
 
-## Safety invariants
+## Safety invariant
 
-Three templates carry two invariants that a refactor can silently break. Each
-is commented in place; do not remove those comments.
+One template carries an invariant that a refactor can silently break. It is
+commented in place; do not remove that comment.
 
 - `sequence/row.html` interpolates `row_tag` and `body_tag` into markup. The
   only callers are the four layout templates in `sequence/`, and each passes
   a hard-coded literal from a closed set (`div`, `span`, `li`, `tr` and
   `td` or empty). Never add a caller that passes a non-literal value.
-- `sequence/row_content.html` and `sequence/hidden.html` `{% include %}` a
-  variable template path. The value always comes from `Widget.template_name`,
-  i.e. developer code. A data-derived value there is a path traversal.
 
 ## Editing workflow
 

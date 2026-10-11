@@ -1,6 +1,6 @@
 {% if field.label %}
   {% if field.use_fieldset %}
-    <span>{{ field.label }}</span>
+    <span{% if field.label_id %} id="{{ field.label_id }}"{% endif %}>{{ field.label }}</span>
   {% else %}
     {{ field.label_tag }}
   {% endif %}

@@ -11,6 +11,7 @@ from django.forms.utils import ErrorList
 from django.http import QueryDict
 from django.template import Context, Template
 from django.test import SimpleTestCase
+from django.test.html import Element, parse_html
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -46,6 +47,66 @@ class TestQueryDict(QueryDict):
 
 class MarkedRenderer(DjangoTemplates):
     """Stand in for a project renderer, identified by object identity."""
+
+
+class WidgetTemplateMarkerRenderer(DjangoTemplates):
+    """Replace one widget template with a marker that keeps the widget name."""
+
+    def __init__(self, replaced_template_name: str) -> None:
+        super().__init__()
+        self.replaced_template_name = replaced_template_name
+
+    def get_template(self, template_name: str) -> object:
+        """Return the marker for the replaced template, else the real one."""
+        if template_name == self.replaced_template_name:
+            return self.engine.from_string(
+                '<marker data-name="{{ widget.name }}"></marker>'
+            )
+        return super().get_template(template_name)
+
+
+def rendered_elements(html: str) -> list[Element]:
+    """Return every element of ``html``, parents before their children."""
+    elements = [parse_html(html)]
+    for element in elements:
+        elements.extend(
+            child for child in element.children if isinstance(child, Element)
+        )
+    return elements
+
+
+def rendered_controls(html: str, name_prefix: str) -> dict[str, dict[str, str | None]]:
+    """Return the attributes of each form control whose name has the prefix.
+
+    The result maps each control name to its attributes. A boolean attribute
+    such as ``disabled`` has the value ``None``.
+    """
+    controls: dict[str, dict[str, str | None]] = {}
+    for element in rendered_elements(html):
+        attributes = dict(element.attributes)
+        name = attributes.get("name") or ""
+        if element.name in ("input", "select", "textarea", "button") and (
+            name.startswith(name_prefix)
+        ):
+            controls[name] = attributes
+    return controls
+
+
+def rendered_wrapper(html: str, widget: str) -> dict[str, str | None]:
+    """Return the attributes of the first ``data-widget`` wrapper of ``widget``."""
+    return next(
+        attributes
+        for element in rendered_elements(html)
+        if (attributes := dict(element.attributes)).get("data-widget") == widget
+    )
+
+
+def rendered_text(element: Element) -> str:
+    """Return the text of ``element`` and its descendants in document order."""
+    return "".join(
+        child if isinstance(child, str) else rendered_text(child)
+        for child in element.children
+    )
 
 
 class CompositeFieldTestCase(SimpleTestCase):
@@ -136,6 +197,44 @@ class CompositeFieldTestCase(SimpleTestCase):
         self.assertEqual(sorted(composite_classes), sorted(set(composite_classes)))
         self.assertEqual(sorted(composite_classes), sorted(baseline_classes))
 
+    def assertGroupIsNamedByLabel(self, html: str, widget: str, label: str) -> None:
+        """Assert a widget's group wrapper is named by its field's ``<label>``.
+
+        The wrapper is a ``role="group"`` element with no ``aria-label``. Its
+        ``aria-labelledby`` holds one id, and the one ``<label>`` whose text is
+        ``label`` (ignoring a trailing colon) carries that id.
+        """
+        wrapper = rendered_wrapper(html, widget)
+        self.assertEqual(wrapper.get("role"), "group")
+        self.assertIsNone(wrapper.get("aria-label"))
+        ids = (wrapper.get("aria-labelledby") or "").split()
+        self.assertEqual(len(ids), 1)
+        labels = [
+            element
+            for element in rendered_elements(html)
+            if element.name == "label"
+            and rendered_text(element).strip().removesuffix(":") == label
+        ]
+        self.assertEqual(len(labels), 1)
+        self.assertEqual(dict(labels[0].attributes).get("id"), ids[0])
+
+    def assertDivGroupKeepsItsFieldsetName(
+        self, html: str, widget: str, label: str
+    ) -> None:
+        """Assert the div layout names the field with its fieldset and legend.
+
+        The one ``<legend>`` text is ``label`` (ignoring a trailing colon). The
+        inner wrapper adds no group role or name.
+        """
+        wrapper = rendered_wrapper(html, widget)
+        for name in ("role", "aria-label", "aria-labelledby"):
+            self.assertIsNone(wrapper.get(name), name)
+        elements = rendered_elements(html)
+        self.assertEqual([e.name for e in elements].count("fieldset"), 1)
+        legends = [e for e in elements if e.name == "legend"]
+        self.assertEqual(len(legends), 1)
+        self.assertEqual(rendered_text(legends[0]).strip().removesuffix(":"), label)
+
     def assertOuterValidatorErrorForForm(
         self, form: forms.BaseForm, field_name: str
     ) -> None:
@@ -151,7 +250,32 @@ class CompositeFieldTestCase(SimpleTestCase):
         self.assertFormInvalid(form)
         self.assertBoundFieldErrors(form, field_name, [])
         self.assertIn(message, list(form.errors[field_name]))
-        self.assertIs(form[field_name].errors, form[field_name].errors)
+
+    def assertLateOuterErrorRendersOnce(
+        self, form: forms.BaseForm, field_name: str, child_message: str
+    ) -> None:
+        """Assert an outer error added after a first read reaches the field."""
+        self.assertFormInvalid(form)
+        self.assertBoundFieldErrors(form, field_name, [])
+        form.add_error(field_name, "Late outer error.")
+        self.assertBoundFieldErrors(form, field_name, ["Late outer error."])
+        html = form.as_div()
+        self.assertRenderedMessageCount(html, "Late outer error.")
+        self.assertRenderedMessageCount(html, child_message)
+
+    def assertHiddenCompositeErrorRendersOnce(
+        self, form: forms.BaseForm, field_name: str, message: str
+    ) -> None:
+        """Assert a hidden composite shows its child error once, at the top."""
+        self.assertFormInvalid(form)
+        self.assertBoundFieldErrors(form, field_name, [message])
+        for layout in ("as_div", "as_p", "as_ul", "as_table"):
+            with self.subTest(layout=layout):
+                html = getattr(form, layout)()
+                self.assertRenderedMessageCount(
+                    html, f"(Hidden field {field_name}) {message}"
+                )
+                self.assertRenderedMessageCount(html, message)
 
     def assertManualVisibleFieldsRenderMessageOnce(
         self, form: forms.BaseForm, message: str
@@ -257,7 +381,3 @@ class CompositeFieldTestCase(SimpleTestCase):
         self.assertBoundFieldErrors(form, field.name, [])
         self.assertNotEqual(list(form.errors[field.name]), [])
         self.assertCssClassesMatchBaseline(field, baseline)
-        for extra in ("mine yours", ["mine", "yours"]):
-            with self.subTest(extra=extra):
-                self.assertCssClassesMatchBaseline(field, baseline, extra)
-        self.assertRenderedMessageCount(form.as_div(), "has-error", 2)

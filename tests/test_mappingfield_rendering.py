@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import unittest
 
 from django import forms
@@ -19,12 +18,35 @@ from .support.forms.mapping import (
     OptionalMappingPointForm,
     RequiredMappingPointForm,
     TrippableMappingPointForm,
+    ValidatedMappingPointForm,
 )
 from .support.testcases import (
     CompositeFieldTestCase,
     MarkedErrorList,
     MarkedRenderer,
+    rendered_controls,
+    rendered_elements,
+    rendered_wrapper,
 )
+
+LAYOUTS = ("as_div", "as_p", "as_ul", "as_table")
+
+
+def child_error_form() -> forms.Form:
+    """Return a bound form whose mapping and sequence children both fail."""
+
+    class Form(forms.Form):
+        point = nestingdolls.MappingField(MappingPointForm)
+        values = nestingdolls.SequenceField(forms.IntegerField())
+
+    return Form(
+        {
+            "point-label": "missing a",
+            "values-TOTAL_FORMS": "1",
+            "values-INITIAL_FORMS": "0",
+            "values-0-value": "bad",
+        }
+    )
 
 
 def setUpModule() -> None:
@@ -43,23 +65,11 @@ class MappingFieldRenderingTestCase(CompositeFieldTestCase):
     Check wrappers and resolvable error references in every layout.
     """
 
-    def assertChildErrorReferencesResolve(self, renderer: object) -> None:  # noqa: D102
-
-        class Form(forms.Form):
-            point = nestingdolls.MappingField(MappingPointForm)
-            values = nestingdolls.ListField(forms.IntegerField())
-
-        form = Form(
-            {
-                "point-label": "missing a",
-                "values-TOTAL_FORMS": "1",
-                "values-INITIAL_FORMS": "0",
-                "values-0": "bad",
-            }
-        )
+    def test_child_error_renders_inline_and_is_referenced_by_its_input(self) -> None:
+        """A child error renders once inside the mapping, not on the outer field."""
+        form = RequiredMappingPointForm({"point-label": "missing a"})
         self.assertFormInvalid(form)
 
-        # The outer field owns no error; the subform renders it exactly once.
         self.assertBoundFieldErrors(form, "point", [])
         rendered = str(form["point"])
         self.assertRenderedMessageCount(rendered, "This field is required.")
@@ -74,71 +84,53 @@ class MappingFieldRenderingTestCase(CompositeFieldTestCase):
             paragraphs,
         )
 
-        elements = [parse_html(getattr(form, renderer)())]
-        for element in elements:
-            elements.extend(
-                child for child in element.children if isinstance(child, Element)
-            )
+    def test_every_layout_resolves_child_error_references(self) -> None:
+        """Every layout renders unique ids and resolves every described-by id."""
+        form = child_error_form()
+        self.assertFormInvalid(form)
 
-        element_attributes = [dict(element.attributes) for element in elements]
-        ids = [
-            attributes["id"] for attributes in element_attributes if "id" in attributes
-        ]
-        self.assertEqual(len(ids), len(set(ids)))
-        self.assertIn("id_point-a_error", ids)
-        self.assertIn("id_values_0_error", ids)
-        for attributes in element_attributes:
-            for reference in attributes.get("aria-describedby", "").split():
-                self.assertIn(reference, ids)
+        for layout in LAYOUTS:
+            with self.subTest(layout=layout):
+                elements = [parse_html(getattr(form, layout)())]
+                for element in elements:
+                    elements.extend(
+                        child
+                        for child in element.children
+                        if isinstance(child, Element)
+                    )
 
-    def test_div_layout_resolves_child_error_references(self) -> None:
-        """The div layout resolves every child error reference."""
-        self.assertChildErrorReferencesResolve("as_div")
+                element_attributes = [dict(element.attributes) for element in elements]
+                ids = [
+                    attributes["id"]
+                    for attributes in element_attributes
+                    if "id" in attributes
+                ]
+                self.assertEqual(len(ids), len(set(ids)))
+                self.assertIn("id_point-a_error", ids)
+                self.assertIn("id_values_0_error", ids)
+                for attributes in element_attributes:
+                    for reference in attributes.get("aria-describedby", "").split():
+                        self.assertIn(reference, ids)
 
-    def test_p_layout_resolves_child_error_references(self) -> None:
-        """The paragraph layout resolves every child error reference."""
-        self.assertChildErrorReferencesResolve("as_p")
-
-    def test_ul_layout_resolves_child_error_references(self) -> None:
-        """The list layout resolves every child error reference."""
-        self.assertChildErrorReferencesResolve("as_ul")
-
-    def test_table_layout_resolves_child_error_references(self) -> None:
-        """The table layout resolves every child error reference."""
-        self.assertChildErrorReferencesResolve("as_table")
-
-    def assertMappingChildFormAndWrapperRender(self, renderer: object) -> None:  # noqa: D102
-
+    def test_every_layout_renders_the_mapping_child_form_and_wrapper(self) -> None:
+        """Every layout renders the wrapper, both child inputs, and one hidden initial."""
         form = HiddenInitialMappingPointForm(
             initial={"point": {"a": 9, "label": "layout"}}
         )
-        html = getattr(form, renderer)()
-        self.assertIn('data-widget="mapping"', html)
-        self.assertIn('data-mapping-field="point"', html)
-        self.assertIn('id="id_point_widget"', html)
-        self.assertIn('name="point-a"', html)
-        self.assertIn('name="point-label"', html)
-        self.assertEqual(html.count('name="initial-point-a"'), 1)
-        self.assertInHTML(
-            '<input type="number" name="point-a" value="9" required id="id_point-a">',
-            html,
-        )
 
-    def test_div_layout_renders_mapping_child_form_and_wrapper(self) -> None:
-        """The div layout renders the mapping child form and wrapper."""
-        self.assertMappingChildFormAndWrapperRender("as_div")
-
-    def test_p_layout_renders_mapping_child_form_and_wrapper(self) -> None:
-        """The paragraph layout renders the mapping child form and wrapper."""
-        self.assertMappingChildFormAndWrapperRender("as_p")
-
-    def test_ul_layout_renders_mapping_child_form_and_wrapper(self) -> None:
-        """The list layout renders the mapping child form and wrapper."""
-        self.assertMappingChildFormAndWrapperRender("as_ul")
-
-    def test_table_layout_renders_mapping_child_form_and_wrapper(self) -> None:
-        """The table layout renders the mapping child form and wrapper."""
-        self.assertMappingChildFormAndWrapperRender("as_table")
+        for layout in LAYOUTS:
+            with self.subTest(layout=layout):
+                html = getattr(form, layout)()
+                self.assertIn('data-widget="mapping"', html)
+                self.assertIn('data-mapping-field="point"', html)
+                self.assertIn('id="id_point_widget"', html)
+                self.assertIn('name="point-a"', html)
+                self.assertIn('name="point-label"', html)
+                self.assertEqual(html.count('name="initial-point-a"'), 1)
+                self.assertInHTML(
+                    '<input type="number" name="point-a" value="9" required id="id_point-a">',
+                    html,
+                )
 
     def test_widget_exposes_child_media_and_multipart_requirement(self) -> None:
         """The outer widget reports child widget integration requirements."""
@@ -214,6 +206,25 @@ class MappingFieldErrorRenderingTestCase(CompositeFieldTestCase):
         form = OptionalMappingPointForm({"point-a": "bad"})
         self.assertChildErrorsHiddenForForm(form, "point", "Enter a whole number.")
 
+    def test_late_outer_error_renders_beside_the_child_error(self) -> None:
+        """An outer error added after a first read still renders once."""
+        form = OptionalMappingPointForm({"point-a": "bad"})
+        self.assertLateOuterErrorRendersOnce(form, "point", "Enter a whole number.")
+
+    def test_hidden_mapping_promotes_child_errors(self) -> None:
+        """A mapping with only hidden children shows its child error at the top."""
+
+        class HiddenChildForm(forms.Form):
+            number = forms.IntegerField(widget=forms.HiddenInput)
+
+        class Form(forms.Form):
+            value = nestingdolls.MappingField(HiddenChildForm)
+
+        form = Form({"value-number": "bad"})
+        self.assertHiddenCompositeErrorRendersOnce(
+            form, "value", "Enter a whole number."
+        )
+
     def test_manual_field_rendering_keeps_child_errors_inline(self) -> None:
         """A manual mapping field render includes its child error once."""
         form = OptionalMappingPointForm({"point-a": "bad"})
@@ -278,13 +289,11 @@ class MappingFieldLayoutContractTestCase(CompositeFieldTestCase):
     runs against all four so no layout drifts.
     """
 
-    LAYOUTS = ("as_div", "as_p", "as_ul", "as_table")
-
     def test_initial_that_is_not_a_mapping_reports_once_in_every_layout(self) -> None:
         """A scalar initial reports its error exactly once per layout."""
         form = RequiredMappingPointForm(initial={"point": "not-a-mapping"})
 
-        for layout in self.LAYOUTS:
+        for layout in LAYOUTS:
             with self.subTest(layout=layout):
                 self.assertRenderedMessageCount(
                     getattr(form, layout)(), "Enter a mapping of values."
@@ -294,7 +303,7 @@ class MappingFieldLayoutContractTestCase(CompositeFieldTestCase):
         """A mapping initial reports no shape error in any layout."""
         form = RequiredMappingPointForm(initial={"point": {"a": 1, "label": "ok"}})
 
-        for layout in self.LAYOUTS:
+        for layout in LAYOUTS:
             with self.subTest(layout=layout):
                 self.assertRenderedMessageCount(
                     getattr(form, layout)(), "Enter a mapping of values.", 0
@@ -307,7 +316,7 @@ class MappingFieldLayoutContractTestCase(CompositeFieldTestCase):
         )
         self.assertFormInvalid(form)
 
-        for layout in self.LAYOUTS:
+        for layout in LAYOUTS:
             with self.subTest(layout=layout):
                 html = getattr(form, layout)()
                 self.assertRenderedMessageCount(html, "Whole child is wrong.")
@@ -331,7 +340,7 @@ class MappingFieldLayoutContractTestCase(CompositeFieldTestCase):
         """Container attrs reach the wrapper element, and ``id`` stays single."""
 
         class Form(forms.Form):
-            point = nestingdolls.MappingField(
+            point = nestingdolls.DictField(
                 MappingPointForm,
                 widget=nestingdolls.MappingWidget(
                     attrs={
@@ -344,7 +353,7 @@ class MappingFieldLayoutContractTestCase(CompositeFieldTestCase):
             )
 
         form = Form()
-        for layout in self.LAYOUTS:
+        for layout in LAYOUTS:
             with self.subTest(layout=layout):
                 html = getattr(form, layout)()
                 self.assertEqual(html.count('class="cls-marker"'), 1)
@@ -354,17 +363,127 @@ class MappingFieldLayoutContractTestCase(CompositeFieldTestCase):
                 self.assertEqual(html.count('id="id_point_widget"'), 1)
                 self.assertEqual(html.count('id="id_point"'), 0)
 
-    def test_wrapper_never_carries_aria_invalid(self) -> None:
-        """A wrapper element is not a form control, so it stays unmarked."""
+    def test_child_error_leaves_the_wrapper_unmarked(self) -> None:
+        """A child error marks the child control, not the wrapper."""
         form = RequiredMappingPointForm({"point-label": "missing a"})
         self.assertFormInvalid(form)
 
-        for layout in self.LAYOUTS:
+        for layout in LAYOUTS:
             with self.subTest(layout=layout):
                 html = getattr(form, layout)()
                 wrapper = html[: html.index("data-mapping-field") + 40]
                 self.assertNotIn("aria-invalid", wrapper)
                 self.assertIn('aria-invalid="true"', html)
+
+    def test_non_div_layouts_name_the_group_from_its_label(self) -> None:
+        """The paragraph, list, and table groups take their name from the field label."""
+        form = RequiredMappingPointForm()
+
+        for layout in ("as_p", "as_ul", "as_table"):
+            with self.subTest(layout=layout):
+                self.assertGroupIsNamedByLabel(
+                    getattr(form, layout)(), "mapping", "Point"
+                )
+
+    def test_div_layout_keeps_its_fieldset_name(self) -> None:
+        """The div layout names the field with its fieldset and adds no group name."""
+        self.assertDivGroupKeepsItsFieldsetName(
+            RequiredMappingPointForm().as_div(), "mapping", "Point"
+        )
+
+    def test_div_layout_legend_has_no_id(self) -> None:
+        """The div layout leaves Django's ``legend`` without an ``id``.
+
+        The legend names the field, so no ``aria-labelledby`` refers to it.
+        """
+        html = RequiredMappingPointForm().as_div()
+
+        legends = [
+            dict(element.attributes)
+            for element in rendered_elements(html)
+            if element.name == "legend"
+        ]
+
+        self.assertEqual(len(legends), 1)
+        self.assertNotIn("id", legends[0])
+
+    def test_caller_aria_label_is_not_overridden(self) -> None:
+        """A caller-supplied ``aria-label`` stays the only accessible name."""
+
+        class Form(forms.Form):
+            point = nestingdolls.DictField(
+                MappingPointForm,
+                widget=nestingdolls.MappingWidget(attrs={"aria-label": "Caller name"}),
+            )
+
+        form = Form()
+        for layout in ("as_p", "as_ul", "as_table"):
+            with self.subTest(layout=layout):
+                wrapper = rendered_wrapper(getattr(form, layout)(), "mapping")
+                self.assertEqual(wrapper.get("aria-label"), "Caller name")
+                self.assertIsNone(wrapper.get("aria-labelledby"))
+
+    def test_caller_aria_labelledby_is_not_overridden(self) -> None:
+        """A caller-supplied ``aria-labelledby`` is kept as given."""
+
+        class Form(forms.Form):
+            point = nestingdolls.DictField(
+                MappingPointForm,
+                widget=nestingdolls.MappingWidget(
+                    attrs={"aria-labelledby": "caller-heading"}
+                ),
+            )
+
+        form = Form()
+        for layout in ("as_p", "as_ul", "as_table"):
+            with self.subTest(layout=layout):
+                wrapper = rendered_wrapper(getattr(form, layout)(), "mapping")
+                self.assertEqual(wrapper.get("aria-labelledby"), "caller-heading")
+                self.assertIsNone(wrapper.get("aria-label"))
+
+    def test_outer_description_is_on_one_group_without_a_fieldset(self) -> None:
+        """``as_div`` keeps Django's fieldset. The other layouts use one group.
+
+        The child controls get no outer reference or mark.
+        """
+
+        class Form(forms.Form):
+            point = nestingdolls.DictField(
+                MappingPointForm,
+                help_text="Outer help.",
+                validators=[ValidatedMappingPointForm.reject_two],
+            )
+
+        form = Form({"point-a": "2", "point-label": "ok"})
+        self.assertFormInvalid(form)
+        outer = "id_point_helptext id_point_error"
+
+        for layout in LAYOUTS:
+            with self.subTest(layout=layout):
+                html = getattr(form, layout)()
+                wrapper = rendered_wrapper(html, "mapping")
+                group = {
+                    name: wrapper.get(name)
+                    for name in ("role", "aria-describedby", "aria-invalid")
+                }
+                if layout == "as_div":
+                    self.assertIn(f'<fieldset aria-describedby="{outer}">', html)
+                    self.assertEqual(set(group.values()), {None})
+                else:
+                    self.assertNotIn("<fieldset", html)
+                    self.assertEqual(
+                        group,
+                        {
+                            "role": "group",
+                            "aria-describedby": outer,
+                            "aria-invalid": "true",
+                        },
+                    )
+                controls = rendered_controls(html, "point-")
+                self.assertEqual(set(controls), {"point-a", "point-label"})
+                for control in controls.values():
+                    self.assertIsNone(control.get("aria-describedby"))
+                    self.assertIsNone(control.get("aria-invalid"))
 
     def test_sequence_rows_forward_container_attrs_to_each_mapping_wrapper(
         self,
@@ -387,6 +506,73 @@ class MappingFieldLayoutContractTestCase(CompositeFieldTestCase):
         self.assertEqual(html.count('class="outer"'), 2)
         self.assertEqual(html.count('id="id_values_0_widget"'), 1)
         self.assertEqual(html.count('id="id_values_0"'), 0)
+
+    def test_hidden_child_error_renders_once_in_every_layout(self) -> None:
+        """A hidden child's error shows once, with Django's hidden-field marker."""
+
+        class ChildForm(forms.Form):
+            visible = forms.CharField(required=False)
+            secret = forms.IntegerField(widget=forms.HiddenInput)
+
+        class Form(forms.Form):
+            value = nestingdolls.MappingField(ChildForm)
+
+        form = Form({"value-visible": "ok", "value-secret": "bad"})
+        self.assertFormInvalid(form)
+
+        for layout in LAYOUTS:
+            with self.subTest(layout=layout):
+                html = getattr(form, layout)()
+                self.assertRenderedMessageCount(
+                    html, "(Hidden field secret) Enter a whole number."
+                )
+                self.assertRenderedMessageCount(html, "Enter a whole number.")
+
+    def child_css_class_counts(self, css_class: str) -> dict[str, int]:
+        """Return the occurrences of a child-form CSS class in each layout."""
+
+        class ChildForm(forms.Form):
+            error_css_class = "child-error"
+            required_css_class = "child-required"
+            number = forms.IntegerField()
+
+        class Form(forms.Form):
+            value = nestingdolls.MappingField(ChildForm, required=False)
+
+        form = Form({"value-number": "bad"})
+        self.assertFormInvalid(form)
+        return {layout: getattr(form, layout)().count(css_class) for layout in LAYOUTS}
+
+    def test_child_error_class_renders_once_in_every_layout(self) -> None:
+        """Each layout marks the failing child with the child form's error class."""
+        self.assertEqual(
+            self.child_css_class_counts("child-error"), dict.fromkeys(LAYOUTS, 1)
+        )
+
+    def test_child_required_class_renders_in_every_layout(self) -> None:
+        """Each layout carries the child form's required class as the div layout does."""
+        counts = self.child_css_class_counts("child-required")
+
+        self.assertGreater(counts["as_div"], 0)
+        self.assertEqual(counts, dict.fromkeys(LAYOUTS, counts["as_div"]))
+
+    def test_paragraph_child_wrapper_does_not_nest_paragraphs(self) -> None:
+        """The paragraph layout wraps each child in phrasing content only."""
+
+        class ChildForm(forms.Form):
+            error_css_class = "child-error"
+            number = forms.IntegerField()
+
+        class Form(forms.Form):
+            value = nestingdolls.MappingField(ChildForm, required=False)
+
+        form = Form({"value-number": "bad"})
+        self.assertFormInvalid(form)
+
+        html = form.as_p()
+        # The outer form's own paragraph is the only one.
+        self.assertEqual(html.count("<p"), 1)
+        self.assertIn('<span class="child-error">', html)
 
 
 class MappingFieldStateRenderingTestCase(CompositeFieldTestCase):
@@ -463,33 +649,20 @@ class MappingFieldStateRenderingTestCase(CompositeFieldTestCase):
             ),
         )
 
-    def test_as_div_uses_the_div_wrapper(self) -> None:
-        """The mapping div helper uses the div widget wrapper."""
+    def test_each_layout_uses_its_widget_template(self) -> None:
+        """Every form render method selects its own mapping wrapper template."""
         form = RequiredMappingPointForm()
-        self.assertRenderMethodUsesWidgetTemplate(
-            form.as_div, "nestingdolls/mapping/div.html", "mapping"
-        )
 
-    def test_as_p_uses_the_p_wrapper(self) -> None:
-        """The mapping paragraph helper uses the paragraph widget wrapper."""
-        form = RequiredMappingPointForm()
-        self.assertRenderMethodUsesWidgetTemplate(
-            form.as_p, "nestingdolls/mapping/p.html", "mapping"
-        )
-
-    def test_as_table_uses_the_table_wrapper(self) -> None:
-        """The mapping table helper uses the table widget wrapper."""
-        form = RequiredMappingPointForm()
-        self.assertRenderMethodUsesWidgetTemplate(
-            form.as_table, "nestingdolls/mapping/table.html", "mapping"
-        )
-
-    def test_as_ul_uses_the_ul_wrapper(self) -> None:
-        """The mapping list helper uses the list widget wrapper."""
-        form = RequiredMappingPointForm()
-        self.assertRenderMethodUsesWidgetTemplate(
-            form.as_ul, "nestingdolls/mapping/ul.html", "mapping"
-        )
+        for layout, template in (
+            ("as_div", "nestingdolls/mapping/div.html"),
+            ("as_p", "nestingdolls/mapping/p.html"),
+            ("as_table", "nestingdolls/mapping/table.html"),
+            ("as_ul", "nestingdolls/mapping/ul.html"),
+        ):
+            with self.subTest(layout=layout):
+                self.assertRenderMethodUsesWidgetTemplate(
+                    getattr(form, layout), template, "mapping"
+                )
 
     def test_consecutive_renders_use_their_own_layout(self) -> None:
         """A mapping form keeps each render layout separate."""
@@ -498,12 +671,6 @@ class MappingFieldStateRenderingTestCase(CompositeFieldTestCase):
     def test_default_render_uses_the_div_layout(self) -> None:
         """A mapping default render uses the Django div layout."""
         self.assertIn('<div\n  data-widget="mapping"', str(RequiredMappingPointForm()))
-
-    def test_custom_template_name_stays_literal(self) -> None:
-        """A mapping widget keeps a literal custom template name."""
-        widget = copy.deepcopy(RequiredMappingPointForm().fields["point"].widget)
-        widget.template_name = "app/{custom}.html"
-        self.assertEqual(widget.template_name, "app/{custom}.html")
 
 
 class MappingFieldInvalidInitialRenderingTestCase(CompositeFieldTestCase):
@@ -523,7 +690,7 @@ class MappingFieldInvalidInitialRenderingTestCase(CompositeFieldTestCase):
         """A callable list initial for a mapping field stays renderable."""
 
         class CallableInitialForm(forms.Form):
-            point = nestingdolls.MappingField(
+            point = nestingdolls.DictField(
                 MappingPointForm,
                 required=False,
                 initial=lambda: ["bad"],
@@ -537,7 +704,7 @@ class MappingFieldInvalidInitialRenderingTestCase(CompositeFieldTestCase):
         """Disabled and scalar file hostile values stay Django form errors."""
 
         class DisabledForm(forms.Form):
-            point = nestingdolls.MappingField(
+            point = nestingdolls.DictField(
                 MappingPointForm, required=False, disabled=True
             )
 

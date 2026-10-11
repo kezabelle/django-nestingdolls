@@ -51,14 +51,7 @@ class ItemValidationError(ValidationError):
 
     @classmethod
     def for_messages_of(cls, item: int | str, error: ValidationError, /) -> list[Self]:
-        """Return one item error for each message in a child error.
-
-        Each message keeps its own code, its own parameters, and its own
-        translation. Each message also records the item it came from.
-        Django flattens a composite error to its leaf messages. This method
-        makes one item error for each leaf message.
-
-        """
+        """Wrap each leaf message with its item and innermost error code."""
         return [
             cls(
                 message,

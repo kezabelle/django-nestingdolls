@@ -65,6 +65,46 @@ class DataclassFieldConstructionTestCase(SimpleTestCase):
         with self.assertRaises(ImproperlyConfigured):
             nestingdolls.DataclassField(Form, output=PointWithDerivedValue)
 
+    def test_rejects_required_initvar_not_declared_by_form(self) -> None:
+        """Construction rejects an output with a required ``InitVar`` the Form lacks."""
+
+        @dataclasses.dataclass
+        class PointWithToken:
+            x: int
+            y: int
+            token: dataclasses.InitVar[str]
+
+        with self.assertRaisesMessage(
+            ImproperlyConfigured, "fields as keyword arguments"
+        ):
+            nestingdolls.DataclassField(OutputPointForm, output=PointWithToken)
+
+    def test_rejects_output_without_compatible_init(self) -> None:
+        """Construction rejects an output that has no generated initializer."""
+
+        @dataclasses.dataclass(init=False)
+        class PointWithoutInit:
+            x: int
+            y: int
+
+        with self.assertRaisesMessage(
+            ImproperlyConfigured, "fields as keyword arguments"
+        ):
+            nestingdolls.DataclassField(OutputPointForm, output=PointWithoutInit)
+
+    def test_accepts_keyword_only_output_with_defaulted_initvar(self) -> None:
+        """Construction accepts a keyword-only output with a defaulted ``InitVar``."""
+
+        @dataclasses.dataclass(kw_only=True)
+        class KeywordPoint:
+            x: int
+            y: int | None = 7
+            scale: dataclasses.InitVar[int] = 1
+
+        field = nestingdolls.DataclassField(OutputPointForm, output=KeywordPoint)
+
+        self.assertEqual(field.clean({"x": "1", "y": "2"}), KeywordPoint(x=1, y=2))
+
     def test_infers_type_from_base_fields_and_fills_removed_fields(self) -> None:
         """Test infers type from base fields and fills removed fields."""
         cleaned = nestingdolls.DataclassField(PointWithRemovedYForm).clean({"x": "1"})

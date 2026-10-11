@@ -49,7 +49,7 @@ class TupleFieldTestCase(CompositeFieldTestCase):
             QueryDict(
                 f"values-{TOTAL_FORM_COUNT}=2&"
                 f"values-{INITIAL_FORM_COUNT}=0&"
-                "values-0=1&values-1=2"
+                "values-0-value=1&values-1-value=2"
             )
         )
 
@@ -83,6 +83,10 @@ class TupleFieldTestCase(CompositeFieldTestCase):
         self.assertCleanedOutputCleansAgain(
             nestingdolls.TupleField(forms.IntegerField()), ["1", "2"]
         )
+
+    def test_frozensequencefield_alias_is_tuplefield(self) -> None:
+        """``FrozenSequenceField`` and ``TupleField`` name the same exported class."""
+        self.assertIs(nestingdolls.FrozenSequenceField, nestingdolls.TupleField)
 
 
 if __name__ == "__main__":  # pragma: no cover

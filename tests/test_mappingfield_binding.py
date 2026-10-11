@@ -156,6 +156,142 @@ class MappingFieldBindingTestCase(CompositeFieldTestCase):
             },
         )
 
+    def test_bound_only_child_fields_accept_prefixed_and_exact_values(self) -> None:
+        """Bound-only members participate in both browser and exact submissions."""
+
+        class DynamicForm(forms.Form):
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                super().__init__(*args, **kwargs)
+                if self.is_bound:
+                    self.fields["token"] = forms.CharField()
+
+        class Outer(forms.Form):
+            point = nestingdolls.MappingField(DynamicForm)
+
+        for data in ({"point-token": "kept"}, {"point": {"token": "kept"}}):
+            with self.subTest(data=data):
+                form = Outer(data)
+                self.assertFormValid(form)
+                self.assertEqual(form.cleaned_data["point"], {"token": "kept"})
+
+    def test_exact_mapping_drives_data_dependent_child_members(self) -> None:
+        """A child member declared from another submitted member is not lost."""
+
+        class Child(forms.Form):
+            mode = forms.CharField()
+
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                super().__init__(*args, **kwargs)
+                if self.data.get(self.add_prefix("mode")) == "advanced":
+                    self.fields["detail"] = forms.CharField()
+
+        class Outer(forms.Form):
+            point = nestingdolls.MappingField(Child)
+
+        for data in (
+            {"point-mode": "advanced", "point-detail": "kept"},
+            {"point": {"mode": "advanced", "detail": "kept"}},
+        ):
+            with self.subTest(data=data):
+                form = Outer(data)
+                self.assertFormValid(form)
+                self.assertEqual(
+                    form.cleaned_data["point"],
+                    {"mode": "advanced", "detail": "kept"},
+                )
+
+    def test_exact_member_declared_by_compound_member_is_kept(self) -> None:
+        """A member that the child Form adds from a compound member keeps its exact value."""
+
+        class Child(forms.Form):
+            when = forms.SplitDateTimeField(required=False)
+
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                super().__init__(*args, **kwargs)
+                if self.is_bound and self["when"].value()[0]:
+                    self.fields["note"] = forms.CharField()
+
+        class Outer(forms.Form):
+            point = nestingdolls.MappingField(Child)
+
+        form = Outer({"point": {"when": ["2020-01-01", "10:00"], "note": "kept"}})
+        self.assertFormValid(form)
+        self.assertEqual(form.cleaned_data["point"]["note"], "kept")
+
+    def test_exact_non_string_member_does_not_replace_a_named_member(self) -> None:
+        """An exact member with a non-string name is ignored, as in direct cleaning."""
+
+        class Child(forms.Form):
+            pass
+
+        Child.base_fields["1"] = forms.CharField()
+
+        class Outer(forms.Form):
+            point = nestingdolls.MappingField(Child)
+
+        for value in (
+            {"1": "kept", 1: "noise"},
+            {1: "noise", "1": "kept"},
+            MultiValueDict({"1": ["kept"], 1: ["noise"]}),
+            MultiValueDict({1: ["noise"], "1": ["kept"]}),
+        ):
+            with self.subTest(value=value):
+                form = Outer({"point": value})
+                self.assertFormValid(form)
+                self.assertEqual(form.cleaned_data["point"], {"1": "kept"})
+
+    def test_bound_only_file_and_initial_dependent_members(self) -> None:
+        """Actual child Form fields route prefixed and exact uploaded files."""
+
+        class DynamicForm(forms.Form):
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                super().__init__(*args, **kwargs)
+                if self.is_bound:
+                    self.fields["document"] = forms.FileField()
+                if self.initial.get("with_note"):
+                    self.fields["note"] = forms.CharField()
+
+        class Outer(forms.Form):
+            point = nestingdolls.MappingField(DynamicForm)
+
+        for exact in (False, True):
+            with self.subTest(exact=exact):
+                upload = SimpleUploadedFile("dynamic.txt", b"dynamic")
+                data = {"point": {"note": "kept"}} if exact else {"point-note": "kept"}
+                files = (
+                    MultiValueDict({"point": [{"document": upload}]})
+                    if exact
+                    else MultiValueDict({"point-document": [upload]})
+                )
+                form = Outer(data, files, initial={"point": {"with_note": True}})
+                self.assertFormValid(form)
+                self.assertEqual(
+                    form.cleaned_data["point"],
+                    {"document": upload, "note": "kept"},
+                )
+                self.assertEqual(form["point"].subform.files["point-document"], upload)
+
+    def test_exact_null_data_does_not_discard_exact_child_files(self) -> None:
+        """A file mapping binds the child even alongside exact null data."""
+
+        class Child(forms.Form):
+            document = forms.FileField()
+
+            def clean(self) -> dict[str, object]:
+                self.cleaned_data["file_seen_by_hook"] = self.files["asset-document"]
+                return self.cleaned_data
+
+        class Outer(forms.Form):
+            asset = nestingdolls.MappingField(Child)
+
+        upload = SimpleUploadedFile("source.txt", b"source")
+        form = Outer({"asset": None}, MultiValueDict({"asset": [{"document": upload}]}))
+        self.assertFormValid(form)
+        self.assertEqual(
+            form.cleaned_data["asset"],
+            {"document": upload, "file_seen_by_hook": upload},
+        )
+
     def test_exact_none_with_initial_file_is_invalid_mapping_input(self) -> None:
         """A present null cannot retain an initial file as a mapping submission."""
 
@@ -298,6 +434,14 @@ class MappingFieldBindingTestCase(CompositeFieldTestCase):
         self.assertIs(instance_field.widget.form_class, MappingPointForm)
         self.assertIsInstance(class_field.widget, CustomWidget)
         self.assertIs(class_field.widget.form_class, MappingPointForm)
+
+    def test_formfield_alias_is_mappingfield(self) -> None:
+        """``FormField`` is an old name for ``MappingField``."""
+        self.assertIs(nestingdolls.FormField, nestingdolls.MappingField)
+
+    def test_subform_alias_is_mappingfield(self) -> None:
+        """``Subform`` is an old name for ``MappingField``."""
+        self.assertIs(nestingdolls.Subform, nestingdolls.MappingField)
 
 
 if __name__ == "__main__":  # pragma: no cover

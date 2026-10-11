@@ -11,7 +11,11 @@ from .support.forms.mapping import (
     MappingIntegerTagsForm,
     MappingRecordPayloadForm,
 )
-from .support.testcases import CompositeFieldTestCase, TestQueryDict
+from .support.testcases import (
+    CompositeFieldTestCase,
+    TestQueryDict,
+    rendered_elements,
+)
 
 
 def setUpModule() -> None:
@@ -27,10 +31,9 @@ def tearDownModule() -> None:
 class MappingFieldNestedSequenceChildTestCase(CompositeFieldTestCase):
     """A mapping's nested sequence child validates the same in either input style.
 
-    Same regression guard as ``test_sequencefield_nesting.py``'s
-    ``SequenceFieldScalarRowTestCase``, for a sequence nested one level inside
-    a mapping: the nested list's own row error must still render inline
-    when the mapping binds to one whole Python value.
+    A sequence nested one level inside a mapping must still render its row error
+    inline when the mapping binds to one whole Python value, as a prefixed
+    submission does.
     """
 
     def assertNestedSequenceChildError(self, form: object) -> None:  # noqa: D102
@@ -48,7 +51,7 @@ class MappingFieldNestedSequenceChildTestCase(CompositeFieldTestCase):
         html = form.as_p()
         self.assertNotIn("errorlist", html)
         for index, value in enumerate((1, 2, 3)):
-            self.assertIn(f'name="point-tags-{index}" value="{value}"', html)
+            self.assertIn(f'name="point-tags-{index}-value" value="{value}"', html)
 
     def test_nested_sequence_child_error_via_whole_value(self) -> None:
         """A bad row in a mapping's whole-value nested list shows its own error."""
@@ -64,9 +67,9 @@ class MappingFieldNestedSequenceChildTestCase(CompositeFieldTestCase):
                     {
                         f"point-tags-{TOTAL_FORM_COUNT}": "3",
                         f"point-tags-{INITIAL_FORM_COUNT}": "3",
-                        "point-tags-0": "1",
-                        "point-tags-1": "bad",
-                        "point-tags-2": "3",
+                        "point-tags-0-value": "1",
+                        "point-tags-1-value": "bad",
+                        "point-tags-2-value": "3",
                     }
                 )
             )
@@ -86,13 +89,34 @@ class MappingFieldNestedSequenceChildTestCase(CompositeFieldTestCase):
                     {
                         f"point-tags-{TOTAL_FORM_COUNT}": "3",
                         f"point-tags-{INITIAL_FORM_COUNT}": "3",
-                        "point-tags-0": "1",
-                        "point-tags-1": "2",
-                        "point-tags-2": "3",
+                        "point-tags-0-value": "1",
+                        "point-tags-1-value": "2",
+                        "point-tags-2-value": "3",
                     }
                 )
             )
         )
+
+    def test_nested_sequence_group_name_resolves_to_the_label_in_paragraph_layout(
+        self,
+    ) -> None:
+        """Every group name of a mapping with a nested sequence points at an element.
+
+        A nested field renders its label as a ``<span>``. Its ``aria-labelledby``
+        target must be that span's id, not a missing element.
+        """
+        html = MappingIntegerTagsForm().as_p()
+
+        elements = [dict(element.attributes) for element in rendered_elements(html)]
+        referenced = {
+            attributes["aria-labelledby"]
+            for attributes in elements
+            if "aria-labelledby" in attributes
+        }
+        existing = {attributes["id"] for attributes in elements if "id" in attributes}
+
+        self.assertEqual(referenced, {"id_point_label", "id_point-tags_label"})
+        self.assertEqual(referenced - existing, set())
 
 
 class MappingFieldNestedRecordsTestCase(CompositeFieldTestCase):
@@ -109,7 +133,7 @@ class MappingFieldNestedRecordsTestCase(CompositeFieldTestCase):
         self.assertBoundFieldErrors(form, "payload", [])
         html = form.as_p()
         self.assertRenderedMessageCount(html, "This field is required.")
-        self.assertErrorReferenceResolves(html, "id_payload-records-1-name_error")
+        self.assertErrorReferenceResolves(html, "id_payload-records-1-value-name_error")
         self.assertErrorElementIsAbsent(html, "id_payload-records_1_error")
         self.assertErrorElementIsAbsent(html, "id_payload_error")
 
@@ -121,8 +145,8 @@ class MappingFieldNestedRecordsTestCase(CompositeFieldTestCase):
         )
         html = form.as_p()
         self.assertNotIn("errorlist", html)
-        self.assertIn('name="payload-records-0-name" value="ok"', html)
-        self.assertIn('name="payload-records-1-name" value="ok2"', html)
+        self.assertIn('name="payload-records-0-value-name" value="ok"', html)
+        self.assertIn('name="payload-records-1-value-name" value="ok2"', html)
 
     def test_records_leaf_error_via_whole_value(self) -> None:
         """A CSV- or JSON-shaped list of row mappings shows a bad leaf inline."""
@@ -140,8 +164,8 @@ class MappingFieldNestedRecordsTestCase(CompositeFieldTestCase):
                     {
                         f"payload-records-{TOTAL_FORM_COUNT}": "2",
                         f"payload-records-{INITIAL_FORM_COUNT}": "2",
-                        "payload-records-0-name": "ok",
-                        "payload-records-1-name": "",
+                        "payload-records-0-value-name": "ok",
+                        "payload-records-1-value-name": "",
                     }
                 )
             )
@@ -163,8 +187,8 @@ class MappingFieldNestedRecordsTestCase(CompositeFieldTestCase):
                     {
                         f"payload-records-{TOTAL_FORM_COUNT}": "2",
                         f"payload-records-{INITIAL_FORM_COUNT}": "2",
-                        "payload-records-0-name": "ok",
-                        "payload-records-1-name": "ok2",
+                        "payload-records-0-value-name": "ok",
+                        "payload-records-1-value-name": "ok2",
                     }
                 )
             )

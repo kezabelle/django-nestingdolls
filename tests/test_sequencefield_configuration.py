@@ -51,12 +51,12 @@ class SequenceFieldRowFormClassTestCase(CompositeFieldTestCase):
             {
                 "values-TOTAL_FORMS": "2",
                 "values-INITIAL_FORMS": "0",
-                "values-0-TOTAL_FORMS": "1",
-                "values-0-INITIAL_FORMS": "0",
-                "values-0-0": "a",
-                "values-1-TOTAL_FORMS": "1",
-                "values-1-INITIAL_FORMS": "0",
-                "values-1-0": "b",
+                "values-0-value-TOTAL_FORMS": "1",
+                "values-0-value-INITIAL_FORMS": "0",
+                "values-0-value-0-value": "a",
+                "values-1-value-TOTAL_FORMS": "1",
+                "values-1-value-INITIAL_FORMS": "0",
+                "values-1-value-0-value": "b",
             }
         )
         self.assertFormValid(form)
@@ -109,9 +109,9 @@ class SequenceFieldRowFormClassTestCase(CompositeFieldTestCase):
         payload = {
             "values-TOTAL_FORMS": "1",
             "values-INITIAL_FORMS": "0",
-            "values-0-TOTAL_FORMS": "1",
-            "values-0-INITIAL_FORMS": "0",
-            "values-0-0": "  padded  ",
+            "values-0-value-TOTAL_FORMS": "1",
+            "values-0-value-INITIAL_FORMS": "0",
+            "values-0-value-0-value": "  padded  ",
         }
         # Complete one form lifecycle first. Sharing that crossed form
         # instances would then be observable in the second form.
@@ -144,10 +144,6 @@ class SequenceFieldConfigurationTestCase(SimpleTestCase):
             ValueError, "max_length=0 requires required=False"
         ):
             nestingdolls.ListField(forms.IntegerField(), max_length=0)
-        with self.assertRaisesMessage(
-            ValueError, "max_length must be greater than or equal to min_length"
-        ):
-            nestingdolls.ListField(forms.IntegerField(), min_length=5, max_length=2)
         with self.assertRaises(ValueError):
             nestingdolls.ListField(forms.IntegerField(), max_length=1, initial=[1, 2])
         with self.assertRaisesMessage(
@@ -167,7 +163,9 @@ class SequenceFieldConfigurationTestCase(SimpleTestCase):
 
     def test_constructor_rejects_max_length_below_min_length(self) -> None:
         """The constructor rejects a maximum length below the minimum."""
-        with self.assertRaises(ValueError):
+        with self.assertRaisesMessage(
+            ValueError, "max_length must be greater than or equal to min_length"
+        ):
             nestingdolls.ListField(forms.IntegerField(), min_length=2, max_length=1)
 
     def test_scalar_initial_becomes_one_row(self) -> None:

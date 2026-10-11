@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 import unittest
 from urllib.parse import urlencode
 
+from django import forms
 from django.conf import settings
 from django.forms.formsets import (
     INITIAL_FORM_COUNT,
@@ -13,10 +15,12 @@ from django.forms.formsets import (
 from django.test import override_settings
 from django.test.utils import setup_test_environment, teardown_test_environment
 
+import nestingdolls
+
 from .support.forms.mapping import (
     MappingRootSubmissionLimitForm,
 )
-from .support.testcases import CompositeFieldTestCase
+from .support.testcases import CompositeFieldTestCase, rendered_controls
 
 
 def setUpModule() -> None:
@@ -47,8 +51,8 @@ class SequenceFieldRequestLimitTestCase(CompositeFieldTestCase):
             {
                 f"outer-{TOTAL_FORM_COUNT}": "1",
                 f"outer-{INITIAL_FORM_COUNT}": "1",
-                f"outer-0-{TOTAL_FORM_COUNT}": str(inner_total),
-                f"outer-0-{INITIAL_FORM_COUNT}": str(inner_total),
+                f"outer-0-value-{TOTAL_FORM_COUNT}": str(inner_total),
+                f"outer-0-value-{INITIAL_FORM_COUNT}": str(inner_total),
             },
         )
         self.assertJSONResponse(
@@ -115,7 +119,10 @@ class SequenceFieldRequestLimitTestCase(CompositeFieldTestCase):
         )
         html = form.as_p()
         self.assertEqual(
-            sum(html.count(f'name="values-{child}-{index}"') for index in range(10)),
+            sum(
+                html.count(f'name="values-{child}-{index}-value"')
+                for index in range(10)
+            ),
             10,
         )
 
@@ -141,8 +148,8 @@ class SequenceFieldRequestLimitTestCase(CompositeFieldTestCase):
             {
                 f"outer-{TOTAL_FORM_COUNT}": "1",
                 f"outer-{INITIAL_FORM_COUNT}": "1",
-                f"outer-0-{TOTAL_FORM_COUNT}": "11",
-                f"outer-0-{INITIAL_FORM_COUNT}": "0",
+                f"outer-0-value-{TOTAL_FORM_COUNT}": "11",
+                f"outer-0-value-{INITIAL_FORM_COUNT}": "0",
             },
         )
 
@@ -162,8 +169,8 @@ class SequenceFieldRequestLimitTestCase(CompositeFieldTestCase):
             {
                 f"items-{TOTAL_FORM_COUNT}": "1",
                 f"items-{INITIAL_FORM_COUNT}": "1",
-                f"items-0-tags-{TOTAL_FORM_COUNT}": str(inner_total),
-                f"items-0-tags-{INITIAL_FORM_COUNT}": str(inner_total),
+                f"items-0-value-tags-{TOTAL_FORM_COUNT}": str(inner_total),
+                f"items-0-value-tags-{INITIAL_FORM_COUNT}": str(inner_total),
             },
         )
         self.assertJSONResponse(
@@ -184,6 +191,69 @@ class SequenceFieldRequestLimitTestCase(CompositeFieldTestCase):
     def test_sequence_mapping_sequence_accepts_total_at_outer_cap(self) -> None:
         """A nested sequence accepts a total at the outer cap."""
         self.assertSequenceMappingSequenceSubmission(9, True, {}, [9])
+
+    def test_disabled_sequence_charges_parent_rows_to_the_render_budget(self) -> None:
+        """A disabled outer sequence spends one budget slot per parent row.
+
+        Two parent rows leave 8 of the 10 slots for the ten-row child lists.
+        """
+
+        class Form(forms.Form):
+            outer = nestingdolls.SequenceField(
+                nestingdolls.SequenceField(
+                    forms.IntegerField(), max_length=10, absolute_max=10
+                ),
+                max_length=10,
+                absolute_max=10,
+                required=False,
+                disabled=True,
+            )
+
+        html = Form(initial={"outer": [list(range(10)), list(range(10, 20))]}).as_div()
+
+        controls = rendered_controls(html, "outer-")
+        parent_rows = [
+            name for name in controls if re.fullmatch(r"outer-\d+-DELETE", name)
+        ]
+        child_rows = [
+            name
+            for name in controls
+            if re.fullmatch(r"outer-\d+-value-\d+-value", name)
+        ]
+        self.assertEqual(len(parent_rows), 2)
+        self.assertEqual(len(child_rows), 8)
+
+
+class SequenceFieldSubmissionMaximumTestCase(CompositeFieldTestCase):
+    """Test the shared row cap that a field derives for one submission."""
+
+    def test_submission_max_is_the_larger_of_absolute_max_and_the_effective_key_limit(
+        self,
+    ) -> None:
+        """The cap follows the Django key limit once it exceeds ``absolute_max``.
+
+        A zero or missing key limit falls back to ``DEFAULT_MAX_NUM`` (1000).
+        The default ``absolute_max`` is 2000.
+        """
+        default_limits: dict[str, int] = {}
+        small_limits = {"max_length": 10, "absolute_max": 10}
+        cases = (
+            (default_limits, 1000, 2000),
+            (default_limits, 5000, 5000),
+            (default_limits, 10, 2000),
+            (default_limits, None, 2000),
+            (small_limits, 0, 1000),
+            (small_limits, None, 1000),
+            (small_limits, 5, 10),
+        )
+        for limits, key_limit, expected in cases:
+            with (
+                self.subTest(limits=limits, key_limit=key_limit),
+                override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=key_limit),
+            ):
+                field = nestingdolls.SequenceField(forms.CharField(), **limits)
+
+                self.assertEqual(field.limits.submission_max, expected)
 
 
 if __name__ == "__main__":  # pragma: no cover

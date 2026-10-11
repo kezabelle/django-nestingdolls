@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import copy
 import dataclasses
-from collections.abc import Mapping, Sequence
+import re
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+from itertools import islice
 from typing import TYPE_CHECKING, ClassVar, Self, cast
 
 from django.forms import BaseForm, BaseFormSet, Field, Form
@@ -22,7 +24,8 @@ from django.forms.utils import ErrorList
 from django.forms.widgets import Media as WidgetMedia
 from django.forms.widgets import MultiWidget, Script, Widget
 from django.utils.datastructures import MultiValueDict
-from django.utils.functional import cached_property
+from django.utils.functional import Promise, cached_property
+from django.utils.safestring import mark_safe
 
 from nestingdolls.patches import FormLayout
 
@@ -30,25 +33,13 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from django.core.files.uploadedfile import UploadedFile
+    from django.forms import BoundField
     from django.forms.renderers import BaseRenderer
 
     from nestingdolls.fields import SequenceField
 
 
 __all__ = ["MappingWidget", "SequenceWidget"]
-
-
-MANAGEMENT_NAMES = (
-    TOTAL_FORM_COUNT,
-    INITIAL_FORM_COUNT,
-    MIN_NUM_FORM_COUNT,
-    MAX_NUM_FORM_COUNT,
-)
-
-
-# The name of the one child field inside each row form. boundfield.py and
-# fields.py read row data under this name too, so it has no underscore.
-row_value_name = "value"
 
 
 class CompositeWidget(Widget):
@@ -63,6 +54,10 @@ class CompositeWidget(Widget):
     _template_name: str
     input_type: str | None = None
     render_state: RenderState = RenderState()
+
+    def format_value(self, value: object) -> object:  # type: ignore[override]
+        """Leave composite values intact until child row limits apply."""
+        return value
 
     def _accepts_key(self, key: object, name: str) -> bool:
         """Report whether one submitted key belongs to this composite."""
@@ -131,6 +126,21 @@ class CompositeWidget(Widget):
         """Suppress a label target because this widget renders multiple inputs."""
         return ""
 
+    def _exact_child_items(
+        self, widget: Widget, key: str, value: object
+    ) -> Iterator[tuple[str, object]]:
+        """Expand an exact child value to the submission keys its widget reads."""
+        if isinstance(widget, MultiWidget) and isinstance(value, (list, tuple)):
+            # django-stubs omits widgets_names; MultiWidget.__init__ sets it.
+            # A short value gives its last parts no key, so they read as missing.
+            names: list[str] = widget.widgets_names  # type: ignore[attr-defined]
+            for subwidget, suffix, part in zip(
+                widget.widgets, names, value, strict=False
+            ):
+                yield from self._exact_child_items(subwidget, f"{key}{suffix}", part)
+            return
+        yield key, value
+
 
 class MappingWidget(CompositeWidget):
     """Render one child Form as the widget of a mapping field."""
@@ -160,21 +170,13 @@ class MappingWidget(CompositeWidget):
         return self.form_class().fields
 
     def _accepts_key(self, key: object, name: str) -> bool:
-        """Report whether the key is this field's own name or a declared child key."""
+        """Report whether the key is this field's own name or a key under its prefix."""
         if not isinstance(key, str):
             return False
         if key == name:
             return True
         child_key = key.removeprefix(f"{name}-")
-        if child_key == key:
-            return False
-        # A widget may extend its own name, such as ``birthday_day`` or
-        # ``time_0``, so accept a declared name with a suffix too.
-        return any(
-            child_key == child_name
-            or child_key.startswith((f"{child_name}-", f"{child_name}_"))
-            for child_name in self.fields
-        )
+        return child_key != key and bool(child_key)
 
     def has_child_keys(
         self,
@@ -182,29 +184,66 @@ class MappingWidget(CompositeWidget):
         files: Mapping[str, object],
         name: str,
     ) -> bool:
-        """Report whether either source holds any declared child key."""
+        """Report whether either source holds any child key."""
         return any(
             key != name and self._accepts_key(key, name)
             for source in (data, files)
             for key in source
         )
 
+    def is_control_key(self, key: str) -> bool:
+        """Report whether a key under this mapping's name is a nested formset control.
+
+        A member is content, even when it is named ``DELETE`` or ``TOTAL_FORMS``.
+        Only a nested sequence has controls, so look for the member that owns the key.
+        """
+        return any(
+            isinstance(field.widget, (MappingWidget, SequenceWidget))
+            and key.startswith(f"{name}-")
+            and field.widget.is_control_key(key[len(name) + 1 :])
+            for name, field in self.fields.items()
+        )
+
     def _data_from_exact_mapping(
-        self, value: Mapping[str, object], name: str
+        self, value: Mapping[object, object], name: str
     ) -> Mapping[str, object]:
-        """Give each member of an exact mapping its own child key."""
+        """Give each member of an exact mapping its own child key.
+
+        Cleaning ignores a member whose name is not a string. Skip it here too,
+        because its formatted key can replace the key of a string member.
+        """
         getlist = getattr(value, "getlist", None)
         if getlist is not None:
             expanded = MultiValueDict[str, object]()
-            for child_name in self.fields:
-                if child_name in value:
-                    expanded.setlist(f"{name}-{child_name}", getlist(child_name))
+            for child_name in value:
+                if not isinstance(child_name, str):
+                    continue
+                key = f"{name}-{child_name}"
+                field = self.fields.get(child_name)
+                child_widget = None if field is None else self._child_widget(field)
+                if not isinstance(child_widget, MultiWidget):
+                    expanded.setlist(key, getlist(child_name))
+                    continue
+                # Repeated values have no meaning for a MultiWidget, so its
+                # compound value is the member's one value, as for a dict.
+                for part_key, part in self._exact_child_items(
+                    child_widget, key, value[child_name]
+                ):
+                    expanded[part_key] = part
             return expanded
-        return {
-            f"{name}-{child_name}": value[child_name]
-            for child_name in self.fields
-            if child_name in value
-        }
+        data: dict[str, object] = {}
+        for child_name, member in value.items():
+            if not isinstance(child_name, str):
+                continue
+            key = f"{name}-{child_name}"
+            field = self.fields.get(child_name)
+            if field is None:
+                data[key] = member
+            else:
+                data.update(
+                    self._exact_child_items(self._child_widget(field), key, member)
+                )
+        return data
 
     def expand_exact_inputs(
         self,
@@ -260,16 +299,10 @@ class MappingWidget(CompositeWidget):
     def get_context(
         self, name: str, value: object, attrs: dict[str, object] | None
     ) -> dict[str, object]:
-        """Build the context of the widget, with a prefixed child Form.
-
-        The bound field supplies the child Form when the outer form is bound.
-        An unbound render gets no Form, and it builds one from the value that it
-        gets. Each sequence descendant opens its own shared budget when it
-        renders. Django limits each formset level only, not the rows that
-        nesting multiplies.
-        """
+        """Build context with a supplied or value-backed prefixed child Form."""
         context = super().get_context(name, value, attrs)
         widget_context: dict[str, object] = context["widget"]
+        widget_attrs: dict[str, object] = widget_context["attrs"]  # type: ignore[assignment]
         subform = self.render_state.subform
         if subform is None:
             # A hidden initial render must show the initial value, because
@@ -283,9 +316,21 @@ class MappingWidget(CompositeWidget):
                 use_required_attribute=self.is_required,
             )
         initial_error = self.render_state.initial_error
-        # The subform layouts render their own non-field errors.
+        layout = FormLayout.current()
+        # The div, table, and ul templates delegate to subform.as_*().
+        visible_fields: list[BoundField] = []
+        hidden_fields: list[object] = []
+        non_field_errors: ErrorList | list[object] = []
+        if self.is_hidden:
+            hidden_fields = [field.as_hidden() for field in subform]
+        elif layout is FormLayout.p:
+            # mapping/p.html loops over the fields itself. Django's context
+            # also adds the error of each hidden child to the top errors.
+            paragraph = subform.get_context()
+            visible_fields = [field for field, _errors in paragraph["fields"]]
+            hidden_fields = paragraph["hidden_fields"]
+            non_field_errors = paragraph["errors"]
         initial_errors: ErrorList | None = None
-        non_field_errors = subform.non_field_errors()
         if initial_error:
             initial_errors = subform.error_class(
                 [initial_error],
@@ -297,22 +342,17 @@ class MappingWidget(CompositeWidget):
                 error_class="nonfield",
                 renderer=subform.renderer,
             )
-        widget_attrs: dict[str, object] = widget_context["attrs"]  # type: ignore[assignment]
-        wrapper_attrs = {
-            attr_name: attr_value
-            for attr_name, attr_value in widget_attrs.items()
-            # The wrapper uses a derived id. Children own aria-invalid.
-            if attr_name not in ("id", "aria-invalid")
-        }
+        wrapper_attrs = widget_attrs.copy()
+        wrapper_attrs.pop("id", None)
+        if layout is FormLayout.div:
+            wrapper_attrs.pop("aria-invalid", None)
+        else:
+            wrapper_attrs["role"] = "group"
         widget_context.update(
             {
                 "subform": subform,
-                "visible_fields": subform.visible_fields(),
-                "hidden_fields": (
-                    [field.as_hidden() for field in subform]
-                    if self.is_hidden
-                    else subform.hidden_fields()
-                ),
+                "visible_fields": visible_fields,
+                "hidden_fields": hidden_fields,
                 "initial_errors": initial_errors,
                 "non_field_errors": non_field_errors,
                 "wrapper_attrs": wrapper_attrs,
@@ -359,25 +399,28 @@ class MappingWidget(CompositeWidget):
 class SequenceWidget(CompositeWidget):
     """Render the rows of a sequence field. One child widget renders each row."""
 
+    management_names = (
+        TOTAL_FORM_COUNT,
+        INITIAL_FORM_COUNT,
+        MIN_NUM_FORM_COUNT,
+        MAX_NUM_FORM_COUNT,
+    )
+    row_value_name = "value"
+    # One or more ASCII digits, then a row separator or the key end.
+    row_index = re.compile(r"[0-9]++(?:-|\Z)")
+
     _template_name = "nestingdolls/sequence/{layout}.html"
     use_fieldset = True
     _child_field: Field
     limits: SequenceField.Limits
-
-    class RowForm(Form):
-        """Wrap one child field without changing its visible key."""
-
-        def add_prefix(self, field_name: str) -> str:
-            """Keep the value field on its row prefix."""
-            if field_name == row_value_name and self.prefix:
-                return self.prefix
-            return super().add_prefix(field_name)
 
     class RowFormSet(BaseFormSet):  # type: ignore[type-arg]
         """Build rows with the owning sequence widget's shared budget."""
 
         sequence_widget: SequenceWidget
         submission_total_form_count: int
+        # A disabled sequence sets this. Django does not give ``disabled`` to a row field.
+        rows_disabled = False
         # new_formset can set these from the parent form.
         form_renderer: BaseRenderer | None
         renderer: BaseRenderer
@@ -392,11 +435,24 @@ class SequenceWidget(CompositeWidget):
                 kwargs["empty_permitted"] = False
             return kwargs
 
+        def add_fields(self, form: BaseForm, index: int | None) -> None:
+            """Disable the value field of each row of a disabled sequence.
+
+            Do this as each row builds. A loop over ``forms`` before the render
+            would build the rows outside its shared budget.
+            """
+            super().add_fields(form, index)
+            if self.rows_disabled:
+                form.fields[self.sequence_widget.row_value_name].disabled = True
+
         @cached_property
         def rows_with_submitted_values(self) -> set[str]:
-            """Return row prefixes that have submitted content.
+            """Return the prefixes of rows that have a non-blank submitted value.
 
-            Skip delete and management keys, including keys of nested formsets.
+            A rendered row always posts its delete key and blank values, so only
+            a non-blank value counts as content. Skip delete and management keys,
+            including those of nested formsets, but not a mapping member that
+            has such a name.
             """
             prefix = f"{self.prefix}-"
             start = len(prefix)
@@ -406,13 +462,13 @@ class SequenceWidget(CompositeWidget):
                 for key in source:
                     if key[:start] != prefix:
                         continue
-                    end = key.find("-", start)
                     last_name = key.rpartition("-")[2]
                     if (
-                        last_name in MANAGEMENT_NAMES
+                        last_name in self.sequence_widget.management_names
                         or last_name == DELETION_FIELD_NAME
-                    ):
+                    ) and self.sequence_widget.is_control_key(key[start:]):
                         continue
+                    end = key.find("-", start)
                     row = key if end < 0 else key[:end]
                     if row in found:
                         continue
@@ -436,7 +492,9 @@ class SequenceWidget(CompositeWidget):
             cannot re-enter the countdown.
             """
             if hasattr(self, "submission_total_form_count"):
-                return self.submission_total_form_count
+                # Exact rows already reserved their budget; keep the original
+                # management total for validation while capping built rows.
+                return min(self.submission_total_form_count, self.absolute_max)
             with self.sequence_widget.submission_countdown.open(
                 self.sequence_widget.limits.submission_max
             ) as countdown:
@@ -602,7 +660,9 @@ class SequenceWidget(CompositeWidget):
             # SequenceField.__deepcopy__ then gives each copy that one
             # cached class. Without this, each row builds two new classes.
             _ = child_widget.formset_class
-        row_form = type("Row", (self.RowForm,), {row_value_name: self.child_field})
+        # Django's own add_prefix names the row value "<row>-value", apart from
+        # the formset's "<row>-DELETE" control.
+        row_form = type("Row", (Form,), {self.row_value_name: self.child_field})
         return formset_factory(
             row_form,
             formset=self.RowFormSet,
@@ -625,8 +685,8 @@ class SequenceWidget(CompositeWidget):
         auto_id: str | bool = "id_%s",
         error_class: type[ErrorList] = ErrorList,
         renderer: BaseRenderer | None = None,
-        form_kwargs: dict[str, object] | None = None,
         submission_total_form_count: int | None = None,
+        error_messages: Mapping[str, str | Promise] | None = None,
     ) -> RowFormSet:
         """Build a row formset for this widget.
 
@@ -641,7 +701,7 @@ class SequenceWidget(CompositeWidget):
             # django-stubs accepts only str. Django passes bool auto_id values to rows.
             auto_id=auto_id,  # type: ignore[arg-type]
             error_class=error_class,
-            form_kwargs=form_kwargs,
+            error_messages=error_messages,  # type: ignore[arg-type]  # Django accepts lazy messages.
         )
         if renderer is not None:
             formset.form_renderer = renderer
@@ -651,19 +711,23 @@ class SequenceWidget(CompositeWidget):
             formset.submission_total_form_count = submission_total_form_count
         return formset
 
+    def exact_rows(self, values: list[object], name: str) -> dict[str, object]:
+        """Expand exact rows to the prefixed keys their row widgets read."""
+        child_widget = self.child_field.widget
+        rows: dict[str, object] = {}
+        for index, value in enumerate(islice(values, self.limits.absolute_max)):
+            rows.update(
+                self._exact_child_items(
+                    child_widget, f"{name}-{index}-{self.row_value_name}", value
+                )
+            )
+        return rows
+
     def data_from_exact_list(
         self, values: list[object], name: str
     ) -> dict[str, object]:
-        """Give each row of an exact list its own key.
-
-        An exact list carries no per-row prefixed keys. Build one key per row
-        so the row formset binds and can render row errors. A plain mapping
-        keeps a nested list as one sequence value, instead of treating it as
-        repeated request input.
-        """
-        rows: dict[str, object] = {
-            f"{name}-{index}": value for index, value in enumerate(values)
-        }
+        """Expand exact rows to row keys, with management keys for the formset."""
+        rows = self.exact_rows(values, name)
         total = str(len(values))
         rows[f"{name}-{TOTAL_FORM_COUNT}"] = total
         rows[f"{name}-{INITIAL_FORM_COUNT}"] = total
@@ -678,9 +742,29 @@ class SequenceWidget(CompositeWidget):
         child_key = key.removeprefix(f"{name}-")
         if child_key == key or not child_key:
             return False
-        if child_key in MANAGEMENT_NAMES:
+        if child_key in self.management_names:
             return True
-        return "0" <= child_key[0] <= "9"
+        return self.row_index.match(child_key) is not None
+
+    def is_control_key(self, key: str) -> bool:
+        """Report whether a key under this sequence's name is a formset control.
+
+        A control is a management key, a row delete key, or a control of a
+        nested sequence. A row value that has no nested sequence has none.
+        """
+        if key in self.management_names:
+            return True
+        row = self.row_index.match(key)
+        if row is None:
+            return False
+        rest = key[row.end() :]
+        value_prefix = f"{self.row_value_name}-"
+        child_widget = self.child_field.widget
+        return rest == DELETION_FIELD_NAME or (
+            isinstance(child_widget, (MappingWidget, SequenceWidget))
+            and rest.startswith(value_prefix)
+            and child_widget.is_control_key(rest[len(value_prefix) :])
+        )
 
     def has_row_input(
         self,
@@ -688,22 +772,17 @@ class SequenceWidget(CompositeWidget):
         files: Mapping[str, object],
         name: str,
     ) -> bool:
-        """Report whether either source holds a per-row prefixed key.
+        """Report whether either source has a key for an indexed row.
 
-        A plain loop, not a generator expression: this reads every key of
-        a submission, so one frame resume per key is real cost. Two slice
-        comparisons for the same reason, rather than ``startswith`` and an
-        index: the prefix length is already in hand, and ``str.startswith``
-        builds an argument tuple on every call where a slice builds none.
-        Neither slice needs a length guard. A key shorter than the prefix
-        yields a shorter string, which cannot equal it, and a key that ends
-        at the prefix yields ``""``, which sorts below ``"0"``.
+        A row index is ASCII digits, then ``-`` or the end of the key. This
+        reads every submitted key, so it uses a plain loop and a slice compare.
+        Both cost less per key than ``any()`` and ``startswith()``.
         """
         prefix = f"{name}-"
         start = len(prefix)
         for source in (data, files):
             for key in source:
-                if key[:start] == prefix and "0" <= key[start : start + 1] <= "9":
+                if key[:start] == prefix and self.row_index.match(key, start):
                     return True
         return False
 
@@ -717,7 +796,7 @@ class SequenceWidget(CompositeWidget):
         return any(
             f"{name}-{field_name}" in source
             for source in (data, files)
-            for field_name in MANAGEMENT_NAMES
+            for field_name in self.management_names
         )
 
     def is_bound_formset(
@@ -743,12 +822,11 @@ class SequenceWidget(CompositeWidget):
         files: Mapping[str, object],
         name: str,
     ) -> object:
-        """Extract exact input, or bound formset rows when none exists.
+        """Extract the rows, within the shared row budget.
 
-        Indexed row keys outrank exact input. Without indexed rows, exact
-        input outranks management keys and keeps its source shape: an ordinary
-        mapping supplies its value directly, and a Django multi-value mapping
-        supplies its repeated values through ``getlist``.
+        Indexed row keys outrank an exact value under the field's own name.
+        An exact value outranks management keys alone. A Django multi-value
+        mapping gives an exact value through ``getlist``.
         """
         source: Mapping[str, object] | None
         if name in data:
@@ -772,19 +850,25 @@ class SequenceWidget(CompositeWidget):
             if source is not None and not has_row_input:
                 getlist = getattr(source, "getlist", None)
                 values = source.get(name) if getlist is None else getlist(name)
-                if isinstance(values, list):
-                    return values[: countdown.take(len(values))]
+                if isinstance(values, Collection) and not isinstance(
+                    values, (Mapping, str, bytes, bytearray)
+                ):
+                    return list(islice(values, countdown.take(len(values))))
                 return values
+            # A hidden sequence posts every input as text, so a file child reads data.
             formset = self.new_formset(
                 data=data,
-                files=cast("MultiValueDict[str, UploadedFile[bytes]]", files),
+                files=cast(
+                    "MultiValueDict[str, UploadedFile[bytes]]",
+                    data if self.is_hidden else files,
+                ),
                 prefix=name,
             )
-            return [form[row_value_name].data for form in formset.forms]
+            return [form[self.row_value_name].data for form in formset.forms]
 
     def initial_rows(self, value: Sequence[object] | None) -> list[dict[str, object]]:
         """Adapt public sequence values to the concrete row form's initial data."""
-        return [{row_value_name: row} for row in value or ()]
+        return [{self.row_value_name: row} for row in value or ()]
 
     def default_initial_rows(
         self, value: Sequence[object] | None
@@ -796,7 +880,7 @@ class SequenceWidget(CompositeWidget):
         """
         initial = self.initial_rows(value)
         if not initial and self.is_required and self.limits.min_length == 0:
-            initial = [{row_value_name: None}]
+            initial = [{self.row_value_name: None}]
         return initial
 
     def get_context(
@@ -811,27 +895,34 @@ class SequenceWidget(CompositeWidget):
             widget_context: dict[str, object] = context["widget"]
             final_attrs: dict[str, object] = widget_context["attrs"]  # type: ignore[assignment]
             container_invalid = final_attrs.pop("aria-invalid", None)
+            group_attrs: dict[str, object] = {}
+            if FormLayout.current() is not FormLayout.div:
+                # mapping/attrs.html skips a False value. The rows do not
+                # repeat what the group holds.
+                group_attrs = {
+                    "role": "group",
+                    "aria-invalid": container_invalid or False,
+                    "aria-label": final_attrs.pop("aria-label", False),
+                    "aria-labelledby": final_attrs.pop("aria-labelledby", False),
+                    "aria-describedby": final_attrs.pop("aria-describedby", False),
+                }
+                container_invalid = None
             id_value = final_attrs.get("id")
             id_ = id_value if isinstance(id_value, str) else None
             disabled = bool(final_attrs.get("disabled"))
             if self.is_hidden and self.render_state.hidden_initial_value is not None:
                 value = cast("Sequence[object]", self.render_state.hidden_initial_value)
-            formset = self.render_state.formset
-            if self.render_state.submission_overflow:
-                formset = self.new_formset(initial=[], prefix=name)
-            else:
-                formset = formset or self.new_formset(
-                    initial=self.default_initial_rows(value), prefix=name
-                )
-
+            formset = self.render_state.formset or self.new_formset(
+                initial=self.default_initial_rows(value), prefix=name
+            )
+            if self.render_state.hidden_initial_value is not None:
+                # Hidden initial rows use the formset's default ID scheme.
+                id_ = formset.auto_id % name
             management_form = formset.management_form
             if not self.is_hidden:
                 management_form.fields[TOTAL_FORM_COUNT].widget.attrs[
                     "data-sequence-total"
                 ] = ""
-            if disabled:
-                for management_field in management_form.fields.values():
-                    management_field.widget.attrs["disabled"] = True
 
             help_text = self.child_field.help_text
             help_text_id = f"{id_}_rows_helptext" if id_ and help_text else None
@@ -842,37 +933,57 @@ class SequenceWidget(CompositeWidget):
                 )
 
             forms = formset.forms
+            if formset.is_bound:
+                # A hidden render may precede outer validation. Clean once
+                # before selecting rows so posted DELETE flags survive rebind.
+                _ = formset.errors
             deleted_forms = {
                 id(form)
                 for form in forms
                 if getattr(form, "cleaned_data", {}).get(DELETION_FIELD_NAME)
             }
 
-            rows = [
-                self._row_context(form, index, final_attrs, id_)
+            visible_forms = [
+                (index, form)
                 for index, form in enumerate(forms)
                 if id(form) not in deleted_forms
             ]
-            empty_row = self._row_context(
-                formset.empty_form, "__prefix__", final_attrs, id_
+            # The fieldset already refers to the field error list. When no
+            # row has an error of its own, mark each row input invalid.
+            rows_invalid = bool(container_invalid) and not any(
+                form[self.row_value_name].errors for _index, form in visible_forms
             )
-            if container_invalid and not any(row["errors"] for row in rows):
-                # The fieldset already refers to the field error list.
-                for row in rows:
-                    subwidget: dict[str, object] = row["subwidget"]  # type: ignore[assignment]
-                    self._mark_row_invalid(subwidget, None)
+            rows = [
+                self._row_context(
+                    form, index, final_attrs, id_, mark_invalid=rows_invalid
+                )
+                for index, form in visible_forms
+            ]
+            # A hidden render has no <template> for the empty row.
+            empty_row = (
+                None
+                if self.is_hidden
+                else self._row_context(
+                    formset.empty_form, "__prefix__", final_attrs, id_
+                )
+            )
 
             widget_context.update(
                 {
                     "rows": rows,
                     "empty_row": empty_row,
                     "management_form": management_form,
-                    "minimum_forms": self.limits.min_length,
+                    # The script keeps this many rows. An optional sequence
+                    # can lose every row, because it accepts an empty value.
+                    "minimum_forms": (
+                        self.limits.min_length if self.is_required else 0
+                    ),
                     "maximum_forms": self.limits.max_length,
                     "absolute_maximum_forms": self.limits.absolute_max,
                     "disabled": disabled or self.render_state.submission_overflow,
                     "child_help_text": help_text,
                     "child_help_text_id": help_text_id,
+                    "group_attrs": group_attrs,
                 }
             )
             if deleted_forms and not self.render_state.submission_overflow:
@@ -883,12 +994,25 @@ class SequenceWidget(CompositeWidget):
                 ]
             return context
 
+    @staticmethod
+    def _child_value(widget: Widget, value: object) -> object:
+        """Decompress a string for a compound widget; malformed input renders blank."""
+        if not isinstance(widget, MultiWidget) or not isinstance(value, str):
+            return value
+        try:
+            return widget.decompress(value)
+        except (AttributeError, TypeError, ValueError):
+            # The child field still reports the row error.
+            return None
+
     def _row_context(
         self,
         form: BaseForm,
         index: int | str,
         attrs: dict[str, object],
         id_: str | None,
+        *,
+        mark_invalid: bool = False,
     ) -> dict[str, object]:
         """Build the template context for one row form."""
         from nestingdolls.boundfield import CompositeBoundField  # noqa: PLC0415
@@ -898,7 +1022,7 @@ class SequenceWidget(CompositeWidget):
             child_attrs["id"] = f"{id_}_{index}"
         if self.child_field.disabled:
             child_attrs["disabled"] = True
-        child = form[row_value_name]
+        child = form[self.row_value_name]
         child_widget = self._child_widget(child.field)
         if isinstance(child, CompositeBoundField):
             if not isinstance(child_widget, CompositeWidget):
@@ -910,51 +1034,72 @@ class SequenceWidget(CompositeWidget):
             child_value = child.initial
         else:
             child_value = child.value()
-        if isinstance(child_widget, MultiWidget) and isinstance(child_value, str):
-            child_value = None
-        context = child_widget.get_context(child.html_name, child_value, child_attrs)
+        context = child_widget.get_context(
+            child.html_name, self._child_value(child_widget, child_value), child_attrs
+        )
         subwidget: dict[str, object] = context["widget"]
         errors = list(child.errors)
         row: dict[str, object] = {
             "index": index,
             "delete_name": f"{form.prefix}-{DELETION_FIELD_NAME}",
-            "subwidget": subwidget,
             "errors": errors,
         }
-        if not errors:
-            return row
-        child_attrs = subwidget["attrs"]  # type: ignore[assignment]
-        id_value = child_attrs.get("id")
-        child_id = id_value if isinstance(id_value, str) else None
-        # Use the form error class and renderer for row errors.
-        # django-stubs excludes lazy translation promises that Django accepts.
-        row["errors"] = form.error_class(
-            errors,  # type: ignore[arg-type]
-            renderer=form.renderer,
-            field_id=child_id,
+        if errors:
+            child_attrs = subwidget["attrs"]  # type: ignore[assignment]
+            id_value = child_attrs.get("id")
+            child_id = id_value if isinstance(id_value, str) else None
+            # Use the form error class and renderer for row errors.
+            # django-stubs excludes lazy translation promises that Django accepts.
+            row["errors"] = form.error_class(
+                errors,  # type: ignore[arg-type]
+                renderer=form.renderer,
+                field_id=child_id,
+            )
+            error_id = f"{child_id}_error" if child_id else None
+            self._mark_row_invalid(child_widget, subwidget, error_id)
+        elif mark_invalid:
+            self._mark_row_invalid(child_widget, subwidget, None)
+        # Render the marked context with the row form's renderer, as
+        # Django's Widget._render does.
+        row["widget_html"] = mark_safe(  # noqa: S308
+            form.renderer.render(child_widget.template_name, context)  # type: ignore[arg-type]
         )
-        error_id = f"{child_id}_error" if child_id else None
-        self._mark_row_invalid(subwidget, error_id)
         return row
 
     def _mark_row_invalid(
-        self, widget_context: dict[str, object], error_id: str | None
+        self, widget: Widget, widget_context: dict[str, object], error_id: str | None
     ) -> None:
         """Point every input of one row at that row's error list.
 
         A MultiWidget copies the parent attributes into each child context, so
-        walk the tree and give each input the same row error reference.
+        walk the tree and give each input the same row error reference. Mark
+        an option only where Django gives options the widget attributes: a
+        radio or checkbox option is an input, but a select option is not.
         """
         child_attrs: dict[str, object] = widget_context["attrs"]  # type: ignore[assignment]
-        child_attrs["aria-invalid"] = "true"
-        if error_id:
-            described_by = child_attrs.get("aria-describedby")
-            child_attrs["aria-describedby"] = (
-                f"{described_by} {error_id}" if described_by else error_id
-            )
+        marked = [child_attrs]
         subwidgets: list[dict[str, object]] = widget_context.get("subwidgets", [])  # type: ignore[assignment]
-        for child_context in subwidgets:
-            self._mark_row_invalid(child_context, error_id)
+        for child_widget, child_context in zip(
+            getattr(widget, "widgets", ()), subwidgets, strict=False
+        ):
+            self._mark_row_invalid(child_widget, child_context, error_id)
+        if getattr(widget, "option_inherits_attrs", False):
+            optgroups = cast(
+                "list[tuple[object, list[dict[str, dict[str, object]]], object]]",
+                widget_context.get("optgroups", []),
+            )
+            marked += [
+                option["attrs"]
+                for _label, options, _index in optgroups
+                for option in options
+            ]
+        for attrs in marked:
+            attrs["aria-invalid"] = "true"
+            if error_id:
+                described_by = attrs.get("aria-describedby")
+                attrs["aria-describedby"] = (
+                    f"{described_by} {error_id}" if described_by else error_id
+                )
 
     @property
     def is_hidden(self) -> bool:

@@ -19,9 +19,8 @@ is progressive enhancement only.
   `TooManyFormsValidationError` are `ValidationError` subclasses.
 - `CompositeField`, `CompositeWidget`, and `CompositeBoundField` are internal
   shared bases. Keep behavior cohorts in their owner nested classes, such as
-  `SequenceField.Limits`, `SequenceWidget.RowForm`,
-  `SequenceWidget.RowFormSet`, `SequenceWidget.submission_countdown`, and
-  widget `RenderState` classes.
+  `SequenceField.Limits`, `SequenceWidget.RowFormSet`,
+  `SequenceWidget.submission_countdown`, and widget `RenderState` classes.
 - Use `_` only for a member called through `self` or subclass inheritance. If
   another class calls it directly, remove `_`. Nested classes already scope
   their members; do not add `_` there for privacy. Use lower-snake-case
@@ -83,7 +82,17 @@ is progressive enhancement only.
   `nestingdolls:sequence-change`; the host page owns announcements.
 - Keep the supported form-layout patch and four layout templates for each
   composite. Keep hidden-initial work to `from_hidden_initial` and
-  `RenderState.hidden_initial_value`; do not add passes or render state.
+  `RenderState.hidden_initial_value`; do not add passes or render state. A
+  composite hidden initial uses Django's default `auto_id` and renderer, not
+  the outer form's; this is a known limitation, do not plumb them through.
+- In the paragraph, list, and table layouts the group name comes from the field
+  label, through the generated id `<field id>_label`. A sibling field named
+  `<name>_label` collides with it, as with Django's `_helptext` ids. With
+  `auto_id=False` the group has no generated name, as `aria-describedby` is
+  not set without ids. A caller's `aria-label` or `aria-labelledby` is kept.
+  These are known limitations; do not plumb them through. A composite that is
+  a `SequenceField` row child gets no generated name, because the sequence
+  widget renders each row wrapper directly; the named sequence group holds it.
 
 ### Collections and documentation
 
@@ -91,6 +100,15 @@ is progressive enhancement only.
   Keep `SetField.has_changed` linear and conservative: pair a converted row
   with its hashed member, and report ambiguity as a change. Do not add a
   pairwise scan or comparison budget.
+- Each child field compares an added row with `None`, as Django does for one
+  value: `CharField(required=False).has_changed(None, "")` is false. Do not
+  make `SequenceField.has_changed` count length growth: a bound form sends
+  the browser rows of a row formset through it, and cleaning drops their
+  blank added rows. `SequenceBoundField.has_row_changes` reports the exact
+  rows that cleaning keeps.
+- Keep the initial members of a `SetField` raw. A literal initial that holds
+  `"1"` beside `1` reports a change by design. Converting the members merges
+  `JSONField` members that differ (`1` and `"1"`) and hides a change.
 - Use ASD-STE100 in comments and docstrings. A comment must explain a
   non-obvious reason, an unidiomatic construct, or a bug cause; it must not
   restate code or excuse unclear code. Put a needed ticket, specification, or
@@ -126,6 +144,10 @@ this budget; their callers own byte and depth limits.
   rows again; pass an exact-list reservation through `new_formset` with
   `submission_total_form_count` and document the inherited reservation.
   `take(count <= 0)` returns zero and never spends or refunds capacity.
+- Build rows only inside a scope that holds the budget. A disabled sequence
+  disables its row fields in `RowFormSet.add_fields` as each row builds, never
+  in a loop over `formset.forms` after `new_formset`: that loop builds every
+  row outside the render countdown.
 - `Limits.submission_max` is `max(absolute_max, DATA_UPLOAD_MAX_NUMBER_FIELDS)`
   for each submission. It covers one sequence field's nested tree only, never
   sibling fields, forms, or requests.
@@ -144,11 +166,17 @@ numbers.
 - On a source with `getlist`, call it once and use its result. On a plain
   mapping, use `get`. Do not copy, pre-check, cast, or wrap values only to
   scan them.
-- A row's structural keys are not content, at any nesting depth. Compare the
-  key's last segment with the management names and the delete name. Do not read
-  the segment after this row's own prefix: a rendered row also sends the four
-  management keys of every nested formset, and treating those as content pins
-  every outer row to `empty_permitted=False`.
+- A row's structural keys are not content, at any nesting depth: a rendered row
+  also sends the delete key and the management keys of every nested formset,
+  and treating those as content pins every outer row to
+  `empty_permitted=False`. First compare the key's last segment with the
+  management names and the delete name, as a cheap filter. Only a key that
+  passes goes to `SequenceWidget.is_control_key` on the key below the formset
+  prefix. That method and `MappingWidget.is_control_key` walk the widget tree
+  and classify the key relative to the nested sequence that owns it, so a
+  mapping member named `DELETE` or `TOTAL_FORMS` is content. Do not replace the
+  walk with a token rule: the same key text is a control for a sequence child
+  and content for a mapping member.
 - Keep `MappingWidget._accepts_key` on its measured `removeprefix` path unless
   a new measurement finds a material regression. Use wall time, not a
   `cProfile` call count that hides slice-opcode cost.

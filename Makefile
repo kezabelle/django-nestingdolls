@@ -9,7 +9,7 @@ PYTHON_SUPPORT_FILES := $(wildcard tests/support/*.py tests/support/forms/*.py)
 PYTHON_FILES := demo.py nestingdolls pathological.py $(PYTHON_TEST_FILES) $(PYTHON_SUPPORT_FILES) mypy_settings.py
 COMPILED_JS := nestingdolls/static/nestingdolls/sequence.js
 
-.PHONY: js jsdrift tscheck jstest format formatcheck ruff rufffix mypy test test-django pathological distcheck check fix
+.PHONY: js jsdrift tscheck jstest jscov format formatcheck ruff rufffix mypy test test-django pathological distcheck check fix
 
 .DEFAULT_GOAL := help
 
@@ -35,6 +35,9 @@ tscheck: ## Check TypeScript. Do not write files.
 
 jstest: ## Run JavaScript DOM tests.
 	$(NPM) test
+
+jscov: ## Measure jsdom test coverage of sequence.js. Not part of check.
+	node --test --experimental-test-coverage --test-coverage-include=$(COMPILED_JS) tests/test_sequence.mjs
 
 format: ## Run Ruff formatter on maintained Python files.
 	$(RUFF) format $(PYTHON_FILES)

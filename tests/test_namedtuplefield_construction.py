@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import unittest
-from typing import NamedTuple
+from collections import namedtuple
+from typing import NamedTuple, Self
 
 from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase
@@ -46,6 +47,36 @@ class NamedTupleFieldConstructionTestCase(SimpleTestCase):
         """The child Form's field names must match output._fields exactly."""
         with self.assertRaises(ImproperlyConfigured):
             nestingdolls.NamedTupleField(PointWithZForm, output=NamedTuplePoint)
+
+    def test_rejects_output_with_required_constructor_argument_not_in_form(
+        self,
+    ) -> None:
+        """A named tuple whose ``__new__`` needs an argument the Form lacks fails early."""
+
+        class PointWithToken(namedtuple("PointBase", "x y")):  # noqa: PYI024
+            __slots__ = ()
+
+            def __new__(cls, x: object, y: object, token: object) -> Self:
+                return super().__new__(cls, x, y)
+
+        with self.assertRaisesMessage(
+            ImproperlyConfigured, "fields as keyword arguments"
+        ):
+            nestingdolls.NamedTupleField(OutputPointForm, output=PointWithToken)
+
+    def test_rejects_output_with_positional_only_field_parameters(self) -> None:
+        """A named tuple whose ``__new__`` takes the fields only by position fails early."""
+
+        class PositionalPoint(namedtuple("PointBase", "x y")):  # noqa: PYI024
+            __slots__ = ()
+
+            def __new__(cls, x: object, y: object, /) -> Self:
+                return super().__new__(cls, x, y)
+
+        with self.assertRaisesMessage(
+            ImproperlyConfigured, "fields as keyword arguments"
+        ):
+            nestingdolls.NamedTupleField(OutputPointForm, output=PositionalPoint)
 
     def test_infers_type_from_base_fields_and_fills_removed_fields(self) -> None:
         """Test infers type from base fields and fills removed fields."""

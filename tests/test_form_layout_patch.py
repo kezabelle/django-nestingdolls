@@ -299,8 +299,8 @@ class UnpatchedCompositeWidgetRenderingTestCase(SimpleTestCase):
 
         self.assertIn('data-widget="sequence"', html)
         self.assertIn("<div", html)
-        self.assertIn('name="values-0"', html)
-        self.assertIn('name="values-1"', html)
+        self.assertIn('name="values-0-value"', html)
+        self.assertIn('name="values-1-value"', html)
 
 
 class FormLayoutTemplateDiscoveryTestCase(SimpleTestCase):
@@ -321,8 +321,8 @@ class FormLayoutTemplateDiscoveryTestCase(SimpleTestCase):
         self.assertIn('<span data-widget="mapping"', html)
         self.assertIn('<span data-widget="sequence"', html)
         self.assertIn('name="point-a"', html)
-        self.assertIn('name="values-0"', html)
-        self.assertIn('name="values-1"', html)
+        self.assertIn('name="values-0-value"', html)
+        self.assertIn('name="values-1-value"', html)
 
     @override_settings(
         INSTALLED_APPS=("django.forms",),
@@ -367,5 +367,5 @@ class FormLayoutTemplateDiscoveryTestCase(SimpleTestCase):
         self.assertNotIn('<span data-widget="mapping"', html)
         self.assertNotIn('<span data-widget="sequence"', html)
         self.assertIn('name="point-a"', html)
-        self.assertIn('name="values-0"', html)
-        self.assertIn('name="values-1"', html)
+        self.assertIn('name="values-0-value"', html)
+        self.assertIn('name="values-1-value"', html)

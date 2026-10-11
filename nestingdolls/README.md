@@ -86,6 +86,12 @@ If you want to handle `{"key": {"subkey": 1}}` you're looking for these.
 match the child form's declared names. An optional `DictField` returns `{}` when
 empty; optional `NamedTupleField` and `DataclassField` return `None`.
 
+`DataclassField` also needs `output` to accept every child form field as a
+keyword argument. A `kw_only` field or a default is fine. An `InitVar` without a
+default, or `@dataclass(init=False)`, raises `ImproperlyConfigured` when you
+declare the field. A `ValueError` raised by the dataclass, for example in
+`__post_init__`, becomes an error on the field.
+
 #### Sequences and repeated values
 
 A sequence field takes one Django `Field` and makes a copy for each row. Its
@@ -154,30 +160,47 @@ validator error. Child errors stay out of it, so they do not show up twice.
 
 #### Where a child failure is recorded
 
-A child failure is recorded on the *outer* field as an `ItemValidationError`
-with `code="item_invalid"`. Its `params` carry the locator:
+A child failure is recorded on the *outer* field as an `ItemValidationError`,
+one for each child message. Its `code` is always `"item_invalid"`. These
+attributes say where it came from:
 
-| Key | Value |
-| --- | --- |
-| `item` | The child field name for a mapping, or the row index for a sequence. |
-| `message` | The rendered child message. |
-| `child_code` | The child field's own error code, such as `"required"`. |
-
-Read them through `form.errors.as_data()`:
+| Attribute | `params` key | Value |
+| --- | --- | --- |
+| `item` | `item` | The child field name for a mapping (`"__all__"` for a child form's non-field error), or the row index for a sequence. |
+| `child_message` | `message` | The child's message, as a plain `str`. |
+| `child_code` | `child_code` | The child's own error code, such as `"required"`, or `None` if it has none. |
 
 ```python
-form = PointForm({"point-x": ""})  # x is required, y is not submitted
+class PointForm(forms.Form):
+    x = forms.IntegerField()
+    y = forms.IntegerField()
+
+
+class MarkerForm(forms.Form):
+    point = nestingdolls.DictField(PointForm)
+
+
+form = MarkerForm({"point-x": "", "point-y": "3"})
 form.is_valid()  # False
-form.errors["point"]  # ['This field is required.']
-form["point"].errors  # [] — the subform renders it inline
-form.errors.as_data()["point"][0].params
+error = form.errors.as_data()["point"][0]
+error.code  # 'item_invalid'
+error.params
 # {'item': 'x', 'message': 'This field is required.', 'child_code': 'required'}
 ```
 
-`form[name].errors` deliberately omits these, so the subform or the row renders
-each child error exactly once next to the input that caused it. Django's
-`ErrorDict.as_json()` keeps only `message` and `code`, so an API that needs the
-locator must use `as_data()`.
+`params` holds exactly those three keys. Django's `ErrorDict.as_json()` keeps
+only `message` and `code`, so an API that needs `item` must read
+`form.errors.as_data()`. In a nested field, `item` is the locator at that level
+and `child_code` comes from the innermost child.
+
+The child message is rendered when the error is made. It is no longer a lazy
+translation, and the child's own `params` are not kept. Read `child_code`
+instead of parsing the message.
+
+`form[name].errors` leaves these errors out of a visible composite field,
+because its subform or rows already show each child error next to its input. A
+hidden composite field keeps them, so Django's form layouts show them at the
+top of the form.
 
 Include `{{ form.media }}` on any page with a sequence. It loads the JavaScript
 for adding and removing rows. Leave it out and the rows on the page still submit
@@ -204,6 +227,8 @@ document.dispatchEvent(new Event("nestingdolls:sequence-enhance"))
 
 Dispatch the event on `document` after insertion. The controller scans the
 document and enhances every sequence widget that it has not enhanced before.
+Taxi.js reports navigation on its own emitter, not on `document`, so dispatch
+the event from a Taxi.js navigation hook.
 
 A sequence nested in a freshly added row sends its own
 `nestingdolls:sequence-ready` before the outer sequence sends
@@ -213,11 +238,15 @@ A disabled sequence widget gets no browser enhancement. The server renders
 every control disabled and ignores its input, so the script leaves it alone and
 fires no `nestingdolls:sequence-ready` event.
 
+The add and remove buttons follow `min_length`, `max_length`, and
+`absolute_max`. An optional sequence (`required=False`) can lose every row,
+whatever its `min_length`, because Django accepts an empty optional value.
+
 ### Row limits and failure behavior
 
 A sequence on its own follows Django's usual limits. `max_length` and
-`absolute_max` cover that field's rows. If one is too large, Django gives you the
-submitted rows, values, and working controls back with `too_many_forms`.
+`absolute_max` cover that field's rows. The field never builds more than
+`absolute_max` rows. If more rows arrive, it reports `too_many_forms`.
 
 A sequence inside another sequence has one extra guardrail. Django limits request
 keys, files, and bytes while parsing a request, and `absolute_max` limits one
@@ -231,8 +260,7 @@ submission_max = max(absolute_max, DATA_UPLOAD_MAX_NUMBER_FIELDS)
 
 Rows at every level spend that budget before Django builds them. Right on the
 limit works; one row over puts `too_many_forms` on the outer sequence field.
-Separate `ListField` definitions get separate budgets. If two of them should
-share one, a custom `Form` can call `submission_countdown.open()` around both.
+Each sequence field has its own budget.
 
 Once the shared budget is spent, the field comes back as a zero-row disabled
 widget: `TOTAL_FORMS=0`, disabled add and remove controls, and
@@ -241,9 +269,25 @@ remaining rows are not built or echoed back. Bound extraction raises, so an
 over-budget submission never looks like a saved value with some rows missing.
 Hopefully.
 
-Python lists and decoded JSON bypass Django's request parser. The sequence field
-still applies its own row limits, but code accepting arbitrary decoded structures
+Python collections and decoded JSON bypass Django's request parser. The sequence
+field still applies its own row limits. A tuple, range, set, or deque spends the
+shared budget as a list does. Code that accepts arbitrary decoded structures
 still needs a total-size and depth limit of its own.
+
+### Known limitations
+
+With `show_hidden_initial=True`, a composite field's hidden initial inputs use
+Django's default `id_%s` IDs and default form renderer, not the form's own
+`auto_id` and renderer.
+
+A form that overrides `template_name_p`, `template_name_ul`,
+`template_name_table`, or `template_name_div` gets the default `div` layout
+for its composite fields.
+
+Fields that a child form adds in `__init__` bind and clean. The outer field's
+own `has_changed()`, hidden initial value, and `value()` see only the fields of
+a child form built with no arguments. A `MultiWidget` on an added field does not
+read an exact mapping value.
 
 ## How-to
 
@@ -428,9 +472,7 @@ Then add that directory to `PATTERN_LIBRARY`:
 
 ```python
 PATTERN_LIBRARY = {
-    "SECTIONS": (
-        ("forms", ["patterns/forms"]),
-    ),
+    "SECTIONS": (("forms", ["patterns/forms"]),),
 }
 ```
 

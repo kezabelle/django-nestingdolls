@@ -10,7 +10,6 @@ All defects that these tests found are fixed. Each test states the
 behavior it defends.
 """
 
-import time
 import unittest
 from urllib.parse import urlencode
 
@@ -95,14 +94,23 @@ class HostileRequestBodyTestCase(HostileRequestClientTestCase):
         )
         self.assertJSONResponseContains(response, {"value": []})
 
-    def test_client_survives_a_malformed_multipart_body(self) -> None:
-        """A truncated multipart body gives a client error, never a server error."""
+    def test_client_treats_a_malformed_multipart_body_as_an_empty_submission(
+        self,
+    ) -> None:
+        """A truncated multipart body gives a valid empty submission.
+
+        Django's multipart parser finds no complete part, so the optional
+        list cleans to no rows.
+        """
         response = self.client.post(
             "/hostile-row-upload-list/",
             data=b"--frontier\r\nContent-Disposition: form-data; name=",
             content_type="multipart/form-data; boundary=frontier",
         )
-        self.assertLess(response.status_code, 500)
+        self.assertEqual(response.status_code, 200)
+        self.assertJSONResponseContains(
+            response, {"valid": True, "value": [], "errors": {}}
+        )
 
     @override_settings(DATA_UPLOAD_MAX_NUMBER_FILES=2)
     def test_client_survives_more_uploads_than_the_request_allows(self) -> None:
@@ -112,9 +120,9 @@ class HostileRequestBodyTestCase(HostileRequestClientTestCase):
             {
                 f"values-{TOTAL_FORM_COUNT}": "3",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0-upload": SimpleUploadedFile("a.txt", b"a"),
-                "values-1-upload": SimpleUploadedFile("b.txt", b"b"),
-                "values-2-upload": SimpleUploadedFile("c.txt", b"c"),
+                "values-0-value-upload": SimpleUploadedFile("a.txt", b"a"),
+                "values-1-value-upload": SimpleUploadedFile("b.txt", b"b"),
+                "values-2-value-upload": SimpleUploadedFile("c.txt", b"c"),
             },
         )
         self.assertEqual(response.status_code, 400)
@@ -136,7 +144,7 @@ class HostileRowKeyTestCase(HostileRequestClientTestCase):
                 (f"values-{TOTAL_FORM_COUNT}", "1"),
                 (f"values-{INITIAL_FORM_COUNT}", "0"),
                 ("values[0]" + "[0]" * 5000, "deep"),
-                ("values-0", "kept"),
+                ("values-0-value", "kept"),
             ),
         )
         self.assertJSONResponseContains(response, {"value": ["kept"]})
@@ -148,7 +156,7 @@ class HostileRowKeyTestCase(HostileRequestClientTestCase):
                 f"values-{TOTAL_FORM_COUNT}": "1",
                 f"values-{INITIAL_FORM_COUNT}": "0",
                 key: "9",
-                "values-0": "1",
+                "values-0-value": "1",
             },
         )
         self.assertJSONResponseContains(response, {"value": [1]})
@@ -173,62 +181,64 @@ class HostileRowKeyTestCase(HostileRequestClientTestCase):
         """A negative bracket row key does not bind a row."""
         self.assertMalformedBracketKeyDoesNotBind("values[-1]")
 
-    def test_client_ignores_a_row_index_longer_than_the_digit_limit(self) -> None:
-        """A row index with more digits than the limit names no row."""
-        response = self.client.post(
-            "/hostile-integer-list/",
-            {
-                f"values-{TOTAL_FORM_COUNT}": "1",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-99999999": "9",
-                "values-0": "1",
-            },
-        )
-        self.assertJSONResponseContains(response, {"value": [1]})
-
-    def test_client_ignores_invisible_characters_in_row_keys_and_keeps_them_in_values(
-        self,
-    ) -> None:
-        """A zero-width space stays in a value and names no row."""
+    def test_client_keeps_a_zero_width_space_in_a_row_value(self) -> None:
+        """A zero-width space is content, so it stays in the row value."""
         response = self.client.post(
             "/hostile-nested-text-list/",
             {
                 f"values-{TOTAL_FORM_COUNT}": "1",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                f"values-0-{TOTAL_FORM_COUNT}": "1",
-                f"values-0-{INITIAL_FORM_COUNT}": "0",
-                "values-0-0": "text\u200bwith marks",
-                "values-0-\u200b1": "ignored",
+                f"values-0-value-{TOTAL_FORM_COUNT}": "1",
+                f"values-0-value-{INITIAL_FORM_COUNT}": "0",
+                "values-0-value-0-value": "text\u200bwith marks",
             },
         )
         self.assertJSONResponseContains(response, {"value": [["text\u200bwith marks"]]})
 
-    def test_client_ignores_non_ascii_digit_row_indexes_at_every_level(self) -> None:
-        """A Unicode digit names no row at an outer or an inner level."""
+    def test_client_ignores_a_zero_width_row_index_beside_exact_input(self) -> None:
+        """A zero-width space before a digit names no row, so exact input stays."""
         response = self.client.post(
-            "/hostile-nested-text-list/",
-            {
-                f"values-{TOTAL_FORM_COUNT}": "1",
-                f"values-{INITIAL_FORM_COUNT}": "0",
-                f"values-0-{TOTAL_FORM_COUNT}": "1",
-                f"values-0-{INITIAL_FORM_COUNT}": "0",
-                "values-0-0": "kept",
-                "values-\u0661-0": "outer arabic index",
-                "values-0-\u00b2": "inner superscript index",
-            },
+            "/hostile-integer-list/",
+            {"values": "1", "values-\u200b1-value": "9"},
         )
-        self.assertJSONResponseContains(response, {"value": [["kept"]]})
+        self.assertJSONResponseContains(response, {"value": [1]})
 
-    def test_client_ignores_row_indexes_that_cannot_name_a_form(self) -> None:
-        """Oversized and overlong indexes do not reach the formset."""
+    def test_client_ignores_a_unicode_digit_row_index_beside_exact_input(self) -> None:
+        """A Unicode digit names no outer row, so the exact value stays."""
+        for index in ("\u0661", "\u00b2"):
+            with self.subTest(index=index):
+                response = self.client.post(
+                    "/hostile-integer-list/",
+                    {"values": "1", f"values-{index}-value": "9"},
+                )
+                self.assertJSONResponseContains(response, {"value": [1]})
+
+    def test_client_ignores_a_unicode_digit_row_index_beside_exact_inner_input(
+        self,
+    ) -> None:
+        """A Unicode digit names no inner row, so the exact inner value stays."""
+        for index in ("\u0661", "\u00b2"):
+            with self.subTest(index=index):
+                response = self.client.post(
+                    "/hostile-nested-text-list/",
+                    {
+                        f"values-{TOTAL_FORM_COUNT}": "1",
+                        f"values-{INITIAL_FORM_COUNT}": "0",
+                        "values-0-value": ["a", "b"],
+                        f"values-0-value-{index}-value": "9",
+                    },
+                )
+                self.assertJSONResponseContains(response, {"value": [["a", "b"]]})
+
+    def test_client_ignores_a_row_index_beyond_the_total(self) -> None:
+        """A row index that no total reaches does not reach the formset."""
         response = self.client.post(
             "/hostile-integer-list/",
             {
                 f"values-{TOTAL_FORM_COUNT}": "1",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0": "5",
-                "values-9999999": "ignored",
-                "values-12345678": "ignored",
+                "values-0-value": "5",
+                "values-9999999-value": "ignored",
             },
         )
         self.assertJSONResponseContains(response, {"value": [5]})
@@ -249,26 +259,41 @@ class HostileRowValueTestCase(HostileRequestClientTestCase):
             {
                 f"values-{TOTAL_FORM_COUNT}": "1",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0_0": "2026-08-01",
-                "values-0_1": "10:30:00",
+                "values-0-value_0": "2026-08-01",
+                "values-0-value_1": "10:30:00",
             },
         )
         self.assertEqual(managed.status_code, 200)
         self.assertIs(managed.json()["valid"], True)
 
-    def assertCompoundChildWholeValueDoesNotRaise(self, body: object) -> None:  # noqa: D102
+    def assertCompoundChildWholeValueFailsEachRow(
+        self, body: object, row_count: int
+    ) -> None:
+        """Assert a whole value for compound rows fails each row as required.
+
+        A ``SplitDateTimeField`` row reads its parts from ``_0`` and ``_1``
+        keys, and a whole value has no parts.
+        """
         response = self.client.post("/hostile-split-datetime-list/", body)
         self.assertEqual(response.status_code, 200)
+        self.assertJSONResponseContains(
+            response,
+            {
+                "valid": False,
+                "errors": {"values": ["item_invalid"] * row_count},
+                "child_codes": {"values": ["required"] * row_count},
+            },
+        )
 
-    def test_client_survives_a_scalar_whole_value_for_compound_child_rows(
+    def test_client_reports_a_scalar_whole_value_for_compound_child_rows(
         self,
     ) -> None:
-        """A scalar whole value for a compound row does not return HTTP 500."""
-        self.assertCompoundChildWholeValueDoesNotRaise({"values": "abc"})
+        """A scalar whole value for a compound row fails as one required row."""
+        self.assertCompoundChildWholeValueFailsEachRow({"values": "abc"}, 1)
 
-    def test_client_survives_a_list_whole_value_for_compound_child_rows(self) -> None:
-        """A list whole value for a compound row does not return HTTP 500."""
-        self.assertCompoundChildWholeValueDoesNotRaise({"values": ["a", "b"]})
+    def test_client_reports_a_list_whole_value_for_compound_child_rows(self) -> None:
+        """A list whole value for compound rows fails each row as required."""
+        self.assertCompoundChildWholeValueFailsEachRow({"values": ["a", "b"]}, 2)
 
     def test_client_reports_an_unhashable_json_row_as_a_validation_error(
         self,
@@ -282,7 +307,7 @@ class HostileRowValueTestCase(HostileRequestClientTestCase):
             {
                 f"values-{TOTAL_FORM_COUNT}": "1",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0": "[1, 2]",
+                "values-0-value": "[1, 2]",
             },
         )
         self.assertEqual(response.status_code, 200)
@@ -297,9 +322,9 @@ class HostileRowValueTestCase(HostileRequestClientTestCase):
             {
                 f"values-{TOTAL_FORM_COUNT}": "1",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                f"values-0-{TOTAL_FORM_COUNT}": "1",
-                f"values-0-{INITIAL_FORM_COUNT}": "0",
-                "values-0-0": "text\x00with a null",
+                f"values-0-value-{TOTAL_FORM_COUNT}": "1",
+                f"values-0-value-{INITIAL_FORM_COUNT}": "0",
+                "values-0-value-0-value": "text\x00with a null",
             },
         )
         self.assertEqual(response.status_code, 200)
@@ -326,8 +351,8 @@ class HostileSequenceManagementTestCase(HostileRequestClientTestCase):
             {
                 f"values-{TOTAL_FORM_COUNT}": "2",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0": "1",
-                "values-1": "2",
+                "values-0-value": "1",
+                "values-1-value": "2",
             },
         )
         self.assertEqual(control.json()["value"], [1, 2])
@@ -337,8 +362,8 @@ class HostileSequenceManagementTestCase(HostileRequestClientTestCase):
             {
                 f"values-{TOTAL_FORM_COUNT}": "2.0",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0": "1",
-                "values-1": "2",
+                "values-0-value": "1",
+                "values-1-value": "2",
             },
         )
         self.assertJSONResponseContains(response, {"value": [1, 2]})
@@ -377,7 +402,7 @@ class HostileSequenceManagementTestCase(HostileRequestClientTestCase):
                 f"values-{TOTAL_FORM_COUNT}": "1",
                 f"values-{INITIAL_FORM_COUNT}": "0",
                 f"values-{name}": "not a number",
-                "values-0": "5",
+                "values-0-value": "5",
             },
         )
         self.assertEqual(response.status_code, 200)
@@ -404,8 +429,8 @@ class HostileSequenceManagementTestCase(HostileRequestClientTestCase):
             (
                 (f"values-{TOTAL_FORM_COUNT}", "1"),
                 (f"values-{INITIAL_FORM_COUNT}", "0"),
-                ("values-0", "1"),
-                ("values-0", "2"),
+                ("values-0-value", "1"),
+                ("values-0-value", "2"),
             ),
         )
         self.assertJSONResponseContains(response, {"value": [2]})
@@ -418,8 +443,8 @@ class HostileSequenceManagementTestCase(HostileRequestClientTestCase):
                 f"values-{TOTAL_FORM_COUNT}": "2",
                 f"values-{INITIAL_FORM_COUNT}": "0",
                 "values-DELETE": "1",
-                "values-0": "1",
-                "values-1": "2",
+                "values-0-value": "1",
+                "values-1-value": "2",
             },
         )
         self.assertJSONResponseContains(response, {"value": [1, 2]})
@@ -436,9 +461,9 @@ class HostileNestedForgeryTestCase(HostileRequestClientTestCase):
             {
                 f"values-{TOTAL_FORM_COUNT}": "1",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                f"values-0-{TOTAL_FORM_COUNT}": "1",
-                f"values-0-{INITIAL_FORM_COUNT}": "0",
-                "values-0-0": "kept",
+                f"values-0-value-{TOTAL_FORM_COUNT}": "1",
+                f"values-0-value-{INITIAL_FORM_COUNT}": "0",
+                "values-0-value-0-value": "kept",
             },
         )
         self.assertEqual(control.json()["value"], [["kept"]])
@@ -448,10 +473,10 @@ class HostileNestedForgeryTestCase(HostileRequestClientTestCase):
             {
                 f"values-{TOTAL_FORM_COUNT}": "1",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                f"values-0-{TOTAL_FORM_COUNT}": "1",
-                f"values-0-{INITIAL_FORM_COUNT}": "0",
-                "values-0": "forged",
-                "values-0-0": "kept",
+                f"values-0-value-{TOTAL_FORM_COUNT}": "1",
+                f"values-0-value-{INITIAL_FORM_COUNT}": "0",
+                "values-0-value": "forged",
+                "values-0-value-0-value": "kept",
             },
         )
         self.assertJSONResponseContains(response, {"value": [["kept"]]})
@@ -469,10 +494,10 @@ class HostileNestedForgeryTestCase(HostileRequestClientTestCase):
             {
                 f"values-{TOTAL_FORM_COUNT}": "1",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                f"values-0-{TOTAL_FORM_COUNT}": "2",
-                f"values-0-{INITIAL_FORM_COUNT}": "0",
-                "values-0-0": "1",
-                "values-0-1": "2",
+                f"values-0-value-{TOTAL_FORM_COUNT}": "2",
+                f"values-0-value-{INITIAL_FORM_COUNT}": "0",
+                "values-0-value-0-value": "1",
+                "values-0-value-1-value": "2",
             },
         )
         self.assertEqual(control.json()["value"], [[1, 2]])
@@ -482,11 +507,11 @@ class HostileNestedForgeryTestCase(HostileRequestClientTestCase):
             {
                 f"values-{TOTAL_FORM_COUNT}": "1",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                f"values-0-{TOTAL_FORM_COUNT}": "2",
-                f"values-0-{INITIAL_FORM_COUNT}": "0",
-                "values-0": "forged",
-                "values-0-0": "1",
-                "values-0-1": "2",
+                f"values-0-value-{TOTAL_FORM_COUNT}": "2",
+                f"values-0-value-{INITIAL_FORM_COUNT}": "0",
+                "values-0-value": "forged",
+                "values-0-value-0-value": "1",
+                "values-0-value-1-value": "2",
             },
         )
         self.assertJSONResponseContains(response, {"value": [[1, 2]]})
@@ -530,8 +555,8 @@ class HostileNestedForgeryTestCase(HostileRequestClientTestCase):
             {
                 f"values-{TOTAL_FORM_COUNT}": "2",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0": "1",
-                "values-1": "2",
+                "values-0-value": "1",
+                "values-1-value": "2",
             },
         )
         self.assertEqual(control.json()["value"], [1, 2])
@@ -542,8 +567,8 @@ class HostileNestedForgeryTestCase(HostileRequestClientTestCase):
                 f"values-{TOTAL_FORM_COUNT}": "2",
                 f"values-{INITIAL_FORM_COUNT}": "0",
                 "values": "forged",
-                "values-0": "1",
-                "values-1": "2",
+                "values-0-value": "1",
+                "values-1-value": "2",
             },
         )
         self.assertJSONResponseContains(response, {"value": [1, 2]})
@@ -557,8 +582,8 @@ class HostileNestedForgeryTestCase(HostileRequestClientTestCase):
             {
                 f"values-{TOTAL_FORM_COUNT}": "2",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0": "1",
-                "values-1": "2",
+                "values-0-value": "1",
+                "values-1-value": "2",
                 "values": SimpleUploadedFile("forged.txt", b"forged"),
             },
         )
@@ -593,9 +618,9 @@ class HostileNestedForgeryTestCase(HostileRequestClientTestCase):
             },
         )
         self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertIs(body["valid"], False)
-        self.assertNotEqual(body["errors"]["values"], {})
+        self.assertJSONResponseContains(
+            response, {"valid": False, "errors": {"values": ["item_invalid"]}}
+        )
 
     def test_client_validates_a_lone_forged_scalar_instead_of_an_empty_mapping(
         self,
@@ -603,9 +628,9 @@ class HostileNestedForgeryTestCase(HostileRequestClientTestCase):
         """An exact-name scalar with no children is validated, not silently dropped."""
         response = self.client.post("/hostile-plain-mapping/", {"value": "save"})
         self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertIs(body["valid"], False)
-        self.assertNotEqual(body["errors"]["value"], {})
+        self.assertJSONResponseContains(
+            response, {"valid": False, "errors": {"value": ["invalid"]}}
+        )
 
 
 @override_settings(ROOT_URLCONF="tests.support.urls")
@@ -654,9 +679,9 @@ class HostileRenderCostTestCase(HostileRequestClientTestCase):
             f"values-{INITIAL_FORM_COUNT}": "0",
         }
         for index in range(50):
-            payload[f"values-{index}-{TOTAL_FORM_COUNT}"] = "50"
-            payload[f"values-{index}-{INITIAL_FORM_COUNT}"] = "0"
-            payload[f"values-{index}-0"] = "x"
+            payload[f"values-{index}-value-{TOTAL_FORM_COUNT}"] = "50"
+            payload[f"values-{index}-value-{INITIAL_FORM_COUNT}"] = "0"
+            payload[f"values-{index}-value-0-value"] = "x"
 
         response = self.client.post("/hostile-aggregate-cap-list/", payload)
         self.assertEqual(response.status_code, 200)
@@ -677,9 +702,9 @@ class HostileRenderCostTestCase(HostileRequestClientTestCase):
             f"values-{INITIAL_FORM_COUNT}": "0",
         }
         for index in range(50):
-            payload[f"values-{index}-{TOTAL_FORM_COUNT}"] = "50"
-            payload[f"values-{index}-{INITIAL_FORM_COUNT}"] = "0"
-            payload[f"values-{index}-0"] = "x"
+            payload[f"values-{index}-value-{TOTAL_FORM_COUNT}"] = "50"
+            payload[f"values-{index}-value-{INITIAL_FORM_COUNT}"] = "0"
+            payload[f"values-{index}-value-0-value"] = "x"
 
         response = self.client.post("/hostile-aggregate-cap-list/", payload)
         self.assertEqual(response.status_code, 200)
@@ -705,8 +730,8 @@ class HostileRenderCostTestCase(HostileRequestClientTestCase):
             f"values-{INITIAL_FORM_COUNT}": "0",
         }
         for index in range(3):
-            payload[f"values-{index}-{TOTAL_FORM_COUNT}"] = "900"
-            payload[f"values-{index}-{INITIAL_FORM_COUNT}"] = "0"
+            payload[f"values-{index}-value-{TOTAL_FORM_COUNT}"] = "900"
+            payload[f"values-{index}-value-{INITIAL_FORM_COUNT}"] = "0"
         self.assertEqual(len(payload), 8)
 
         response = self.client.post("/hostile-nested-text-list/", payload)
@@ -738,91 +763,54 @@ class HostileRowBudgetTestCase(HostileRequestClientTestCase):
             f"{prefix}-{INITIAL_FORM_COUNT}": "0",
         }
         for index in range(outer_total):
-            payload[f"{prefix}-{index}-{TOTAL_FORM_COUNT}"] = str(inner_total)
-            payload[f"{prefix}-{index}-{INITIAL_FORM_COUNT}"] = "0"
+            payload[f"{prefix}-{index}-value-{TOTAL_FORM_COUNT}"] = str(inner_total)
+            payload[f"{prefix}-{index}-value-{INITIAL_FORM_COUNT}"] = "0"
         return payload
 
-    def test_client_pays_similar_cost_for_a_concentrated_or_spread_out_claim(
-        self,
-    ) -> None:
-        """A spread claim costs about the same as a concentrated claim.
+    def test_concentrated_claim_builds_one_row(self) -> None:
+        """One row that claims 2000 inner rows builds only itself.
 
-        Each ``read_input`` call reserves rows from one shared budget. Both request
-        shapes must reject with similar work.
+        The outer row reserves 1 row from the budget of 2000. The inner claim of
+        2000 then overdraws, so no inner row is built.
         """
-        # A single row asking for more than the shared budget allows is
-        # rejected up front, without building a single child row.
-        cheap_payload = {
-            f"values-{TOTAL_FORM_COUNT}": "1",
-            f"values-{INITIAL_FORM_COUNT}": "0",
-            f"values-0-{TOTAL_FORM_COUNT}": "2000",
-            f"values-0-{INITIAL_FORM_COUNT}": "0",
-        }
-        cheap_start = time.perf_counter()
-        cheap_response = self.client.post("/hostile-nested-text-list/", cheap_payload)
-        cheap_elapsed = time.perf_counter() - cheap_start
+        payload = self._amplified_sequence_payload(
+            "values", outer_total=1, inner_total=2000
+        )
+        built = self._count_rows_built()
+
+        response = self.client.post("/hostile-nested-text-list/", payload)
+
         self.assertJSONResponseContains(
-            cheap_response, {"errors": {"values": ["too_many_forms"]}}
+            response, {"errors": {"values": ["too_many_forms"]}}
         )
+        self.assertEqual(built, [0])
 
-        # The same 2000-row claim, spread across 499 sibling rows instead of
-        # one, stays under Django's default DATA_UPLOAD_MAX_NUMBER_FIELDS
-        # (1000 POST keys) and under every per-level absolute_max.
-        expensive_payload = {
-            f"values-{TOTAL_FORM_COUNT}": "499",
-            f"values-{INITIAL_FORM_COUNT}": "0",
-        }
-        for index in range(499):
-            expensive_payload[f"values-{index}-{TOTAL_FORM_COUNT}"] = "2000"
-            expensive_payload[f"values-{index}-{INITIAL_FORM_COUNT}"] = "0"
-        self.assertLessEqual(len(expensive_payload), 1000)
+    def test_spread_claim_builds_only_its_outer_rows(self) -> None:
+        """499 rows that each claim 2000 inner rows build only the 499 outer rows.
 
-        expensive_start = time.perf_counter()
-        expensive_response = self.client.post(
-            "/hostile-nested-text-list/", expensive_payload
-        )
-        expensive_elapsed = time.perf_counter() - expensive_start
-        self.assertJSONResponseContains(
-            expensive_response, {"errors": {"values": ["too_many_forms"]}}
-        )
-
-        # Both requests reach the same correct verdict from a similar number
-        # of POST keys. A shared budget that gates child work keeps the
-        # expensive shape within a small constant factor of the cheap
-        # shape's time, instead of roughly two orders of magnitude past it.
-        budget_seconds = max(0.5, cheap_elapsed * 20)
-        self.assertLess(
-            expensive_elapsed,
-            budget_seconds,
-            f"a {len(expensive_payload)}-key submission spread across rows "
-            f"took {expensive_elapsed:.3f}s to correctly reject, versus "
-            f"{cheap_elapsed:.3f}s for a single row claiming the same "
-            "total -- the shared row budget did not bound the cost of "
-            "reaching that rejection",
-        )
-
-    def _fastest_of(self, url: str, payload: dict[str, str], repeats: int = 5) -> float:
-        """Return the quickest of several posts to ``url``, damping scheduling noise.
-
-        Each post must still be rejected, so a broken payload cannot pass by
-        cutting the work short.
+        The 1000 management keys stay within Django's default limit of 1000. The 499
+        outer rows fit in the budget of 2000, and the first inner claim of 2000
+        overdraws, so no inner row is built.
         """
-        best = float("inf")
-        for _ in range(repeats):
-            start = time.perf_counter()
-            response = self.client.post(url, payload)
-            best = min(best, time.perf_counter() - start)
-            self.assertEqual(response.status_code, 200)
-            self.assertIs(response.json()["valid"], False)
-        return best
+        payload = self._amplified_sequence_payload(
+            "values", outer_total=499, inner_total=2000
+        )
+        self.assertEqual(len(payload), 1000)
+        built = self._count_rows_built()
 
-    def test_client_pays_at_most_linear_cost_for_sibling_mapping_children(
-        self,
-    ) -> None:
+        response = self.client.post("/hostile-nested-text-list/", payload)
+
+        self.assertJSONResponseContains(
+            response, {"errors": {"values": ["too_many_forms"]}}
+        )
+        self.assertEqual(built, list(range(499)))
+
+    def test_sibling_mapping_children_each_build_one_row(self) -> None:
         """Sibling sequences in a mapping have independent shared budgets.
 
-        This matches Django formsets. The form author fixes the sibling count. This
-        test rejects superlinear sibling cost.
+        This matches Django formsets. The form author fixes the sibling count.
+        One rejected child builds 1 row, and eight rejected children build 8,
+        so the cost is linear in the sibling count.
         """
         amplify = self._amplified_sequence_payload
         one_child_payload = amplify("value-a", outer_total=1, inner_total=2000)
@@ -832,29 +820,24 @@ class HostileRowBudgetTestCase(HostileRequestClientTestCase):
                 amplify(f"value-{child_name}", outer_total=1, inner_total=2000)
             )
         self.assertLessEqual(len(all_children_payload), 1000)
-
+        built = self._count_rows_built()
         url = "/hostile-many-sibling-sequences-mapping/"
-        one_elapsed = self._fastest_of(url, one_child_payload)
-        all_elapsed = self._fastest_of(url, all_children_payload)
 
-        # Eight independent, individually-bounded siblings should cost on
-        # the order of eight times one of them, not orders of magnitude
-        # more, which is what a superlinear regression would look like.
-        budget_seconds = max(0.3, one_elapsed * 8 * 5)
-        self.assertLess(
-            all_elapsed,
-            budget_seconds,
-            f"amplifying all eight sibling sequences took {all_elapsed:.3f}s, "
-            f"versus {one_elapsed:.3f}s for one of them alone -- that is "
-            "worse than the linear-in-sibling-count cost Django's own "
-            "formsets accept",
-        )
+        one_response = self.client.post(url, one_child_payload)
+        rows_for_one_child = len(built)
+        built.clear()
+        all_response = self.client.post(url, all_children_payload)
 
-    def test_client_pays_at_most_linear_cost_for_sibling_list_fields(self) -> None:
+        self.assertIs(one_response.json()["valid"], False)
+        self.assertIs(all_response.json()["valid"], False)
+        self.assertEqual((rows_for_one_child, len(built)), (1, 8))
+
+    def test_sibling_sequence_fields_each_build_one_row(self) -> None:
         """Sibling ``ListField`` instances have independent shared budgets.
 
-        This is the mapping test without ``DictField``. The form author fixes the
-        sibling count. This test rejects superlinear sibling cost.
+        This is the mapping test without ``MappingField``. The form author fixes
+        the sibling count. One rejected field builds 1 row, and eight rejected
+        fields build 8, so the cost is linear in the sibling count.
         """
         amplify = self._amplified_sequence_payload
         one_field_payload = amplify("a", outer_total=1, inner_total=2000)
@@ -864,60 +847,59 @@ class HostileRowBudgetTestCase(HostileRequestClientTestCase):
                 amplify(field_name, outer_total=1, inner_total=2000)
             )
         self.assertLessEqual(len(all_fields_payload), 1000)
-
+        built = self._count_rows_built()
         url = "/hostile-many-sibling-list-fields/"
-        one_elapsed = self._fastest_of(url, one_field_payload)
-        all_elapsed = self._fastest_of(url, all_fields_payload)
 
-        budget_seconds = max(0.3, one_elapsed * 8 * 5)
-        self.assertLess(
-            all_elapsed,
-            budget_seconds,
-            f"amplifying all eight sibling fields took {all_elapsed:.3f}s, "
-            f"versus {one_elapsed:.3f}s for one of them alone -- that is "
-            "worse than the linear-in-sibling-count cost Django's own "
-            "formsets accept",
-        )
+        one_response = self.client.post(url, one_field_payload)
+        rows_for_one_field = len(built)
+        built.clear()
+        all_response = self.client.post(url, all_fields_payload)
 
-    def test_client_pays_bounded_cost_three_sequence_levels_deep(self) -> None:
+        self.assertIs(one_response.json()["valid"], False)
+        self.assertIs(all_response.json()["valid"], False)
+        self.assertEqual((rows_for_one_field, len(built)), (1, 8))
+
+    def test_claim_three_sequence_levels_deep_builds_only_rows_before_the_overdraw(
+        self,
+    ) -> None:
         """The shared budget limits work at a third nesting level.
 
         Two outer rows, two middle rows, and 2000 inner rows claim up to 8000 rows.
-        The same reservation rule must work at every depth.
+        The 2 outer rows and the 2 middle rows of the first outer row fit in the
+        budget of 2000. The first inner claim of 2000 overdraws, so no inner row
+        is built.
         """
         payload = {
             f"values-{TOTAL_FORM_COUNT}": "2",
             f"values-{INITIAL_FORM_COUNT}": "0",
         }
         for outer in range(2):
-            payload[f"values-{outer}-{TOTAL_FORM_COUNT}"] = "2"
-            payload[f"values-{outer}-{INITIAL_FORM_COUNT}"] = "0"
+            payload[f"values-{outer}-value-{TOTAL_FORM_COUNT}"] = "2"
+            payload[f"values-{outer}-value-{INITIAL_FORM_COUNT}"] = "0"
             for middle in range(2):
-                payload[f"values-{outer}-{middle}-{TOTAL_FORM_COUNT}"] = "2000"
-                payload[f"values-{outer}-{middle}-{INITIAL_FORM_COUNT}"] = "0"
+                payload[f"values-{outer}-value-{middle}-value-{TOTAL_FORM_COUNT}"] = (
+                    "2000"
+                )
+                payload[f"values-{outer}-value-{middle}-value-{INITIAL_FORM_COUNT}"] = (
+                    "0"
+                )
         self.assertEqual(len(payload), 14)
+        built = self._count_rows_built()
 
-        start = time.perf_counter()
         response = self.client.post("/hostile-triply-nested-list/", payload)
-        elapsed = time.perf_counter() - start
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertIs(body["valid"], False)
         self.assertEqual(body["errors"], {"values": ["too_many_forms"]})
-        self.assertLess(
-            elapsed,
-            0.5,
-            f"a 14-key, three-level submission asking for 8000 rows took "
-            f"{elapsed:.3f}s to correctly reject",
-        )
+        self.assertEqual(built, [0, 1, 0, 1])
 
     def _count_rows_built(self) -> object:
         """Count row forms built while the returned counter is in scope.
 
-        Wall-clock budgets catch a runaway cost but not a small regression.
         This counts the exact work an attacker's ``TOTAL_FORMS`` keys buy:
-        one call per row form Django constructs, at every nesting level.
+        one call per row form Django constructs, at every nesting level. Wall
+        time stays in ``pathological.py``.
         """
         built = []
         formset_class = nestingdolls.SequenceWidget.RowFormSet
@@ -965,7 +947,7 @@ class HostileRowBudgetTestCase(HostileRequestClientTestCase):
 
         self.assertFormInvalid(form)
         self.assertFormErrorCode(form, "values", "too_many_forms")
-        self.assertEqual(built, ["values", "values-0", "values"])
+        self.assertEqual(built, ["values", "values-0-value", "values"])
 
     def test_overflow_keeps_no_row_a_forged_claim_bought(self) -> None:
         """Keep no row past the budget alive to the end of the response.
@@ -1008,10 +990,10 @@ class HostileRowBudgetTestCase(HostileRequestClientTestCase):
         payload = {
             "values-TOTAL_FORMS": "2",
             "values-INITIAL_FORMS": "0",
-            "values-0-TOTAL_FORMS": "1998",
-            "values-0-INITIAL_FORMS": "0",
-            "values-1-TOTAL_FORMS": "1",
-            "values-1-INITIAL_FORMS": "0",
+            "values-0-value-TOTAL_FORMS": "1998",
+            "values-0-value-INITIAL_FORMS": "0",
+            "values-1-value-TOTAL_FORMS": "1",
+            "values-1-value-INITIAL_FORMS": "0",
         }
         form = NestedSequenceDeletionForm(data=payload)
 
@@ -1031,7 +1013,7 @@ class HostileRowBudgetTestCase(HostileRequestClientTestCase):
         payload = self._amplified_sequence_payload(
             "values", outer_total=5, inner_total=2000
         )
-        payload[f"values-0-{TOTAL_FORM_COUNT}"] = "-1000000"
+        payload[f"values-0-value-{TOTAL_FORM_COUNT}"] = "-1000000"
         built = self._count_rows_built()
         form = NestedSequenceDeletionForm(data=payload)
 
@@ -1106,7 +1088,7 @@ class HostileRowBudgetTestCase(HostileRequestClientTestCase):
         payload = self._amplified_sequence_payload(
             "values", outer_total=20, inner_total=2000
         )
-        payload["values-0-0"] = "real content"
+        payload["values-0-value-0-value"] = "real content"
 
         response = self.client.post("/hostile-empty-permitted-nested-list/", payload)
 
@@ -1131,9 +1113,7 @@ class HostileRowBudgetTestCase(HostileRequestClientTestCase):
         body = response.json()
         self.assertIs(body["valid"], True, body["errors"])
 
-    def test_client_keeps_a_legitimate_submission_whole_after_change_detection(
-        self,
-    ) -> None:
+    def test_change_detection_keeps_nested_values(self) -> None:
         """Change detection must not consume the rows cleaning needs.
 
         A budget spent twice on the same rows would halve it and could reject or
@@ -1144,9 +1124,8 @@ class HostileRowBudgetTestCase(HostileRequestClientTestCase):
         )
         for outer in range(2):
             for inner in range(3):
-                payload[f"values-{outer}-{inner}"] = f"r{outer}c{inner}"
+                payload[f"values-{outer}-value-{inner}-value"] = f"r{outer}c{inner}"
 
-        built = self._count_rows_built()
         response = self.client.post("/hostile-changed-first-nested-list/", payload)
 
         self.assertEqual(response.status_code, 200)
@@ -1156,16 +1135,28 @@ class HostileRowBudgetTestCase(HostileRequestClientTestCase):
             body["value"],
             [["r0c0", "r0c1", "r0c2"], ["r1c0", "r1c1", "r1c2"]],
         )
-        # Two outer rows and three inner rows each: the request builds the
-        # rows it was sent, and change detection does not double the work.
-        self.assertLessEqual(len(built), 16, len(built))
+
+    def test_change_detection_does_not_rebuild_nested_rows(self) -> None:
+        """Change detection and cleaning share one set of built rows.
+
+        The request sends 2 outer rows with 3 inner rows each, which is 2 + 2 * 3
+        row forms. Rebuilding them after change detection would exceed that count.
+        """
+        payload = self._amplified_sequence_payload(
+            "values", outer_total=2, inner_total=3
+        )
+        built = self._count_rows_built()
+
+        self.client.post("/hostile-changed-first-nested-list/", payload)
+
+        self.assertEqual(len(built), 8)
 
     def test_change_detection_without_initial_rows_validates_no_row_form(
         self,
     ) -> None:
         """Change detection answers from extracted values alone.
 
-        ``SequenceBoundField._has_changed`` compares extracted values, and
+        ``CompositeBoundField._has_changed`` compares extracted values, and
         only the deletion of an initial row can report a change beyond
         that comparison. Django's ``deleted_forms`` validates every row
         form before it answers. With no initial rows that validation
@@ -1200,21 +1191,16 @@ class HostileRowBudgetTestCase(HostileRequestClientTestCase):
     def test_rendering_a_bound_mapping_builds_no_second_row_formset(self) -> None:
         """Rendering a bound mapping reuses the rows that cleaning built.
 
-        ``BoundField.as_widget`` always computes ``value()``, and the base
-        behavior extracts the whole mapping to compute it, which builds a
-        fresh row formset for each nested sequence.
-        ``MappingWidget.get_context`` renders from the bound child Form
-        and never reads that value, so ``MappingBoundField.value()``
-        returns the initial value when the child Form owns the bound
-        data, partly for performance and efficiency: the render of a
-        rejected submission would otherwise pay a second full row budget,
-        and ``pathological.py`` measures that page.
+        ``BoundField.as_widget`` computes ``value()``. The bound mapping
+        reads that value from its child Form, and each nested sequence reads
+        its cached row formset, so the render of a rejected submission does
+        not pay a second row budget. ``pathological.py`` measures that page.
         """
         payload = {
             f"value-rows-{TOTAL_FORM_COUNT}": "2",
             f"value-rows-{INITIAL_FORM_COUNT}": "0",
-            "value-rows-0": "1",
-            "value-rows-1": "2",
+            "value-rows-0-value": "1",
+            "value-rows-1-value": "2",
         }
         form = OptionalIntegerSequenceMappingValueForm(payload)
         built = self._count_rows_built()
@@ -1254,8 +1240,8 @@ class HostileFormPrefixTestCase(HostileRequestClientTestCase):
             {
                 f"values-{TOTAL_FORM_COUNT}": "1",
                 f"values-{INITIAL_FORM_COUNT}": "0",
-                "values-0-label": "kept",
-                "values-0-untrusted": "dropped",
+                "values-0-value-label": "kept",
+                "values-0-value-untrusted": "dropped",
             },
         )
         self.assertJSONResponseContains(

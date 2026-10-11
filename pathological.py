@@ -79,7 +79,7 @@ Two costs remain. Both are ceilings rather than amplification, because a request
 cannot raise either bound:
 
 - 0.032s for the widest single-field case, against 0.001s for a 4-key claim
-  asking for the same number of rows. The wide claim builds one outer row per
+  that builds 1 row. The wide claim builds one outer row per
   outer ``TOTAL_FORMS`` unit it carries, so its cost follows the request's
   own key count plus per-key work. See the next section.
 - 0.027s and 488 rows for a form with eight sibling nested sequence fields.
@@ -99,7 +99,7 @@ clean pass, and the baseline runs first.
 
 Profiling the remainder
 -----------------------
-Profile one case, not the whole run, or the totals blend thirteen shapes. The
+Profile one case, not the whole run, or the totals blend fourteen shapes. The
 script does this itself, so there is no snippet here to fall out of date:
 
     make pathological ARGS=--profile
@@ -107,17 +107,19 @@ script does this itself, so there is no snippet here to fall out of date:
     uv run --group dev python pathological.py --profile "8 sibling"
 
 With no argument it profiles the pair named in ``CONTRAST``: the concentrated
-and spread two-level cases, one from 4 keys and one from 998. A label substring
-profiles a different case instead. ``PROFILE_HINT`` repeats how to read the
+two-level claim from 4 keys, and the same claim padded with unrelated keys to
+998. Extraction aborts at the first overdraw, so both build 1 row, and whatever
+separates their profiles is per-key cost. A label substring profiles a different
+case instead, for example the 498-row spread case. Its rows built differ, so its
+profile mixes per-key and per-row work. ``PROFILE_HINT`` repeats how to read the
 output at the point of use.
 
 Sort by ``tottime``, not ``cumtime``. The question is which function burns the
 time itself, and the request path is deep enough that ``cumtime`` puts the test
-client and the view on top and tells you nothing. When the pair was recorded,
-both cases built the same 2,000 rows, so whatever separated their profiles was
-per-key cost. Since extraction began aborting at the first overdraw they build
-1 and 498 rows, so the difference now mixes per-key work with per-row work;
-read the profiles with that in mind.
+client and the view on top and tells you nothing. When the earlier pair was
+recorded, a 4-key claim and a 998-key spread claim built the same 2,000 rows.
+Since extraction began aborting at the first overdraw that spread claim builds
+498 rows, so the padded case replaced it.
 
 No package function appears in the top ten of either final contrast profile.
 The 0.074s concentrated profile, 0.131s spread profile, and 0.705s sibling
@@ -214,9 +216,9 @@ docstring is still where it is written down: a rendered row always sends its
 delete key and always sends blank values, so only a non-blank value counts as
 real content. ``empty_permitted`` correctness rests on that distinction. The
 index preserves it by excluding each row's own delete key and nothing else, so
-a nested row's delete key, ``values-3-0-DELETE``, still counts as content for
-row ``values-3`` exactly as the scan did. Verify with ``make test`` and this
-script, then re-record the numbers above.
+a nested row's delete key, ``values-3-value-0-DELETE``, still counts as
+content for row ``values-3`` exactly as the scan did. Verify with ``make test``
+and this script, then re-record the numbers above.
 
 Two repeats that change detection and the mapping render paid
 -------------------------------------------------------------
@@ -224,28 +226,31 @@ Both fixes live in ``boundfield.py``. Both remove work whose result nothing
 read, partly for performance and efficiency, and neither moves a verdict. The
 only built figure that moves is the mapping render's.
 
-``SequenceBoundField._has_changed`` read ``formset.deleted_forms`` on every
-bound sequence, and Django's ``deleted_forms`` answers by running
-``is_valid()`` first: a full validation pass over every row form, during
-change detection. Only the deletion of an initial row can make that read
-report a change, so a field with no initial rows now returns before it. A
-hostile submission carries no initial rows, so that pass was waste on every
-entry order this script measures: cleaning either raises ``too_many_forms``
-before it reads row errors, or an ``empty_permitted`` form skips its fields
-entirely. A field with initial rows still pays it, and must: deleting an
-initial row is a change that nothing else reports.
+Change detection read ``formset.deleted_forms`` on every bound sequence, and
+Django's ``deleted_forms`` answers by running ``is_valid()`` first: a full
+validation pass over every row form, during change detection. Only the
+deletion of an initial row can make that read report a change, so
+``SequenceBoundField.has_row_changes()`` returns before it for a sequence
+with no initial rows. A hostile submission carries no initial rows, so that
+pass was waste on every entry order this script measures: cleaning either
+raises ``too_many_forms`` before it reads row errors, or an
+``empty_permitted`` form skips its fields entirely. A field with initial rows
+still pays it, and must: deleting an initial row is a change that nothing else
+reports.
 
 The mapping render built a row formset it never read. ``BoundField.as_widget``
-always computes ``value()``, and the base behavior extracts the whole mapping
-to compute it -- for a nested sequence, a fresh row formset holding a full
-budget of rows -- while ``MappingWidget.get_context`` renders from
-``render_state.subform`` and ignores the computed value.
-``MappingBoundField.value()`` now returns the initial value when the subform
-owns the bound data, the same decision ``SequenceBoundField.value()`` already
-made for rows. A scalar or missing submission binds no subform and keeps the
-base behavior, because the user must see that submission again;
-``test_dictfield`` holds that line. ``inside a mapping, changed + render``
-therefore builds one budget of rows, not two.
+always computes ``value()``, and the base behavior extracted the whole mapping
+from the widget to compute it -- for a nested sequence, a fresh row formset
+holding a full budget of rows -- while ``MappingWidget.get_context`` renders
+from ``render_state.subform``. ``MappingBoundField.data`` is now a cached
+property that, when the subform owns the bound data, reads each child's bound
+data through the subform. The inherited ``value()`` therefore reuses each child
+bound field, and a nested sequence reuses the cached
+``SequenceBoundField.formset`` that the render also uses. A scalar or missing
+submission binds no subform and keeps the base extraction, because the user
+must see that submission again; ``test_dictfield`` holds that line.
+``inside a mapping, changed + render`` therefore builds one budget of rows, not
+two.
 
 Verify both with ``make test`` and this script, then re-record the numbers
 above.
@@ -404,10 +409,11 @@ ABORT_SECONDS = float(os.environ.get("BENCH_ABORT", "30"))
 # Row forms built during the case being measured; see counting_rows().
 ROWS_BUILT = [0]
 
-# The pair --profile compares by default. Both build the same number of rows,
-# one from 4 keys and one from 998, so a function whose tottime differs between
-# them is per-key cost rather than row-building cost.
-CONTRAST = ("2 levels, 1x2000 concentrated", "2 levels, 498x2000 spread")
+# The pair --profile compares by default. Both build one row: the first overdraw
+# aborts the request, so the 2000-row claim buys nothing. One sends 4 keys and
+# the other 998 (the same claim padded with unrelated keys), so a function whose
+# tottime differs between them is per-key cost, not row-building cost.
+CONTRAST = ("2 levels, 1x2000 concentrated", "2 levels, 1x2000 padded to 998 keys")
 
 PROFILE_HINT = """
 Sort key is tottime: the time a function burns itself. Do not sort by cumtime
@@ -416,15 +422,18 @@ sit on top of everything and tell you nothing.
 
 The two cases above build the same number of rows from 4 keys and from 998. Any
 function whose tottime differs between them is per-key cost, and per-key cost is
-what is left to win. Pass a label substring to profile a different case.
+what is left to win. Check the "rows built" figure in each header before you
+trust this: if the counts differ, the difference is not per-key cost. Each case
+runs once unprofiled first, so one-time setup work is not blamed on the first
+case. Pass a label substring to profile a different case.
 """.strip()
 
 
 def nested_list_field(depth):
-    """Return a ListField nested ``depth`` levels deep over a CharField."""
+    """Return a SequenceField nested ``depth`` levels deep over a CharField."""
     field = forms.CharField(required=False)
     for _ in range(depth):
-        field = nestingdolls.ListField(field, required=False)
+        field = nestingdolls.SequenceField(field, required=False)
     return field
 
 
@@ -449,7 +458,7 @@ class MappingWrappedForm(forms.Form):
     class InnerForm(forms.Form):
         values = nested_list_field(2)
 
-    value = nestingdolls.DictField(InnerForm, required=False)
+    value = nestingdolls.MappingField(InnerForm, required=False)
 
 
 class EightSiblingsForm(forms.Form):
@@ -518,12 +527,16 @@ class Case:
     # The error code the user must see. None means the case is about bounded
     # work rather than a particular verdict.
     expect: str | None = "too_many_forms"
+    # Unrelated keys sent with the claim. They add per-key scan cost and no rows.
+    padding: int = 0
 
     @property
     def payload(self):
         payload = {}
         for prefix in self.prefixes:
             payload.update(amplify(prefix, self.totals))
+        for index in range(self.padding):
+            payload[f"pad-{index}"] = "x"
         return payload
 
     @property
@@ -545,7 +558,7 @@ def amplify(prefix, totals):
         payload[f"{node}-{INITIAL_FORM_COUNT}"] = "0"
         if level + 1 < len(totals):
             for index in range(total):
-                emit(f"{node}-{index}", level + 1)
+                emit(f"{node}-{index}-value", level + 1)
 
     emit(prefix, 0)
     return payload
@@ -562,10 +575,19 @@ def rows_claimed(totals):
 
 
 CASES = (
-    # The cheapest claim, and the widest claim a request can carry. Both ask
-    # for about the same number of rows, so both must cost about the same.
+    # The cheapest claim, and the widest claim a request can carry. The widest
+    # builds only its outer rows before the first overdraw aborts; the padded
+    # claim builds the same one row as the cheapest from as many keys as the widest.
     Case("2 levels, 1x2000 concentrated", "/two-clean/", (1, BUDGET), 2 * BUDGET, 5.0),
     Case("2 levels, 498x2000 spread", "/two-clean/", (498, BUDGET), 2 * BUDGET, 5.0),
+    Case(
+        "2 levels, 1x2000 padded to 998 keys",
+        "/two-clean/",
+        (1, BUDGET),
+        2 * BUDGET,
+        5.0,
+        padding=994,
+    ),
     # The entry points that reach rows before cleaning does.
     Case(
         "2 levels, 498x2000, has_changed first",
@@ -708,7 +730,7 @@ def legitimate_baseline(client):
     payload = amplify("values", (20, 20))
     for outer in range(20):
         for inner in range(20):
-            payload[f"values-{outer}-{inner}"] = f"r{outer}c{inner}"
+            payload[f"values-{outer}-value-{inner}-value"] = f"r{outer}c{inner}"
     ROWS_BUILT[0] = 0
     start = time.perf_counter()
     response = client.post("/two-clean/", payload)
@@ -807,13 +829,13 @@ def counting_rows():
 
 def profile_case(client, case, rows=10):
     """Print the functions that burn the most time serving one case."""
+    payload = case.payload
     ROWS_BUILT[0] = 0
     profiler = cProfile.Profile()
-    profiler.runctx("client.post(case.url, case.payload)", globals(), locals())
+    profiler.runctx("client.post(case.url, payload)", globals(), locals())
     print()
     print(
-        f"===== {case.label}: {len(case.payload)} keys, "
-        f"{ROWS_BUILT[0]:,} rows built ====="
+        f"===== {case.label}: {len(payload)} keys, {ROWS_BUILT[0]:,} rows built ====="
     )
     pstats.Stats(profiler).sort_stats("tottime").print_stats(rows)
 
@@ -838,6 +860,11 @@ def main(argv=None):
                 for case in CASES:
                     print(f"  {case.label}")
                 return 2
+            # One-time work (regex compiles, template loading, lazy imports)
+            # lands on whichever case runs first. Run every case once unprofiled
+            # so no profile carries it.
+            for case in cases:
+                client.post(case.url, case.payload)
             for case in cases:
                 profile_case(client, case)
             print(PROFILE_HINT)

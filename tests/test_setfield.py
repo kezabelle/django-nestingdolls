@@ -44,6 +44,41 @@ class SetFieldTestCase(CompositeFieldTestCase):
         field = nestingdolls.SetField(forms.IntegerField(), max_length=1)
         self.assertEqual(field.clean(["1", "1"]), {1})
 
+    def test_literal_initial_counts_members_when_the_field_cleans(self) -> None:
+        """A literal initial meets ``max_length`` the way a callable initial does.
+
+        Only the child ``clean`` knows which rows become one member:
+        ``["1", 1]`` is one integer.
+        """
+        moment = ["2026-10-11", "12:30"]
+        cases = (
+            (forms.IntegerField(), [1, 1], {1}),
+            (forms.IntegerField(), ["1", 1], {1}),
+            (
+                forms.SplitDateTimeField(),
+                [moment, list(moment)],
+                {forms.SplitDateTimeField().clean(moment)},
+            ),
+        )
+        for child_field, initial, expected in cases:
+            with self.subTest(initial=initial):
+                literal = nestingdolls.SetField(
+                    child_field, max_length=1, initial=initial
+                )
+                deferred = nestingdolls.SetField(
+                    child_field, max_length=1, initial=initial.copy
+                )
+
+                self.assertEqual(literal.clean(literal.initial), expected)
+                self.assertEqual(deferred.clean(deferred.initial()), expected)
+
+        distinct = nestingdolls.SetField(
+            forms.IntegerField(), max_length=1, initial=[1, 2]
+        )
+        with self.assertRaises(ValidationError) as context:
+            distinct.clean(distinct.initial)
+        self.assertEqual(context.exception.code, "max_length")
+
     def test_client_deduplicates_before_cardinality_validation(self) -> None:
         """Test client deduplicates before cardinality validation."""
 
@@ -53,7 +88,10 @@ class SetFieldTestCase(CompositeFieldTestCase):
                 {
                     f"values-{TOTAL_FORM_COUNT}": str(len(values)),
                     f"values-{INITIAL_FORM_COUNT}": "0",
-                    **{f"values-{index}": value for index, value in enumerate(values)},
+                    **{
+                        f"values-{index}-value": value
+                        for index, value in enumerate(values)
+                    },
                 },
             )
 
@@ -198,6 +236,71 @@ class SetFieldTestCase(CompositeFieldTestCase):
         self.assertIs(integer_field.has_changed({1}, ["1", "1", ""]), False)
         self.assertIs(integer_field.has_changed({1}, ["invalid"]), True)
         self.assertIs(json_field.has_changed({True}, ["1"]), True)
+
+    def test_retained_blank_member_is_a_change(self) -> None:
+        """A blank exact row that cleaning keeps as ``None`` is a change."""
+
+        class Form(forms.Form):
+            values = nestingdolls.SetField(
+                forms.IntegerField(required=False), required=False
+            )
+
+        form = Form({"values": [""]}, initial={"values": set()})
+
+        self.assertIs(form.is_valid(), True)
+        self.assertEqual(form.cleaned_data, {"values": {None}})
+        self.assertEqual(form.changed_data, ["values"])
+
+    def test_literal_initial_with_a_coercible_duplicate_reports_a_change(self) -> None:
+        """An initial ``"1"`` beside ``1`` is two raw members, so it reports a change.
+
+        Both members and the submission clean to ``{1}``. The extra change is the
+        safe direction. The next test shows why the members stay raw.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.SetField(
+                forms.IntegerField(), max_length=1, initial=["1", 1], required=False
+            )
+
+        form = Form({"values": ["1", "1"]})
+
+        self.assertIs(form.is_valid(), True)
+        self.assertEqual(form.cleaned_data, {"values": {1}})
+        self.assertEqual(form.changed_data, ["values"])
+
+    def test_json_members_that_clean_differently_are_not_merged(self) -> None:
+        """A raw member ``1`` and a raw member ``"1"`` are two members.
+
+        The initial ``["1", 1]`` cleans to ``{1}``. The submitted ``['"1"']``
+        cleans to ``{"1"}``, so a comparison that converted the initial members
+        first would see two equal members and miss the change.
+        """
+
+        class Form(forms.Form):
+            values = nestingdolls.SetField(forms.JSONField(), required=False)
+
+        form = Form({"values": ['"1"']}, initial={"values": ["1", 1]})
+
+        self.assertEqual(form.changed_data, ["values"])
+
+    def test_child_comparison_error_reports_a_change(self) -> None:
+        """A child comparison that raises ``ValidationError`` marks the set changed.
+
+        The submitted ``1`` pairs with the initial member, so only catching the
+        comparison error can report the change.
+        """
+
+        class RefusingField(forms.IntegerField):
+            def has_changed(self, initial: object, data: object) -> bool:
+                raise ValidationError("comparison refused")
+
+        class Form(forms.Form):
+            values = nestingdolls.SetField(RefusingField(), required=False)
+
+        form = Form({"values": ["1"]}, initial={"values": {1}})
+
+        self.assertEqual(form.changed_data, ["values"])
 
     def test_direct_disabled_and_unreadable_values_answer_without_member_pairing(
         self,

@@ -18,6 +18,8 @@
 
   // Hierarchical attributes embed the full prefix path in one token, so the
   // first-placeholder-per-token replacement is safe at every nesting level.
+  // `list` holds the ID of a <datalist> that a child widget can render in the
+  // row, so it is an ID reference like `for`.
   // aria-label carries a bare placeholder that belongs to its own level only,
   // so replace it at the level being cloned, never inside nested template
   // content, or an outer add would consume an inner button's placeholder.
@@ -25,6 +27,7 @@
     "name",
     "id",
     "for",
+    "list",
     "aria-describedby",
     "aria-labelledby",
     "aria-controls",
@@ -44,7 +47,7 @@
     "select:not([disabled]):not([hidden])",
     "textarea:not([disabled]):not([hidden])",
     "button:not([disabled]):not([hidden])",
-    '[tabindex]:not([tabindex="-1"]):not([hidden])',
+    '[tabindex]:not([tabindex="-1"]):not([disabled]):not([hidden])',
   ].join(", ");
 
   function requiredElement<E extends Element>(
@@ -166,12 +169,10 @@
     return rowCount < maximum && nextIndex < absoluteMaximum;
   }
 
+  // The server writes 0 for an optional field, so every row can be removed.
   function minimumRows(root: HTMLElement): number {
-    if (root.dataset.sequenceMinimum === undefined) {
-      return 0;
-    }
     return parseRequiredInteger(
-      root.dataset.sequenceMinimum,
+      root.dataset.sequenceMinimum ?? "0",
       "data-sequence-minimum",
     );
   }
@@ -291,7 +292,8 @@
     >("input, select, textarea, button")) {
       // The delete flag tells the server to remove this row. Keep it enabled.
       // Disable every other control so stale row values are not submitted.
-      if (!control.matches("[data-sequence-delete]")) {
+      // Nested delete flags too: the server drops the nested value with this row.
+      if (control !== deleteInput) {
         control.disabled = true;
       }
     }
@@ -429,17 +431,10 @@
     document.dispatchEvent(new Event("nestingdolls:sequence-enhance"));
   }
 
-  function enhanceWidgets(parent: ParentNode): void {
-    if (parent instanceof HTMLElement && parent.matches(sequenceWidgetSelector)) {
-      enhanceWidget(parent);
-    }
-    parent
+  function start(): void {
+    document
       .querySelectorAll<HTMLElement>(sequenceWidgetSelector)
       .forEach(enhanceWidget);
-  }
-
-  function start(): void {
-    enhanceWidgets(document);
   }
 
   // Framework integrations request enhancement through the public event. This

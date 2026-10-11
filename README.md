@@ -134,10 +134,10 @@ submission = QueryDict(
     'order-items-INITIAL_FORMS=0&'
     'order-items-MIN_NUM_FORMS=0&'
     'order-items-MAX_NUM_FORMS=1000&'
-    'order-items-0-product_id=42&'
-    'order-items-0-quantity=2&'
-    'order-items-1-product_id=73&'
-    'order-items-1-quantity=1'
+    'order-items-0-value-product_id=42&'
+    'order-items-0-value-quantity=2&'
+    'order-items-1-value-product_id=73&'
+    'order-items-1-value-quantity=1'
 )
 
 form = CheckoutForm(submission)
@@ -154,9 +154,9 @@ assert form.cleaned_data == {
 }
 ```
 
-See the hand-off? `IntegerField` turns `order-items-0-quantity` from a request
-string into an integer. `CheckoutForm` then returns one `order` value ready for
-order code. No reconstruction helper, properly nested into conceptual
+See the hand-off? `IntegerField` turns `order-items-0-value-quantity` from a
+request string into an integer. `CheckoutForm` then returns one `order` value
+ready for order code. No reconstruction helper, properly nested into conceptual
 namespaces, less hunting around hopefully.
 
 ### Render it
@@ -193,7 +193,7 @@ saved_order = {
 form = CheckoutForm(initial={'order': saved_order})
 ```
 
-`order-items-0-product_id` is an HTTP submission name. It only exists after
+`order-items-0-value-product_id` is an HTTP submission name. It only exists after
 Django has rendered and named real controls. `initial` wants ordinary Python
 data, from before that whole naming circus starts.
 
@@ -452,7 +452,6 @@ It should support integration out of the box with:
 - [Unpoly](https://unpoly.com/)
 - [swup](https://swup.js.org/)
 - [µJS](https://mujs.org/)
-- [Taxi.js](https://taxi.js.org/)
 
 at least for the simple configuration cases.
 
@@ -465,6 +464,17 @@ but it does not tell the widget. The app installs a small wrapper around
 `BaseForm.render`, `__str__`, and `__html__` so composite wrappers can choose
 the matching layout. Custom form templates go straight through Django's usual
 rendering path.
+
+### Group names in `as_p()`, `as_ul()`, and `as_table()`
+
+`as_div()` names a composite with Django's `<fieldset>` and `<legend>`. The
+other layouts have no legend, so the group takes its name from the field
+label. The label gets the id `<field id>_label`. A sibling field named
+`<name>_label` would collide with it, in the same way as with Django's
+`_helptext` ids. With `auto_id=False` there are no ids, so the group has no
+generated name, just as `aria-describedby` is not set. An `aria-label` or
+`aria-labelledby` that you give the widget is always kept. A composite that is a
+`SequenceField` row child gets no generated name; the named sequence group holds it.
 
 ### On set behaviour...
 

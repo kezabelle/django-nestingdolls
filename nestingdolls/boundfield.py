@@ -12,18 +12,14 @@ from django.utils.datastructures import MultiValueDict
 from django.utils.functional import cached_property
 
 from nestingdolls.errors import InvalidInitialValueError, ItemValidationError
-from nestingdolls.widgets import (
-    CompositeWidget,
-    MappingWidget,
-    SequenceWidget,
-    row_value_name,
-)
+from nestingdolls.patches import FormLayout
+from nestingdolls.widgets import CompositeWidget, MappingWidget, SequenceWidget
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from django.core.files.uploadedfile import UploadedFile
-    from django.forms import BaseForm, BaseFormSet, Field
+    from django.forms import BaseForm, Field
     from django.forms.boundfield import BoundWidget
     from django.forms.utils import ErrorList
     from django.forms.widgets import Widget
@@ -39,18 +35,16 @@ class CompositeBoundField(BoundField):
 
     field: CompositeField
 
-    @cached_property
+    @property
     def errors(self) -> ErrorList:
-        """Return only errors owned by the outer composite field.
+        """Return the errors that belong to the outer composite field.
 
-        An item error belongs to one child. The subform or the row renders
-        that error next to the input that caused it. This method removes
-        child item errors from the outer field, so the user does not see
-        the same problem twice. ``super().errors`` holds every recorded
-        error, child item errors included.
+        A visible composite hides child item errors here. Its subform or rows
+        already show each one next to its input, so the user sees it once.
+        A hidden composite renders no input, so it keeps them.
         """
         errors = super().errors
-        if not errors:
+        if not errors or self.is_hidden:
             return errors
         stored = errors.as_data()
         field_errors = [
@@ -67,12 +61,10 @@ class CompositeBoundField(BoundField):
         )
 
     def css_classes(self, extra_classes: str | Iterable[str] | None = None) -> str:
-        """Return CSS classes for outer and child errors.
+        """Return Django's CSS classes, plus the form error class for child errors.
 
-        Child forms and rows show child errors. This field removes them from
-        ``self.errors`` to prevent duplicate error text. If the form has an
-        error for this field but ``self.errors`` is empty, add the form error
-        CSS class. Django then handles required and extra classes.
+        Child item errors are not in ``errors``. Add the form error class when
+        the form has an error for this field but ``errors`` is empty.
         """
         if (
             self.form.errors.get(self.name)
@@ -110,7 +102,9 @@ class CompositeBoundField(BoundField):
             if only_initial:
                 # Django propagates a hidden initial only when the exact
                 # html_initial_name key was submitted. A composite hidden
-                # initial spans many keys, so rebuild it here instead.
+                # initial spans many keys, so rebuild it here instead. Its
+                # child Form or row formset uses Django's default auto_id and
+                # renderer, not those of the outer form.
                 name = self.html_initial_name
                 if widget.value_omitted_from_data(
                     self.form.data, self.form.files, name
@@ -125,31 +119,82 @@ class CompositeBoundField(BoundField):
                 self.prepare_widget(widget)
         return super().as_widget(widget, attrs, only_initial)
 
+    @property
+    def label_id(self) -> str:
+        """Return the id of this field's label, or an empty string without one."""
+        id_ = self.field.widget.attrs.get("id") or self.auto_id
+        return f"{id_}_label" if id_ and self.label else ""
+
+    def label_tag(
+        self,
+        contents: str | None = None,
+        attrs: dict[str, str | bool] | None = None,
+        label_suffix: str | None = None,
+        tag: str | None = None,
+    ) -> SafeString:
+        """Give the label an id, so a group without a fieldset can name itself.
+
+        A legend already names its fieldset, so it gets no id.
+        """
+        if tag != "legend" and self.label_id:
+            attrs = {"id": self.label_id, **(attrs or {})}
+        return super().label_tag(contents, attrs, label_suffix, tag)
+
+    def build_widget_attrs(
+        self, attrs: dict[str, str | bool], widget: Widget | None = None
+    ) -> dict[str, str | bool]:
+        """Add outer help, error, and name references when no fieldset holds them."""
+        attrs = super().build_widget_attrs(attrs, widget)
+        if FormLayout.current() is not FormLayout.div and not attrs.get(
+            "aria-describedby"
+        ):
+            described_by = self.aria_describedby
+            if described_by:
+                attrs["aria-describedby"] = described_by
+        named = {**(widget or self.field.widget).attrs, **attrs}
+        if (
+            FormLayout.current() is not FormLayout.div
+            and self.label_id
+            and not (named.get("aria-label") or named.get("aria-labelledby"))
+        ):
+            attrs["aria-labelledby"] = self.label_id
+        return attrs
+
     def prepare_widget(self, widget: CompositeWidget) -> None:
         """Put the submitted state this render needs on the widget."""
         widget.render_state = widget.RenderState()
 
-    def _has_changed(self) -> bool:
-        """Read hidden composite initial values through the composite widget.
+    def has_row_changes(self, initial: object) -> bool:  # noqa: ARG002
+        """Report a nested change that ``field.has_changed()`` cannot see.
 
-        This mirrors ``BoundField._has_changed`` with ``from_hidden_initial``
-        in place of ``to_python``. The ``disabled`` early return must stay:
-        a disabled field reports no change before the conversion can raise.
+        An example is a deleted row. Nested composite fields override this.
+        """
+        return False
+
+    def _has_changed(self) -> bool:
+        """Compare the submitted value with the initial value.
+
+        With ``show_hidden_initial``, read the initial value from the hidden
+        inputs. A disabled field reports no change before a conversion can raise.
         """
         if self.field.disabled:
             return False
-        if not self.field.show_hidden_initial:
-            return super()._has_changed()  # type: ignore[misc, no-any-return]
-        widget = self.field.hidden_widget()
-        try:
-            initial = self.field.from_hidden_initial(
-                widget.value_from_datadict(
-                    self.form.data, self.form.files, self.html_initial_name
+        initial: object
+        if self.field.show_hidden_initial:
+            widget = self.field.hidden_widget()
+            try:
+                initial = self.field.from_hidden_initial(
+                    widget.value_from_datadict(
+                        self.form.data, self.form.files, self.html_initial_name
+                    )
                 )
-            )
-        except ValidationError:
-            return True
-        return self.field.has_changed(initial, self.data)
+            except ValidationError:
+                return True
+        else:
+            initial = self.initial
+        return self.field.has_changed(initial, self.data) or self.has_row_changes(
+            initial
+        )
 
 
 class ValueBoundField(BoundField):
@@ -216,10 +261,12 @@ class MappingBoundField(CompositeBoundField):
         widget = self.field.widget
         if widget.has_child_keys(self.form.data, self.form.files, self.html_name):
             return True
-        if self.html_name in self.form.data:
-            return isinstance(self.form.data.get(self.html_name), Mapping)
-        if self.html_name in self.form.files:
-            return isinstance(self.form.files.get(self.html_name), Mapping)
+        exact_data = self.form.data.get(self.html_name)
+        exact_files = self.form.files.get(self.html_name)
+        if isinstance(exact_data, Mapping) or isinstance(exact_files, Mapping):
+            return True
+        if self.html_name in self.form.data or self.html_name in self.form.files:
+            return False
         return (
             isinstance(self.initial, dict)
             and bool(self.initial)
@@ -229,14 +276,13 @@ class MappingBoundField(CompositeBoundField):
     @cached_property
     def subform(self) -> BaseForm:
         """Return the child Form for the clean step and for the render."""
-        is_bound = self.is_bound_subform
-        initial = self.initial
         data: Mapping[str, object] | None = None
         files: Mapping[str, object] | None = None
-        if is_bound:
+        if self.is_bound_subform:
             data, files = self.field.widget.expand_exact_inputs(
                 self.form.data, self.form.files, self.html_name
             )
+        initial = self.initial
         subform = self.field.form_class(
             data=data,
             files=files,  # type: ignore[arg-type]  # Django accepts a Mapping here.
@@ -271,6 +317,20 @@ class MappingBoundField(CompositeBoundField):
             return super()._has_changed()
         return self.subform.has_changed()
 
+    def has_row_changes(self, initial: object) -> bool:
+        """Find changes in nested composite child fields."""
+        if self.field.disabled:
+            return False
+        members = self.field.initial_value(initial)
+        subform = self.subform
+        for name in subform.fields:
+            child = subform[name]
+            if isinstance(child, CompositeBoundField) and child.has_row_changes(
+                members.get(name)
+            ):
+                return True
+        return False
+
     def prepare_widget(self, widget: CompositeWidget) -> None:
         """Give the mapping widget the child Form that holds the bound data."""
         if not isinstance(widget, MappingWidget):
@@ -282,23 +342,6 @@ class MappingBoundField(CompositeBoundField):
         widget.render_state = widget.RenderState(
             subform=self.subform, initial_error=initial_error
         )
-
-    def value(self) -> object:
-        """Let the child Form, not Field.bound_data(), prepare bound values.
-
-        ``MappingWidget.get_context`` renders bound values from ``subform``
-        and does not read the value from this method. The base behavior
-        extracts the exact mapping to compute that unread value, and the
-        extraction builds a second row formset for each nested sequence.
-        Return the initial value instead to remove that unnecessary work.
-        ``SequenceBoundField.value`` makes the same decision for rows.
-
-        A scalar or missing submission binds no subform. Keep the base
-        behavior for it: the user must see that submission again.
-        """
-        if self.is_bound_subform:
-            return self.initial
-        return super().value()
 
 
 class SequenceBoundField(CompositeBoundField):
@@ -338,20 +381,21 @@ class SequenceBoundField(CompositeBoundField):
         return self.html_name in self.form.data or self.html_name in self.form.files
 
     @cached_property
-    def formset(self) -> BaseFormSet[BaseForm]:
+    def formset(self) -> SequenceWidget.RowFormSet:
         """Return the cached, prefix-aware row formset for cleaning and rendering."""
         widget = self.field.widget
         if self.field.disabled or (
             not self.has_exact_input and not self.is_bound_formset
         ):
-            return widget.new_formset(
+            formset = widget.new_formset(
                 initial=widget.default_initial_rows(self.initial),
                 prefix=self.html_name,
                 auto_id=self.form.auto_id,
                 error_class=self.form.error_class,
                 renderer=self.form.renderer,
-                form_kwargs={"use_required_attribute": False},
             )
+            formset.rows_disabled = self.field.disabled
+            return formset
 
         exact_values: list[object] | None = None
         with widget.submission_countdown.open(
@@ -379,8 +423,10 @@ class SequenceBoundField(CompositeBoundField):
                     ):
                         files = MultiValueDict(
                             {
-                                f"{self.html_name}-{index}": [file]
-                                for index, file in enumerate(value)
+                                key: [part]  # type: ignore[list-item]  # Files-only input holds uploads.
+                                for key, part in widget.exact_rows(
+                                    value, self.html_name
+                                ).items()
                             }
                         )
 
@@ -392,14 +438,16 @@ class SequenceBoundField(CompositeBoundField):
                 auto_id=self.form.auto_id,
                 error_class=self.form.error_class,
                 renderer=self.form.renderer,
-                form_kwargs={"use_required_attribute": False},
+                error_messages=self.field.error_messages,
                 # Generated exact-list rows already used this budget.
                 submission_total_form_count=(
                     len(exact_values) if exact_values is not None else None
                 ),
             )
             for form in formset.forms:
-                _ = form[row_value_name].data
+                child = form[widget.row_value_name]
+                if isinstance(child, CompositeBoundField):
+                    _ = child.data
         if countdown.overflowed:
             # The forged claim's rows were never finished. Replace them with a
             # bound zero-row formset, so no later reader can rebuild them:
@@ -414,7 +462,6 @@ class SequenceBoundField(CompositeBoundField):
                 auto_id=self.form.auto_id,
                 error_class=self.form.error_class,
                 renderer=self.form.renderer,
-                form_kwargs={"use_required_attribute": False},
                 submission_total_form_count=0,
             )
         self._submission_overflow = countdown.overflowed
@@ -436,7 +483,7 @@ class SequenceBoundField(CompositeBoundField):
             return self.field.widget.value_from_datadict(
                 self.form.data, self.form.files, self.html_name
             )
-        return [form[row_value_name].data for form in formset.forms]
+        return [form[self.field.widget.row_value_name].data for form in formset.forms]
 
     @property
     def submission_overflow(self) -> bool:
@@ -448,13 +495,40 @@ class SequenceBoundField(CompositeBoundField):
         _ = self.formset
         return self._submission_overflow
 
+    def has_row_changes(self, initial: object) -> bool:
+        """Find deletions and nested changes hidden by equal cleaned values."""
+        if self.field.disabled:
+            return False
+        if self.submission_overflow:
+            return True
+        field = self.field
+        formset = self.formset
+        rows = field.initial_values(initial, limit=field.limits.absolute_max)
+        # Cleaning keeps every exact row, even one that the child calls unchanged.
+        # A bound formset without browser rows holds an exact list. It builds
+        # at most absolute_max rows, so compare the submitted count.
+        if (
+            formset.is_bound
+            and not self.is_bound_formset
+            and formset.submission_total_form_count > len(rows)
+        ):
+            return True
+        # Only initial rows can be deleted, and deleted_forms validates every row.
+        if not rows:
+            return False
+        deleted_forms = set(formset.deleted_forms)
+        for form, row in zip(formset.forms, rows, strict=False):
+            child = form[self.field.widget.row_value_name]
+            if form in deleted_forms or (
+                isinstance(child, CompositeBoundField) and child.has_row_changes(row)
+            ):
+                return True
+        return False
+
     def prepare_widget(self, widget: CompositeWidget) -> None:
         """Give the sequence widget the formset that owns row state."""
         if not isinstance(widget, SequenceWidget):
             super().prepare_widget(widget)
-            return
-        if self.field.disabled:
-            widget.render_state = widget.RenderState()
             return
         widget.render_state = widget.RenderState(
             formset=self.formset, submission_overflow=self.submission_overflow
@@ -462,6 +536,8 @@ class SequenceBoundField(CompositeBoundField):
 
     def value(self) -> object:
         """Let the row formset, not Field.prepare_value(), prepare row values."""
+        if self.form.is_bound:
+            return self.field.bound_data(self.data, self.initial)
         return self.initial
 
     @cached_property
@@ -489,27 +565,3 @@ class SequenceBoundField(CompositeBoundField):
                 for item in value
             ]
         return value
-
-    def _has_changed(self) -> bool:
-        """Report exact-input edits and row-formset deletions."""
-        if self.field.disabled:
-            return False
-        if self.has_exact_input and not self.is_bound_formset:
-            changed = self.field.has_changed(self.initial, self.data)
-        else:
-            changed = super()._has_changed()
-        if changed or self.submission_overflow:
-            return True
-        if not self.initial:
-            # Only the deletion of an initial row is a change, and this
-            # field has no initial rows. Django's deleted_forms validates
-            # every row form before it answers, and here that validation
-            # cannot change the answer. Return early to remove that
-            # unnecessary work, partly for performance and efficiency.
-            return False
-        deleted_forms = set(self.formset.deleted_forms)
-        return any(
-            index < len(self.initial)
-            for index, form in enumerate(self.formset.forms)
-            if form in deleted_forms
-        )

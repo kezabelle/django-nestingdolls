@@ -6,6 +6,7 @@ import unittest
 from typing import ClassVar
 
 from django import forms
+from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.http import QueryDict
 from django.test import override_settings
@@ -192,11 +193,7 @@ class MappingFieldSubmissionChildValidationTestCase(CompositeFieldTestCase):
     """
 
     def test_item_error_params_carry_the_documented_locator(self) -> None:
-        """A child failure keeps its locator in ``params``.
-
-        README.md documents this exact dict as the machine-readable route,
-        because ``ErrorDict.as_json()`` keeps only ``message`` and ``code``.
-        """
+        """A child failure keeps the locator that README.md documents in ``params``."""
 
         class Point(forms.Form):
             x = forms.CharField()
@@ -209,7 +206,11 @@ class MappingFieldSubmissionChildValidationTestCase(CompositeFieldTestCase):
 
         self.assertFormInvalid(form)
         error = form.errors.as_data()["point"][0]
+        self.assertIsInstance(error, nestingdolls.ItemValidationError)
         self.assertEqual(error.code, "item_invalid")
+        self.assertEqual(error.item, "x")
+        self.assertEqual(error.child_code, "required")
+        self.assertEqual(error.child_message, "This field is required.")
         self.assertEqual(
             error.params,
             {
@@ -270,6 +271,44 @@ class MappingFieldSubmissionChildValidationTestCase(CompositeFieldTestCase):
 
         self.assertFormValid(form)
         self.assertEqual(form.cleaned_data["point"], {})
+
+    def moment_form(self, data: object) -> forms.Form:
+        """Return a form with one mapping whose child is a split date-time."""
+
+        class Moment(forms.Form):
+            happened = forms.SplitDateTimeField()
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(Moment)
+
+        return Form(data)
+
+    def assertMomentCleansToOneDatetime(self, form: forms.Form) -> None:  # noqa: D102
+        self.assertFormValid(form)
+        self.assertEqual(
+            form.cleaned_data["point"]["happened"].replace(tzinfo=None).isoformat(),
+            "2026-01-02T03:04:00",
+        )
+
+    def test_prefixed_compound_child_cleans_to_one_datetime(self) -> None:
+        """Prefixed input reaches each part of the child's MultiWidget."""
+        self.assertMomentCleansToOneDatetime(
+            self.moment_form(
+                QueryDict("point-happened_0=2026-01-02&point-happened_1=03:04")
+            )
+        )
+
+    def test_plain_mapping_compound_child_cleans_to_one_datetime(self) -> None:
+        """A whole compound value in a plain dict reaches each part of the widget."""
+        self.assertMomentCleansToOneDatetime(
+            self.moment_form({"point": {"happened": ["2026-01-02", "03:04"]}})
+        )
+
+    def test_multi_value_mapping_compound_child_cleans_to_one_datetime(self) -> None:
+        """A ``MultiValueDict`` holds the compound as the member's one value."""
+        nested = MultiValueDict[str, object]({"happened": [("2026-01-02", "03:04")]})
+
+        self.assertMomentCleansToOneDatetime(self.moment_form({"point": nested}))
 
 
 class MappingFieldSubmissionDeveloperInputTestCase(CompositeFieldTestCase):
@@ -446,6 +485,31 @@ class MappingFieldSubmissionBindingTestCase(CompositeFieldTestCase):
         error = form.errors.as_data()["point"][0]
         self.assertEqual(error.code, "item_invalid")
         self.assertEqual(error.child_code, "invalid")
+
+    def test_validators_run_on_the_compressed_empty_mapping(self) -> None:
+        """A validator judges the output an empty optional mapping compresses to."""
+
+        def reject_materialized(value: object) -> None:
+            if value == "materialized":
+                raise ValidationError("Materialized output is not allowed.")
+
+        class EmptyChildForm(forms.Form):
+            pass
+
+        class Form(forms.Form):
+            point = nestingdolls.MappingField(
+                EmptyChildForm,
+                required=False,
+                output=lambda data: "materialized",
+                validators=[reject_materialized],
+            )
+
+        form = Form({})
+
+        self.assertFormInvalid(form)
+        self.assertEqual(
+            list(form.errors["point"]), ["Materialized output is not allowed."]
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

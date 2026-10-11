@@ -1,7 +1,4 @@
-{% comment %}
-Django has no as_p path without a p tag. A p element cannot contain another p.
-This template uses spans and the Django field loop.
-{% endcomment %}
+{% comment %}Django has no p-free as_p, so spans copy its field loop without nested p tags.{% endcomment %}
 {% spaceless %}
 {% if widget.is_hidden %}
   {% for field in widget.hidden_fields %}{{ field }}{% endfor %}
@@ -15,10 +12,12 @@ This template uses spans and the Django field loop.
   {% include "nestingdolls/shared/errors.html" with errors=widget.non_field_errors line_break=True only %}
   {% for field in widget.hidden_fields %}{{ field }}{% endfor %}
   {% for field in widget.visible_fields %}
-    {% include "nestingdolls/shared/field_label.html" with field=field only %}
-    {% include "nestingdolls/shared/errors.html" with errors=field.errors only %}
-    {{ field }}
-    {% include "nestingdolls/shared/help_text.html" with field=field tag="span" only %}
+    <span{% with classes=field.css_classes %}{% if classes %} class="{{ classes }}"{% endif %}{% endwith %}>
+      {% include "nestingdolls/shared/field_label.html" with field=field only %}
+      {% include "nestingdolls/shared/errors.html" with errors=field.errors only %}
+      {{ field }}
+      {% include "nestingdolls/shared/help_text.html" with field=field tag="span" only %}
+    </span>
     {% if not forloop.last %}<br>{% endif %}
   {% endfor %}
 </span>

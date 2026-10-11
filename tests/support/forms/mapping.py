@@ -237,7 +237,9 @@ class MappingRecordRowForm(forms.Form):
 class SequenceOfMappingRecordsForm(forms.Form):
     """This form has a record mapping list named records."""
 
-    records = nestingdolls.ListField(nestingdolls.DictField(MappingRecordRowForm))
+    records = nestingdolls.SequenceField(
+        nestingdolls.MappingField(MappingRecordRowForm)
+    )
 
 
 class MappingRecordPayloadForm(forms.Form):

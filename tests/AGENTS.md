@@ -110,8 +110,10 @@ database fixtures. Name files `test_*.py`, classes `*TestCase`, and methods
 
 ## Writing sequence-controller tests
 
-`test_sequence.mjs` is plain `node:test` and `jsdom`. It evaluates the committed
-`sequence.js` with `dom.window.eval`; do not convert it to TypeScript.
+`test_sequence.mjs` is plain `node:test` and `jsdom`. It compiles the committed
+`sequence.js` once with `vm.Script`, named by its absolute path so node
+coverage maps to it, and runs it in each jsdom window through
+`runController()`. Do not convert it to TypeScript.
 
 - Assert DOM state and dispatched events; the script has no test API.
 - Test the host `nestingdolls:sequence-enhance` signal after inserting a
@@ -129,6 +131,7 @@ A fresh clone needs `npm ci` before JavaScript checks.
 | --- | --- |
 | `make test` | Runs all Python tests under coverage with deprecations as errors. |
 | `make jstest` | Runs jsdom tests against committed `sequence.js`. |
+| `make jscov` | Runs the jsdom tests with node coverage of `sequence.js`. Not part of `check`. |
 | `make check` | Runs the non-mutating CI gate. |
 
 For a focused Python test, preserve `make test`'s warning policy:

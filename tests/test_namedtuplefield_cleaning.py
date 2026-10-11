@@ -62,7 +62,7 @@ class NamedTupleFieldCleaningTestCase(CompositeFieldTestCase):
         form = RequiredNamedTuplePointForm({})
 
         self.assertFormInvalid(form)
-        self.assertIn("point", form.errors)
+        self.assertFormErrorCode(form, "point", "required")
 
     def test_optional_field_cleans_missing_submission_to_none(self) -> None:
         """An optional field with no submitted value cleans to None."""

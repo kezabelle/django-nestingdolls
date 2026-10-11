@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import inspect
 from collections import namedtuple
 from collections.abc import Callable, Collection, Mapping, Sequence
 from itertools import islice
@@ -14,6 +15,7 @@ from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.forms import BaseForm, BaseFormSet, Field
 from django.forms.fields import FileField
 from django.forms.formsets import DEFAULT_MAX_NUM, DEFAULT_MIN_NUM, DELETION_FIELD_NAME
+from django.forms.widgets import NumberInput
 from django.utils.functional import Promise, cached_property
 from django.utils.translation import gettext_lazy as _
 from django.utils.translation import ngettext_lazy
@@ -30,12 +32,7 @@ from nestingdolls.errors import (
     SequenceInputValidationError,
     TooManyFormsValidationError,
 )
-from nestingdolls.widgets import (
-    CompositeWidget,
-    MappingWidget,
-    SequenceWidget,
-    row_value_name,
-)
+from nestingdolls.widgets import CompositeWidget, MappingWidget, SequenceWidget
 
 __all__ = [
     "DataclassField",
@@ -256,8 +253,11 @@ class MappingField(CompositeField):
         """
         value = self.to_python(value)
         if not value:
-            cleaned: dict[str, object] = super().clean(value)
-            return self.compress(cleaned)
+            # The empty submission decides "required"; the output meets validators.
+            self.validate(value)
+            result = self.compress(value)
+            self.run_validators(result)
+            return result
         return self._clean_child_form(
             self.form_class(
                 data=value,
@@ -351,6 +351,14 @@ class NamedTupleField(MappingField):
             raise ImproperlyConfigured(
                 "form_class fields must match output._fields exactly"
             )
+        try:
+            inspect.signature(output).bind(**dict.fromkeys(self._declared_field_names))
+        except TypeError as error:
+            message = (
+                "output argument for NamedTupleField must accept the form_class "
+                f"fields as keyword arguments: {error}"
+            )
+            raise ImproperlyConfigured(message) from error
         return output
 
     def initial_value(self, value: object) -> dict[str, object]:
@@ -393,6 +401,14 @@ class DataclassField(MappingField):
             raise ImproperlyConfigured(
                 "form_class fields must match output fields exactly"
             )
+        try:
+            inspect.signature(output).bind(**dict.fromkeys(self._declared_field_names))
+        except TypeError as error:
+            message = (
+                "output argument for DataclassField must accept the form_class "
+                f"fields as keyword arguments: {error}"
+            )
+            raise ImproperlyConfigured(message) from error
         return output
 
     def initial_value(self, value: object) -> dict[str, object]:
@@ -405,8 +421,15 @@ class DataclassField(MappingField):
         return super().initial_value(value)
 
     def compress(self, data: dict[str, object]) -> object | None:
-        """Build a dataclass from cleaned child values."""
-        return self._compress_with_defaults(data)
+        """Build a dataclass from cleaned child values.
+
+        A ``ValueError`` from the dataclass becomes an error on this field,
+        so a user's submission cannot raise it out of ``is_valid()``.
+        """
+        try:
+            return self._compress_with_defaults(data)
+        except ValueError as error:
+            raise ValidationError(str(error), code="invalid") from error
 
 
 class SequenceField(CompositeField):
@@ -432,6 +455,9 @@ class SequenceField(CompositeField):
 
     bound_field_class: type[SequenceBoundField] = SequenceBoundField
     widget: SequenceWidget
+    # True when each initial row is one cleaned value. A set is False,
+    # because cleaning can merge equal rows into one member.
+    initial_rows_are_values: bool = True
 
     @dataclasses.dataclass(frozen=True, slots=True)
     class Limits:
@@ -535,7 +561,11 @@ class SequenceField(CompositeField):
             # Limits does not know about `required`, so this check belongs
             # here.
             raise ValueError("max_length=0 requires required=False")
-        if initial is not None and not callable(initial):
+        if (
+            initial is not None
+            and not callable(initial)
+            and self.initial_rows_are_values
+        ):
             try:
                 initial_values = self.initial_values(initial)
             except InvalidInitialValueError:
@@ -550,6 +580,16 @@ class SequenceField(CompositeField):
         # because a field holds its widget and its own configuration.
         self.child_field = copy.deepcopy(child_field)
         self.child_field.localize = localize
+        child_widget = self.child_field.widget
+        child_widget.is_localized = localize
+        if (
+            localize
+            and type(self.child_field).widget is NumberInput
+            and type(child_widget) is NumberInput
+        ):
+            # A browser shows a localized number such as 1,5 in a number
+            # input as blank. Django's localized IntegerField uses text too.
+            child_widget.input_type = "text"
         bound_field_class = bound_field_class or self.bound_field_class
         if not issubclass(bound_field_class, SequenceBoundField):
             raise TypeError("bound_field_class must inherit from SequenceBoundField")
@@ -598,10 +638,8 @@ class SequenceField(CompositeField):
         """Return the initial value as a list, or raise ``InvalidInitialValueError``."""
         if value is None or value == "":
             return []
-        if (
-            isinstance(value, Collection)
-            and not isinstance(value, Mapping)
-            and not isinstance(value, (str, bytes, bytearray))
+        if isinstance(value, Collection) and not isinstance(
+            value, (Mapping, str, bytes, bytearray)
         ):
             if limit is not None:
                 # Read no more than limit rows, because a large collection must
@@ -709,7 +747,7 @@ class SequenceField(CompositeField):
                 form.empty_permitted and not form.has_changed()
             ):
                 continue
-            cleaned_data.append(form.cleaned_data[row_value_name])
+            cleaned_data.append(form.cleaned_data[self.widget.row_value_name])
         result = self.compress(cleaned_data)
         self.validate(result)
         self.run_validators(result)
@@ -767,7 +805,16 @@ class SequenceField(CompositeField):
             return values
 
     def has_changed(self, initial: object, data: object) -> bool:  # noqa: PLR0911
-        """Compare submitted rows using child-field change semantics."""
+        """Compare submitted rows using child-field change semantics.
+
+        The child compares each added row with ``None``, as Django does for one
+        value: ``CharField(required=False).has_changed(None, "")`` is false. So
+        a blank added row is no change here. Do not count length growth as a
+        change in this method: a bound form sends the browser rows of a row
+        formset through it, and cleaning drops their blank added rows.
+        ``SequenceBoundField.has_row_changes`` reports the exact rows that
+        cleaning keeps.
+        """
         if self.disabled:
             return False
         if isinstance(data, list) and len(data) > self.limits.absolute_max:
@@ -818,6 +865,8 @@ class SetField(SequenceField):
 
     collection_type: Callable[[list[object]], set[object] | frozenset[object]] = set
 
+    initial_rows_are_values = False
+
     def compress(self, data_list: list[object]) -> set[object] | frozenset[object]:
         """Return cleaned rows in the configured set type."""
         try:
@@ -827,7 +876,7 @@ class SetField(SequenceField):
                 self.error_messages["unhashable"], code="unhashable"
             ) from error
 
-    def has_changed(self, initial: object, data: object) -> bool:
+    def has_changed(self, initial: object, data: object) -> bool:  # noqa: PLR0911
         """Compare set members; anything ambiguous counts as a change.
 
         Pair each row with the member its converted value hashes to, then
@@ -838,6 +887,11 @@ class SetField(SequenceField):
         save. A coercing or compound child, whose converted rows never hash
         to a member (``TypedChoiceField``, ``MultipleChoiceField``),
         therefore reports changed.
+
+        A literal initial can hold two members that the child converts to one
+        (``"1"`` beside ``1``). The comparison keeps the raw members, so that
+        initial reports changed. Converting the members would merge two
+        different ``JSONField`` members (``1`` and ``"1"``) and hide a change.
         """
         if self.disabled:
             return False
@@ -859,9 +913,12 @@ class SetField(SequenceField):
                 member = paired.get(self.child_field.to_python(row), unmatched)
             except (TypeError, ValidationError):
                 return True
-            if self.child_field.has_changed(
-                None if member is unmatched else member, row
-            ):
+            try:
+                if self.child_field.has_changed(
+                    None if member is unmatched else member, row
+                ):
+                    return True
+            except ValidationError:
                 return True
             if member is not unmatched:
                 matched.add(member)
